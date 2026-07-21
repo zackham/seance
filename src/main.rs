@@ -1,4 +1,7 @@
+mod agency;
+mod agents;
 mod app;
+mod caps;
 mod control;
 mod ctl;
 mod daemon;

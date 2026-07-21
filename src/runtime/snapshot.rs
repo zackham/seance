@@ -157,6 +157,10 @@ pub struct GridSnapshot {
     pub mouse_mode: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub sgr_mouse: bool,
+    /// Who last wrote stdin to this PTY (`human` / `agent:x` / `cli` / `propose`).
+    /// Carried on JSON grid path; binary path also embeds it (SCG3 v2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_input_origin: Option<String>,
 }
 
 impl GridSnapshot {
@@ -179,6 +183,7 @@ impl GridSnapshot {
             app_cursor: false,
             mouse_mode: false,
             sgr_mouse: false,
+            last_input_origin: None,
         }
     }
 }
@@ -450,6 +455,7 @@ pub fn decode_grid_bin_onto(
         app_cursor: flags & 4 != 0,
         mouse_mode: flags & 8 != 0,
         sgr_mouse: flags & 16 != 0,
+        last_input_origin: None,
     })
 }
 
@@ -641,6 +647,7 @@ mod bin_tests {
             app_cursor: true,
             mouse_mode: false,
             sgr_mouse: false,
+            last_input_origin: None,
         }
     }
 

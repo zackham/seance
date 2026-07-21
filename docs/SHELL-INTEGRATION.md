@@ -33,8 +33,11 @@ Two files own the pieces that already exist:
   `CommandRecord`s (cap 500/pane), gpui-free and unit-tested. `begin` opens a
   record and returns its `seq`; `end` closes the most-recent-open record.
 
-The rest of this doc specifies what the **main agent still has to wire** into
-`control.rs`, `ctl.rs`, and `app.rs`/`pane.rs`. Nothing below is built yet.
+**Status (0.9.1):** the protocol ops, CLI, engine wiring, and event-bus
+emission (`cmd_start` / `cmd_end` with span ids) **are built**. The sections
+below remain useful as the contract. Remaining future work: OSC-133
+shell-agnostic markers (optional replacement for bash DEBUG traps), durable
+cmdlog across daemon handoff, jump-to-failed-command UI.
 
 ---
 

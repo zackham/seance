@@ -26,6 +26,8 @@ pub struct RemoteTerminal {
     /// Arc so the paint path can hold the grid without cloning thousands of cells.
     pub snapshot: Arc<GridSnapshot>,
     pub ghost: Option<Ghost>,
+    /// Who last wrote stdin — drives the causal left-gutter tint.
+    pub last_input_origin: Option<String>,
     client: Arc<GuiClient>,
     rev: u64,
     resize: Mutex<ResizeGate>,
@@ -37,6 +39,7 @@ impl RemoteTerminal {
             snapshot: Arc::new(GridSnapshot::empty(&slug)),
             slug,
             ghost: None,
+            last_input_origin: None,
             client,
             rev: 0,
             resize: Mutex::new(ResizeGate {
@@ -47,12 +50,21 @@ impl RemoteTerminal {
         }
     }
 
+    pub fn set_input_origin(&mut self, origin: String, cx: &mut Context<Self>) {
+        self.last_input_origin = Some(origin);
+        cx.notify();
+    }
+
     pub fn apply_snapshot(&mut self, snap: GridSnapshot, cx: &mut Context<Self>) {
         // Drop stale/duplicate frames (throttle + out-of-order socket).
         if snap.rev != 0 && snap.rev <= self.rev {
             return;
         }
         self.rev = snap.rev;
+        // Prefer explicit origin on the snap; never wipe a known origin with None.
+        if let Some(o) = &snap.last_input_origin {
+            self.last_input_origin = Some(o.clone());
+        }
         if let Some(g) = &snap.ghost {
             self.ghost = Some(Ghost {
                 id: g.id.clone(),

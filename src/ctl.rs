@@ -79,7 +79,17 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
             return 1;
         }
     };
-    let sub_args: Vec<String> = it.collect();
+    let mut sub_args: Vec<String> = it.collect();
+    // Client-side flag: after successful `new`, block until agent boot-ready.
+    let wait_ready = sub_args.iter().any(|a| a == "--wait-ready");
+    if wait_ready {
+        sub_args.retain(|a| a != "--wait-ready");
+    }
+    let scratch_cat = sub == "scratchpad" || sub == "pad";
+    let scratch_cat = scratch_cat && sub_args.iter().any(|a| a == "--cat");
+    if scratch_cat {
+        sub_args.retain(|a| a != "--cat");
+    }
 
     // Build the request (or handle help / a parse error).
     let request = match sub.as_str() {
@@ -173,16 +183,52 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
             Some(id) => Ok(ControlRequest::AskResult { id: id.clone(), scope: None, from: None }),
             None => Err("ask-result: expected ASK_ID".into()),
         },
+        "watch" => parse_watch(sub_args),
+        "whoami" => Ok(ControlRequest::Whoami {
+            scope: None,
+            from: None,
+        }),
+        "caps" => Ok(ControlRequest::Caps {
+            scope: None,
+            from: None,
+        }),
+        "grant" => parse_grant(sub_args),
+        "revoke" => parse_revoke(sub_args),
+        "policy" => parse_policy(sub_args),
+        "seize" => parse_seize(sub_args),
+        "release" => parse_release(sub_args),
+        "drive" | "drive-mode" => parse_drive(sub_args),
+        "doctor" => Ok(ControlRequest::Doctor { scope: None, from: None }),
+        "brief" => Ok(ControlRequest::Brief { scope: None, from: None }),
+        "roster" | "stage" => Ok(ControlRequest::Roster { scope: None, from: None }),
+        "note" => parse_note(sub_args),
+        "finish" => parse_finish(sub_args),
+        "wait" => {
+            // Client-side wait loop (not a single control op).
+            return run_wait(sub_args, scope, from, json_out);
+        },
         other => Err(format!("unknown subcommand '{other}' (try `seance ctl help`)")),
     };
 
     let request = match request {
-        Ok(r) => with_identity(r, scope, from.clone()),
+        Ok(r) => with_identity(r, scope.clone(), from.clone()),
+        Err(msg) if msg.starts_with("__help__\n") => {
+            print!("{}", msg.trim_start_matches("__help__\n"));
+            if !msg.ends_with('\n') {
+                println!();
+            }
+            return 0;
+        }
         Err(msg) => {
             eprintln!("seance ctl: {msg}");
             return 1;
         }
     };
+
+    // Streaming watch — special connection lifecycle.
+    if matches!(request, ControlRequest::Watch { .. }) {
+        return run_watch(&request, json_out);
+    }
 
     // Round-trip it over the socket.
     let response = match send_request(&request) {
@@ -317,7 +363,66 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
     }
 
     if response.ok {
-        print_ok_human(&sub, &response);
+        // pad --cat: body only (no path line) — one-hop verify.
+        if scratch_cat {
+            let path = response
+                .data
+                .as_ref()
+                .and_then(|d| {
+                    d.as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| d.get("path").and_then(|p| p.as_str()).map(|s| s.to_string()))
+                });
+            if let Some(path) = path {
+                match std::fs::read_to_string(&path) {
+                    Ok(body) => {
+                        print!("{body}");
+                        if !body.ends_with('\n') {
+                            println!();
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("seance ctl: scratchpad --cat: {e}");
+                        return 1;
+                    }
+                }
+            }
+        } else if !json_out {
+            print_ok_human(&sub, &response);
+        }
+        // A+ orchestrator: block until agent TUI is ready for inject.
+        if sub == "new" && wait_ready {
+            let slug = response
+                .data
+                .as_ref()
+                .and_then(|d| {
+                    d.get("slug")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| d.get("name").and_then(|v| v.as_str()))
+                        .map(|s| s.to_string())
+                        .or_else(|| d.as_str().map(|s| s.to_string()))
+                })
+                .unwrap_or_default();
+            if !slug.is_empty() {
+                if !json_out {
+                    eprintln!("waiting until '{slug}' is boot-ready…");
+                }
+                let code = run_wait(
+                    vec![
+                        slug,
+                        "--ready".into(),
+                        "--timeout".into(),
+                        "120".into(),
+                    ],
+                    scope.clone(),
+                    from.clone(),
+                    json_out,
+                );
+                if code != 0 {
+                    return code;
+                }
+            }
+        }
         0
     } else {
         eprintln!(
@@ -463,8 +568,8 @@ fn with_identity(
     match request {
         List { .. } => List { scope, from },
         New { name, cwd, command, workspace, file, .. } => New { name, cwd, command, workspace, file, scope, from },
-        Send { pane, text, submit, .. } => Send { pane, text, submit, scope, from },
-        SendRaw { pane, bytes_b64, .. } => SendRaw { pane, bytes_b64, scope, from },
+        Send { pane, text, submit, force, .. } => Send { pane, text, submit, force, scope, from },
+        SendRaw { pane, bytes_b64, force, .. } => SendRaw { pane, bytes_b64, force, scope, from },
         Read { pane, lines, .. } => Read { pane, lines, scope, from },
         Status { pane, .. } => Status { pane, scope, from },
         Kill { pane, .. } => Kill { pane, scope, from },
@@ -481,6 +586,99 @@ fn with_identity(
         StatusSet { state, note, pane, .. } => StatusSet { state, note, pane, scope, from },
         Ask { question, choices, .. } => Ask { question, choices, scope, from },
         AskResult { id, .. } => AskResult { id, scope, from },
+        Watch {
+            since_seq,
+            kinds,
+            pane,
+            actor,
+            catch_up,
+            ..
+        } => Watch {
+            since_seq,
+            kinds,
+            pane,
+            actor,
+            catch_up,
+            scope,
+            from,
+        },
+        Whoami { .. } => Whoami { scope, from },
+        Caps { .. } => Caps { scope, from },
+        CapsGrant {
+            principal,
+            cap,
+            workspace,
+            ttl_secs,
+            ..
+        } => CapsGrant {
+            principal,
+            cap,
+            workspace,
+            ttl_secs,
+            scope,
+            from,
+        },
+        CapsRevoke {
+            principal,
+            cap,
+            workspace,
+            ..
+        } => CapsRevoke {
+            principal,
+            cap,
+            workspace,
+            scope,
+            from,
+        },
+        PolicyGet { workspace, .. } => PolicyGet {
+            workspace,
+            scope,
+            from,
+        },
+        PolicySet {
+            mode, workspace, ..
+        } => PolicySet {
+            mode,
+            workspace,
+            scope,
+            from,
+        },
+        Seize { pane, as_owner, .. } => Seize { pane, as_owner, scope, from },
+        Release { pane, .. } => Release { pane, scope, from },
+        DriveMode { pane, mode, .. } => DriveMode { pane, mode, scope, from },
+        Doctor { .. } => Doctor { scope, from },
+        Brief { .. } => Brief { scope, from },
+        Roster { .. } => Roster { scope, from },
+        Note {
+            pane,
+            text,
+            append,
+            ..
+        } => Note {
+            pane,
+            text,
+            append,
+            scope,
+            from,
+        },
+        Finish {
+            pane,
+            body,
+            append,
+            status,
+            status_note,
+            empty_ok,
+            ..
+        } => Finish {
+            pane,
+            body,
+            append,
+            status,
+            status_note,
+            empty_ok,
+            scope,
+            from,
+        },
     }
 }
 
@@ -496,6 +694,7 @@ fn parse_new(args: Vec<String>) -> Result<ControlRequest, String> {
     let mut command: Option<String> = None;
     let mut workspace: Option<String> = None;
     let mut file: Option<String> = None;
+    let mut agent: Option<String> = None;
 
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
@@ -505,11 +704,19 @@ fn parse_new(args: Vec<String>) -> Result<ControlRequest, String> {
             "--command" => command = Some(take_value(&mut it, "--command")?),
             "--workspace" => workspace = Some(take_value(&mut it, "--workspace")?),
             "--file" => file = Some(take_value(&mut it, "--file")?),
+            "--agent" => agent = Some(take_value(&mut it, "--agent")?),
             other => return Err(format!("new: unexpected argument '{other}'")),
         }
     }
 
     let name = name.ok_or("new: --name is required")?;
+    if let Some(a) = agent {
+        if command.is_some() {
+            return Err("new: use either --agent or --command, not both".into());
+        }
+        let profile = crate::agents::resolve(&a)?;
+        command = Some(crate::agents::command_line(&profile));
+    }
     Ok(ControlRequest::New {
         name,
         cwd,
@@ -527,29 +734,170 @@ fn parse_new(args: Vec<String>) -> Result<ControlRequest, String> {
 /// joined with spaces into the text (so you don't have to quote the prompt).
 fn parse_send(args: Vec<String>) -> Result<ControlRequest, String> {
     let mut submit = true;
+    let mut force = false;
+    let mut file: Option<String> = None;
+    let mut stdin = false;
     let mut positionals: Vec<String> = Vec::new();
-
-    for arg in args {
+    let mut it = args.into_iter();
+    while let Some(arg) = it.next() {
         match arg.as_str() {
             "--no-submit" => submit = false,
             "--submit" => submit = true,
-            _ => positionals.push(arg),
+            "--force" => force = true,
+            "--file" => file = Some(it.next().ok_or("send: --file needs PATH")?),
+            "--stdin" => stdin = true,
+            "--help" | "-h" => {
+                return Err(
+                    "__help__\nsend PANE TEXT... | send PANE --file PATH | send PANE --stdin\n  \
+                     --no-submit  --force\n  \
+                     IMPORTANT: shell expands $VARS in TEXT — use --file for verbatim payloads"
+                        .into(),
+                );
+            }
+            other => positionals.push(other.to_string()),
         }
     }
 
     if positionals.is_empty() {
-        return Err("send: expected SESSION and TEXT (e.g. `send worker-1 run the tests`)".into());
+        return Err("send: expected SESSION (and TEXT, or --file/--stdin)".into());
     }
     let pane = positionals.remove(0);
-    if positionals.is_empty() {
-        return Err("send: expected TEXT after the pane name".into());
-    }
-    let text = positionals.join(" ");
+    let text = if let Some(path) = file {
+        std::fs::read_to_string(&path).map_err(|e| format!("send: read {path}: {e}"))?
+    } else if stdin {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("send: stdin: {e}"))?;
+        buf
+    } else {
+        if positionals.is_empty() {
+            return Err("send: expected TEXT after pane (or --file/--stdin)".into());
+        }
+        positionals.join(" ")
+    };
 
     Ok(ControlRequest::Send {
         pane,
         text,
         submit,
+        force,
+        scope: None,
+        from: None,
+    })
+}
+
+fn parse_note(args: Vec<String>) -> Result<ControlRequest, String> {
+    let mut pane = None;
+    let mut append = true;
+    let mut file = None;
+    let mut words: Vec<String> = Vec::new();
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--pane" => pane = Some(it.next().ok_or("note: --pane needs value")?),
+            "--replace" => append = false,
+            "--file" => file = Some(it.next().ok_or("note: --file needs PATH")?),
+            other if pane.is_none()
+                && !other.starts_with('-')
+                && !other.contains('/')
+                && words.is_empty()
+                && std::env::var("SEANCE_SESSION").is_err() =>
+            {
+                // first bare token as pane when outside seance
+                pane = Some(other.to_string());
+            }
+            other => words.push(other.to_string()),
+        }
+    }
+    // If first word looks like pane id when multiple words
+    if pane.is_none() && !words.is_empty() && words[0].chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        // could be pane or text — if from is set, text only
+        if std::env::var("SEANCE_SESSION").ok().filter(|s| !s.is_empty()).is_none() {
+            pane = Some(words.remove(0));
+        }
+    }
+    let text = if let Some(path) = file {
+        std::fs::read_to_string(&path).map_err(|e| format!("note: {e}"))?
+    } else {
+        words.join(" ")
+    };
+    if text.is_empty() {
+        return Err("note: expected TEXT or --file PATH".into());
+    }
+    Ok(ControlRequest::Note {
+        pane,
+        text,
+        append,
+        scope: None,
+        from: None,
+    })
+}
+
+fn parse_finish(args: Vec<String>) -> Result<ControlRequest, String> {
+    let mut pane = None;
+    let mut body_file = None;
+    let mut body = None;
+    let mut append = true;
+    let mut status = "done".to_string();
+    let mut status_note = None;
+    let mut empty_ok = false;
+    let mut stdin = false;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--pane" => pane = Some(it.next().ok_or("finish: --pane needs value")?),
+            "--file" => body_file = Some(it.next().ok_or("finish: --file needs PATH")?),
+            "--stdin" => stdin = true,
+            "--replace" => append = false,
+            "--status" => status = it.next().ok_or("finish: --status needs value")?,
+            "--note" => status_note = Some(it.next().ok_or("finish: --note needs value")?),
+            "--empty-ok" => empty_ok = true,
+            "--help" | "-h" => {
+                return Err(
+                    "__help__\nfinish [--pane P] [--file PATH | --stdin] [--status done] [--note N] [--empty-ok]\n  \
+                     Writes scratchpad (via daemon) + status-set. status=done requires a body unless --empty-ok.\n  \
+                     Prefer --stdin/--file so shell never expands $VARS."
+                        .into(),
+                );
+            }
+            // When inside a seance pane, first bare token is body text (not pane).
+            // Outside, first bare token can be pane if it looks like a slug.
+            other if pane.is_none()
+                && !other.starts_with('-')
+                && std::env::var("SEANCE_SESSION").ok().filter(|s| !s.is_empty()).is_none()
+                && other
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_') =>
+            {
+                pane = Some(other.to_string());
+            }
+            other => {
+                body = Some(match body {
+                    None => other.to_string(),
+                    Some(b) => format!("{b} {other}"),
+                });
+            }
+        }
+    }
+    if let Some(path) = body_file {
+        body = Some(std::fs::read_to_string(&path).map_err(|e| format!("finish: {e}"))?);
+    } else if stdin {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("finish: stdin: {e}"))?;
+        body = Some(buf);
+    }
+    Ok(ControlRequest::Finish {
+        pane,
+        body,
+        append,
+        status,
+        status_note,
+        empty_ok,
         scope: None,
         from: None,
     })
@@ -559,7 +907,14 @@ fn parse_send(args: Vec<String>) -> Result<ControlRequest, String> {
 /// base64-encoded for transport. Use shell escapes for control chars, e.g.
 /// `send-raw w $'\x03'` for Ctrl-C, `send-raw w $'\r'` for a bare Enter.
 fn parse_send_raw(args: Vec<String>) -> Result<ControlRequest, String> {
-    let mut positionals = args;
+    let mut force = false;
+    let mut positionals: Vec<String> = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--force" => force = true,
+            other => positionals.push(other.to_string()),
+        }
+    }
     if positionals.len() < 2 {
         return Err(
             "send-raw: expected SESSION and BYTES (e.g. `send-raw worker-1 $'\\x03'` for Ctrl-C)"
@@ -567,10 +922,15 @@ fn parse_send_raw(args: Vec<String>) -> Result<ControlRequest, String> {
         );
     }
     let pane = positionals.remove(0);
-    // Remaining positionals re-joined with spaces so multi-word raw input works.
     let raw = positionals.join(" ");
     let bytes_b64 = base64_encode(raw.as_bytes());
-    Ok(ControlRequest::SendRaw { pane, bytes_b64, scope: None, from: None })
+    Ok(ControlRequest::SendRaw {
+        pane,
+        bytes_b64,
+        force,
+        scope: None,
+        from: None,
+    })
 }
 
 /// `read SESSION [--lines N]`
@@ -618,8 +978,626 @@ fn parse_kill(args: Vec<String>) -> Result<ControlRequest, String> {
 
 /// `scratchpad SESSION`
 fn parse_scratchpad(args: Vec<String>) -> Result<ControlRequest, String> {
-    let pane = single_positional(args, "scratchpad")?;
+    // --cat handled in run_ctl after response (client-side read of path).
+    let filtered: Vec<String> = args.into_iter().filter(|a| a != "--cat").collect();
+    let pane = single_positional(filtered, "scratchpad")?;
     Ok(ControlRequest::Scratchpad { pane, scope: None, from: None })
+}
+
+fn parse_seize(args: Vec<String>) -> Result<ControlRequest, String> {
+    let mut pane = None;
+    let mut as_owner = None;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--as" => as_owner = Some(take_value(&mut it, "--as")?),
+            other if pane.is_none() => pane = Some(other.to_string()),
+            other => return Err(format!("seize: unexpected '{other}'")),
+        }
+    }
+    Ok(ControlRequest::Seize {
+        pane: pane.ok_or("seize: expected PANE")?,
+        as_owner,
+        scope: None,
+        from: None,
+    })
+}
+
+fn parse_release(args: Vec<String>) -> Result<ControlRequest, String> {
+    let pane = single_positional(args, "release")?;
+    Ok(ControlRequest::Release {
+        pane,
+        scope: None,
+        from: None,
+    })
+}
+
+fn parse_drive(args: Vec<String>) -> Result<ControlRequest, String> {
+    let mut pane = None;
+    let mut mode = None;
+    for a in args {
+        if pane.is_none() && !a.starts_with('-') {
+            pane = Some(a);
+        } else if mode.is_none() {
+            mode = Some(a);
+        }
+    }
+    Ok(ControlRequest::DriveMode {
+        pane: pane.ok_or("drive: expected PANE")?,
+        mode: mode.ok_or("drive: expected MODE (pair|locked_human|agent_led)")?,
+        scope: None,
+        from: None,
+    })
+}
+
+/// Client-side wait: poll human/list/read until condition.
+
+/// Client-side wait — orchestrator A+ primitive. Prefer this over `read` loops.
+///
+/// ```text
+/// seance ctl wait PANE --status done --timeout 300
+/// seance ctl wait PANE --scratchpad --min-bytes 500
+/// seance ctl wait PANE --artifact /path/to/out.md --min-bytes 100
+/// seance ctl wait PANE --owner none
+/// seance ctl wait PANE --ready
+/// seance ctl wait --any w1 w2 w3 --status done
+/// ```
+fn run_wait(
+    args: Vec<String>,
+    scope: Option<String>,
+    from: Option<String>,
+    json_out: bool,
+) -> i32 {
+    let mut panes: Vec<String> = Vec::new();
+    let mut any = false;
+    let mut owner: Option<String> = None;
+    let mut status: Option<String> = None;
+    let mut contains: Option<String> = None;
+    let mut artifact: Option<String> = None;
+    let mut scratchpad = false;
+    let mut min_bytes: u64 = 1;
+    let mut ready = false;
+    let mut stable_ms: u64 = 1200;
+    let mut timeout_secs: u64 = 300;
+    // Default true when --scratchpad: require growth since last inject.
+    let mut since_inject = true;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--any" => any = true,
+            "--owner" => owner = it.next(),
+            "--status" => status = it.next(),
+            "--contains" => contains = it.next(),
+            "--artifact" => artifact = it.next(),
+            "--scratchpad" | "--pad" => scratchpad = true,
+            "--since-inject" => since_inject = true,
+            "--any-pad" => since_inject = false, // absolute pad size (legacy)
+            "--min-bytes" => {
+                min_bytes = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1);
+            }
+            "--ready" => ready = true,
+            "--stable-ms" => {
+                stable_ms = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1200);
+            }
+            "--timeout" => {
+                timeout_secs = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(300);
+            }
+            "--help" | "-h" => {
+                println!(
+                    "wait PANE [PANE...] [opts]\n  \
+                     --status done  --scratchpad [--since-inject|--any-pad] --min-bytes N\n  \
+                     --artifact PATH  --owner none  --ready  --any  --timeout S  --contains S"
+                );
+                return 0;
+            }
+            other if !other.starts_with('-') => panes.push(other.to_string()),
+            other => {
+                eprintln!("seance ctl wait: unexpected '{other}'");
+                return 1;
+            }
+        }
+    }
+
+    if panes.is_empty() {
+        eprintln!(
+            "seance ctl wait: expected PANE [PANE...] [--status done] [--scratchpad] [--artifact PATH] [--owner none] [--ready] [--timeout S]"
+        );
+        return 1;
+    }
+    if !any && panes.len() > 1 {
+        // multiple panes without --any means wait-all
+    }
+
+    let started = std::time::Instant::now();
+    let mut last_screens: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut stable_since: std::collections::HashMap<String, std::time::Instant> =
+        std::collections::HashMap::new();
+
+    loop {
+        if started.elapsed().as_secs() > timeout_secs {
+            if json_out {
+                println!(
+                    "{{\"ok\":false,\"error\":\"timeout\",\"timeout_secs\":{timeout_secs},\"panes\":{}}}",
+                    serde_json::to_string(&panes).unwrap_or_else(|_| "[]".into())
+                );
+            } else {
+                eprintln!(
+                    "seance ctl wait: timeout after {timeout_secs}s on {}",
+                    panes.join(",")
+                );
+            }
+            return 1;
+        }
+
+        // One dense brief for all panes (token-cheap).
+        let brief_req = with_identity(
+            ControlRequest::Brief {
+                scope: None,
+                from: None,
+            },
+            scope.clone(),
+            from.clone(),
+        );
+        let brief = match send_request(&brief_req) {
+            Ok(r) if r.ok => r,
+            Ok(r) => {
+                eprintln!("seance ctl wait: {}", r.error.unwrap_or_else(|| "brief failed".into()));
+                return 1;
+            }
+            Err(_) => {
+                eprintln!("seance ctl wait: cannot connect");
+                return 2;
+            }
+        };
+        let rows = brief
+            .data
+            .as_ref()
+            .and_then(|d| d.get("panes"))
+            .and_then(|p| p.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut satisfied: Vec<String> = Vec::new();
+
+        for pane in &panes {
+            let row = rows.iter().find(|p| {
+                p.get("slug").and_then(|s| s.as_str()) == Some(pane.as_str())
+                    || p.get("name").and_then(|s| s.as_str()) == Some(pane.as_str())
+            });
+            let Some(row) = row else {
+                continue;
+            };
+
+            let running = row.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+            let exited = row.get("exited").and_then(|v| v.as_bool()).unwrap_or(false);
+            let o = row.get("owner").and_then(|v| v.as_str()).unwrap_or("none");
+            let st = row.get("status").and_then(|v| v.as_str());
+            let _pad = row
+                .get("scratchpad")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let pad_bytes = row
+                .get("scratchpad_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            // Default condition if nothing specified: free for inject (running, owner none)
+            let mut want_default = owner.is_none()
+                && status.is_none()
+                && contains.is_none()
+                && artifact.is_none()
+                && !scratchpad
+                && !ready;
+
+            let mut ok = true;
+
+            if let Some(want) = &owner {
+                let match_o = o == want.as_str()
+                    || (want == "agent" && o.starts_with("agent:"))
+                    || (want == "idle" && o == "none");
+                ok &= match_o;
+                want_default = false;
+            }
+            if let Some(want_st) = &status {
+                ok &= st == Some(want_st.as_str());
+                want_default = false;
+            }
+            if ready {
+                // Boot-ready: running, not exited, no known blocking dialogs on screen.
+                ok &= running && !exited;
+                want_default = false;
+            }
+            if scratchpad {
+                if since_inject {
+                    let inj_rev = row
+                        .get("inject_pad_rev")
+                        .and_then(|v| v.as_u64());
+                    let inj_bytes = row
+                        .get("inject_pad_bytes")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let pad_rev = row.get("pad_rev").and_then(|v| v.as_u64()).unwrap_or(0);
+                    // Prefer rev growth; also accept byte growth ≥ min_bytes since inject.
+                    let rev_ok = inj_rev.map(|r| pad_rev > r).unwrap_or(false);
+                    let bytes_ok = pad_bytes.saturating_sub(inj_bytes) >= min_bytes;
+                    ok &= rev_ok || bytes_ok;
+                } else {
+                    ok &= pad_bytes >= min_bytes;
+                }
+                want_default = false;
+            }
+            if let Some(path) = &artifact {
+                let sz = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                ok &= sz >= min_bytes;
+                want_default = false;
+            }
+
+            // Screen contains / ready dialog check — only when needed.
+            if contains.is_some() || ready {
+                let read = with_identity(
+                    ControlRequest::Read {
+                        pane: pane.clone(),
+                        lines: Some(30),
+                        scope: None,
+                        from: None,
+                    },
+                    scope.clone(),
+                    from.clone(),
+                );
+                if let Ok(r) = send_request(&read) {
+                    if r.ok {
+                        let screen = r
+                            .data
+                            .as_ref()
+                            .and_then(|d| {
+                                d.as_str()
+                                    .map(|s| s.to_string())
+                                    .or_else(|| {
+                                        d.get("screen")
+                                            .and_then(|s| s.as_str())
+                                            .map(|s| s.to_string())
+                                    })
+                            })
+                            .unwrap_or_default();
+                        if let Some(c) = &contains {
+                            ok &= screen.contains(c.as_str());
+                            want_default = false;
+                        }
+                        if ready {
+                            // Only *blocking* dialogs — splash tips ("Grok 4.5
+                            // is here", "New worktree") can coexist with a live
+                            // prompt and must not false-deny ready (meta-demo3).
+                            let blocked = screen.contains("trust this folder")
+                                || screen.contains("Trusting the directory")
+                                || screen.contains("Do you trust")
+                                || (screen.contains("Update available")
+                                    && (screen.contains("Skip until next version")
+                                        || screen.contains("Yes, I trust")));
+                            let promptish = screen.contains('❯')
+                                || screen.contains('›')
+                                || screen.contains("bypass permissions")
+                                || screen.contains("always-approve")
+                                || screen.contains("? for shortcuts")
+                                || screen.contains("ctrl+c to interrupt")
+                                || screen.contains("esc to interrupt");
+                            ok &= !blocked && promptish;
+                            // stable screen
+                            let prev = last_screens.get(pane).cloned().unwrap_or_default();
+                            if screen == prev && !screen.is_empty() {
+                                let since = stable_since
+                                    .entry(pane.clone())
+                                    .or_insert_with(std::time::Instant::now);
+                                ok &= since.elapsed().as_millis() as u64 >= stable_ms;
+                            } else {
+                                last_screens.insert(pane.clone(), screen);
+                                stable_since.insert(pane.clone(), std::time::Instant::now());
+                                ok = false;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if want_default {
+                ok = running && !exited && o == "none";
+            }
+
+            // Exited pane with status wait fails (unless waiting on exited intentionally)
+            if exited && status.is_none() && !scratchpad && artifact.is_none() {
+                // still allow pad/artifact waits on tombstones
+            }
+
+            if ok {
+                satisfied.push(pane.clone());
+            }
+        }
+
+        let success = if any {
+            !satisfied.is_empty()
+        } else {
+            satisfied.len() == panes.len()
+        };
+
+        if success {
+            if json_out {
+                println!(
+                    "{{\"ok\":true,\"ready\":{},\"elapsed_ms\":{}}}",
+                    serde_json::to_string(&satisfied).unwrap_or_else(|_| "[]".into()),
+                    started.elapsed().as_millis()
+                );
+            } else if any {
+                println!("ready {}", satisfied.join(" "));
+            } else {
+                println!("ready {}", panes.join(" "));
+            }
+            return 0;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+/// `watch [--kinds a,b] [--pane P] [--actor A] [--since-seq N] [--no-catch-up]`
+fn parse_watch(args: Vec<String>) -> Result<ControlRequest, String> {
+    let mut kinds = None;
+    let mut pane = None;
+    let mut actor = None;
+    let mut since_seq = None;
+    let mut catch_up = true;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--kinds" | "--types" | "--events" => {
+                let v = take_value(&mut it, "--kinds")?;
+                kinds = Some(
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                );
+            }
+            "--pane" => pane = Some(take_value(&mut it, "--pane")?),
+            "--actor" => actor = Some(take_value(&mut it, "--actor")?),
+            "--since-seq" | "--cursor" => {
+                let v = take_value(&mut it, "--since-seq")?;
+                since_seq = Some(
+                    v.parse()
+                        .map_err(|_| format!("--since-seq: not a number: {v}"))?,
+                );
+            }
+            "--no-catch-up" => catch_up = false,
+            other => return Err(format!("watch: unexpected argument '{other}'")),
+        }
+    }
+    Ok(ControlRequest::Watch {
+        since_seq,
+        kinds,
+        pane,
+        actor,
+        catch_up,
+        scope: None,
+        from: None,
+    })
+}
+
+/// `grant PRINCIPAL CAP [--workspace WS] [--ttl SECS]`
+fn parse_grant(args: Vec<String>) -> Result<ControlRequest, String> {
+    let mut principal = None;
+    let mut cap = None;
+    let mut workspace = None;
+    let mut ttl_secs = None;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--workspace" | "--ws" => workspace = Some(take_value(&mut it, "--workspace")?),
+            "--ttl" => {
+                let v = take_value(&mut it, "--ttl")?;
+                ttl_secs = Some(v.parse().map_err(|_| format!("--ttl: not a number: {v}"))?);
+            }
+            other if principal.is_none() => principal = Some(other.to_string()),
+            other if cap.is_none() => cap = Some(other.to_string()),
+            other => return Err(format!("grant: unexpected '{other}'")),
+        }
+    }
+    Ok(ControlRequest::CapsGrant {
+        principal: principal.ok_or("grant: expected PRINCIPAL (e.g. agent:worker-1 or cli)")?,
+        cap: cap.ok_or("grant: expected CAP (e.g. send, kill, new, *)")?,
+        workspace,
+        ttl_secs,
+        scope: None,
+        from: None,
+    })
+}
+
+/// `revoke PRINCIPAL [CAP] [--workspace WS]`
+fn parse_revoke(args: Vec<String>) -> Result<ControlRequest, String> {
+    let mut principal = None;
+    let mut cap = "*".to_string();
+    let mut workspace = None;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--workspace" | "--ws" => workspace = Some(take_value(&mut it, "--workspace")?),
+            other if principal.is_none() => principal = Some(other.to_string()),
+            other => cap = other.to_string(),
+        }
+    }
+    Ok(ControlRequest::CapsRevoke {
+        principal: principal.ok_or("revoke: expected PRINCIPAL")?,
+        cap,
+        workspace,
+        scope: None,
+        from: None,
+    })
+}
+
+/// `policy [get|set MODE] [--workspace WS]`
+fn parse_policy(args: Vec<String>) -> Result<ControlRequest, String> {
+    let mut workspace = None;
+    let mut mode = None;
+    let mut action = "get";
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "get" => action = "get",
+            "set" => {
+                action = "set";
+                mode = Some(take_value(&mut it, "set")?);
+            }
+            "--workspace" | "--ws" => workspace = Some(take_value(&mut it, "--workspace")?),
+            other if action == "set" && mode.is_none() => mode = Some(other.to_string()),
+            other => {
+                // bare MODE → set
+                if crate::caps::PolicyMode::parse(other).is_some() {
+                    action = "set";
+                    mode = Some(other.to_string());
+                } else {
+                    return Err(format!("policy: unexpected '{other}'"));
+                }
+            }
+        }
+    }
+    if action == "set" {
+        Ok(ControlRequest::PolicySet {
+            mode: mode.ok_or("policy set: expected MODE (open|propose_required|locked)")?,
+            workspace,
+            scope: None,
+            from: None,
+        })
+    } else {
+        Ok(ControlRequest::PolicyGet {
+            workspace,
+            scope: None,
+            from: None,
+        })
+    }
+}
+
+/// Stream events until interrupted.
+fn run_watch(request: &ControlRequest, json_out: bool) -> i32 {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let path = socket_path();
+    let stream = match UnixStream::connect(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "seance ctl: could not connect to {} ({e}). is seance running?",
+                path.display()
+            );
+            return 2;
+        }
+    };
+    // Watch stays open indefinitely — no read timeout.
+    let _ = stream.set_read_timeout(None);
+    let mut writer = match stream.try_clone() {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("seance ctl: {e}");
+            return 2;
+        }
+    };
+    if writer.write_all(b"{\"role\":\"ctl\"}\n").is_err() {
+        eprintln!("seance ctl: failed to say hello");
+        return 2;
+    }
+    let mut line = match serde_json::to_string(request) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("seance ctl: {e}");
+            return 1;
+        }
+    };
+    line.push('\n');
+    if writer.write_all(line.as_bytes()).is_err() || writer.flush().is_err() {
+        eprintln!("seance ctl: failed to send watch");
+        return 2;
+    }
+
+    let mut reader = BufReader::new(stream);
+    let mut first = true;
+    loop {
+        let mut resp_line = String::new();
+        match reader.read_line(&mut resp_line) {
+            Ok(0) => {
+                if first {
+                    eprintln!("seance ctl: watch connection closed immediately");
+                    return 2;
+                }
+                return 0;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("seance ctl: watch read error: {e}");
+                return 2;
+            }
+        }
+        let resp: ControlResponse = match serde_json::from_str(resp_line.trim_end()) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("seance ctl: bad watch line: {e}");
+                continue;
+            }
+        };
+        if first {
+            first = false;
+            if !resp.ok {
+                eprintln!(
+                    "seance ctl: watch failed: {}",
+                    resp.error.as_deref().unwrap_or("unknown")
+                );
+                return 1;
+            }
+            if !json_out {
+                let cursor = resp
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("cursor"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                eprintln!("watching events (cursor={cursor}) · ctrl-c to stop");
+            } else {
+                println!("{}", resp_line.trim_end());
+            }
+            continue;
+        }
+        if json_out {
+            println!("{}", resp_line.trim_end());
+            continue;
+        }
+        // Human-readable event line.
+        if let Some(data) = &resp.data {
+            let seq = data.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
+            let ts = data.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
+            let actor = data
+                .get("actor")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+            let detail = data.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+            let pane = data
+                .get("pane")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            let origin = data
+                .get("origin")
+                .and_then(|v| v.as_str())
+                .map(|o| format!(" origin={o}"))
+                .unwrap_or_default();
+            let time = crate::events::fmt_time(ts);
+            println!("{time}  #{seq:<6}  {actor:<16}  {kind:<16}  [{pane}]  {detail}{origin}");
+        }
+    }
 }
 
 /// Pull exactly one positional (a pane name) or explain what was wrong.
@@ -709,7 +1687,7 @@ fn print_ok_human(sub: &str, response: &ControlResponse) {
     };
 
     match sub {
-        "list" | "ls" => print_list(data),
+        "list" | "ls" | "brief" | "roster" | "stage" => print_list(data),
         "timeline" | "tl" => {
             if let Some(events) = data.get("events").and_then(|v| v.as_array()) {
                 if events.is_empty() {
@@ -767,19 +1745,46 @@ fn print_session_rows(arr: &[serde_json::Value]) {
     for s in arr {
         let name = str_field(s, "name").unwrap_or_else(|| "?".into());
         let running = s.get("running").and_then(|v| v.as_bool());
-        let state = match running {
-            Some(true) => "running",
-            Some(false) => "exited",
-            None => "-",
+        let exited = s.get("exited").and_then(|v| v.as_bool()).unwrap_or(false);
+        let owner = str_field(s, "owner").unwrap_or_else(|| "-".into());
+        let status = str_field(s, "status").unwrap_or_default();
+        let pad_b = s
+            .get("scratchpad_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let title = str_field(s, "title").unwrap_or_default();
+        let state = if exited {
+            "tombstone"
+        } else {
+            match running {
+                Some(true) => "running",
+                Some(false) => "stopped",
+                None => "-",
+            }
         };
-        let ws = str_field(s, "workspace");
-        let cmd = str_field(s, "command");
-        let mut line = format!("{name:<24} {state:<8}");
-        if let Some(ws) = ws {
+        let ws = str_field(s, "workspace").unwrap_or_default();
+        let mut line = format!("{name:<16} {state:<10} owner={owner:<12}");
+        if !status.is_empty() {
+            line.push_str(&format!(" status={status}"));
+        }
+        let pad_rev = s.get("pad_rev").and_then(|v| v.as_u64()).unwrap_or(0);
+        if pad_b > 0 || pad_rev > 0 {
+            if pad_rev > 0 {
+                line.push_str(&format!(" pad={pad_b}B@r{pad_rev}"));
+            } else {
+                line.push_str(&format!(" pad={pad_b}B"));
+            }
+        }
+        if !ws.is_empty() {
             line.push_str(&format!(" [{ws}]"));
         }
-        if let Some(cmd) = cmd {
-            line.push_str(&format!(" {cmd}"));
+        if !title.is_empty() {
+            let t = if title.len() > 40 {
+                format!("{}…", &title[..40])
+            } else {
+                title
+            };
+            line.push_str(&format!(" · {t}"));
         }
         println!("{}", line.trim_end());
     }
@@ -936,71 +1941,83 @@ watches every terminal live — that visibility is the product.
 ### Commands
 
 - `seance ctl list`                          panes in your workspace + state
-- `seance ctl new --name N [--cwd D] [--command C]`
-      spawn a pane. Default command is a plain shell; use `--command claude`
-      (or codex/grok/anything) for an agent worker. Prints the pane id.
-- `seance ctl send PANE TEXT...`             paste TEXT + submit (Enter after
-      a settle delay). Give tasks, answer prompts. `--no-submit` stages only.
-- `seance ctl send-raw PANE $'\x03'`         raw keys: `$'\x03'` Ctrl-C,
-      `$'\r'` bare Enter (accept a confirmation), `$'\x1b'` Esc.
-- `seance ctl read PANE [--lines N]`         the pane's rendered screen —
-      your ONLY view of a worker. Read before you assume.
-- `seance ctl status PANE`                   running / exited, title, popped
-- `seance ctl scratchpad PANE`               path of that pane's shared notes
-- `seance ctl kill PANE`                     terminate when done
-- `seance ctl status-set STATE [NOTE]`       self-report: planning|working|
-      blocked|needs-human|done|idle — shows as a badge the human sees
-- `seance ctl ask "QUESTION" --choices a,b`  ask the human; BLOCKS until they
-      click an answer in the UI (prints the answer; default 10min timeout)
-- `seance ctl timeline --since 10m`          the attributed event log: every
-      human action and agent ctl call. "what happened while I worked?"
-- `seance ctl propose PANE CMD --reason R`   GHOST TEXT: the command appears
-      dimmed at the pane's prompt; the human hits Enter to run it, Esc to
-      dismiss, or types over it. BLOCKS until resolved; prints
-      accepted/rejected. PREFER propose over send for anything risky.
-- `seance ctl human`                         where is the human? focused pane,
-      selected workspace, pending asks. Don't repaint what they're reading.
-- `seance ctl fork [--workspace W] [--name N]`  fork a workspace: same panes
-      (fresh processes), scratchpads copied — branch reality, try things.
-- `seance ctl new --name doc --file PATH`    FILE PANE: live view of a
-      document with change history. Open one when working on a file with the
-      human — they see your edits appear live and can step back in history.
-- `seance ctl last-command PANE [--failed]`  structured {command, cwd, exit,
-      duration_ms} from shell integration — no screen-scraping. `commands
-      PANE` lists recent ones. (Default shell panes only.)
+- `seance ctl new --name N [--cwd D] [--agent claude|grok|codex|shell]`
+      spawn a pane. Prefer `--agent` over hand-rolled `--command`. Add
+      `--wait-ready` to block until the agent TUI accepts inject.
+- `seance ctl send PANE TEXT...`             paste TEXT + submit.
+      **FOOTGUN:** your shell expands `$VARS` in TEXT. For long/verbatim
+      payloads use `send PANE --file PATH` or `send PANE --stdin`.
+      `--no-submit` stages only; `--force` overrides agency deny.
+- `seance ctl send-raw PANE $'\x03'`         raw keys: Ctrl-C / Enter / Esc.
+- `seance ctl read PANE [--lines N]`         rendered screen (debug only).
+- `seance ctl status PANE` / `kill PANE`
+- `seance ctl scratchpad PANE` / `pad PANE`  path of shared notes
+- `seance ctl pad PANE --cat`                print pad body (one hop verify)
+- `seance ctl note [PANE] TEXT...`           append attributed note to pad
+      (`--replace` overwrites; `--file PATH` for body)
+- `seance ctl finish [PANE] [--file PATH|--stdin] [--status done] [--note N]`
+      worker completion bridge: attributed pad write + status-set in one call.
+      `status=done` requires a body unless `--empty-ok`. Self-pane only when
+      `$SEANCE_SESSION` is set. Returns `pad_rev` + bytes.
+- `seance ctl status-set STATE [NOTE]`       planning|working|blocked|
+      needs-human|done|idle only — human-visible badge (validated enum)
+- `seance ctl roster` / `stage`              dense stage view (sorted by urgency)
+- `seance ctl ask "QUESTION" --choices a,b`  blocks until human answers
+- `seance ctl timeline --since 10m`          attributed event log
+- `seance ctl propose PANE CMD --reason R`   ghost text; prefer over send
+      for risky shell commands
+- `seance ctl human` / `brief` / `wait` / `watch` / `doctor` / `skill`
+- `seance ctl seize|release|drive PANE`      co-presence ownership
+- `seance ctl whoami` / `caps` / `policy` / `grant` / `revoke`
 
-Exit codes: 0 ok · 1 request failed (read stderr) · 2 seance not reachable.
-Scoping: you cannot see or touch panes outside `$SEANCE_WORKSPACE`. If the
-human explicitly asks for cross-workspace work, add `--all` to a call.
+Exit codes: 0 ok · 1 request failed · 2 seance not reachable.
+Scoping: `$SEANCE_WORKSPACE` auto-scopes; `--all` only if human asks.
 
-### The loop that works
+### The loop that works (A+ — token-efficient)
 
-1. Spawn:  `seance ctl new --name worker-1 --cwd /path --command claude`
-2. Task:   `seance ctl send worker-1 "summarize failures in the test suite"`
-3. Poll:   `seance ctl read worker-1 --lines 40` every few seconds. Idle =
-   screen stopped changing and shows a prompt (`>`/`❯`) or a question.
-   Answer prompts with `send` (menus often want `send-raw PANE $'\r'`).
-4. Collect: have workers write results to their scratchpad
-   (`echo ... >> $SEANCE_SCRATCHPAD` works inside any worker).
-5. Clean up: `seance ctl kill worker-1` when its work is truly done.
+Prefer structure over screens. **Never** poll `read` in a sleep loop.
 
-Shell panes are tools too: spawn one (default command) and drive real
-commands through it with `send` — the human sees exactly what ran and can
-reach over, press up-arrow, and tweak your command themselves. Prefer this
-over hiding work in your own subshell when the human might want to follow
-along or take over.
+```bash
+seance ctl doctor
+seance ctl brief --json
+seance ctl new --name w1 --cwd "$PWD" --agent claude --wait-ready
+# write task to a file so $SEANCE_SCRATCHPAD is NOT expanded by your shell:
+cat > /tmp/task-w1.md <<'EOF'
+Read README.md and docs/ORCHESTRATION.md in this repo (~/work/seance).
+Answer the question below in markdown. Append ONLY to your scratchpad
+(use `seance ctl finish --file /tmp/ans.md` or write $SEANCE_SCRATCHPAD
+then `seance ctl status-set done`). Review the actual code when useful.
+QUESTION: ...
+EOF
+seance ctl send w1 --file /tmp/task-w1.md
+seance ctl wait w1 --status done --timeout 600
+# or: seance ctl wait w1 --scratchpad --min-bytes 200   # since last inject
+seance ctl pad w1 --cat
+seance ctl roster --json
+# fan-in: seance ctl wait w1 w2 w3 --status done
+```
+
+- **brief/roster** for state · **wait** for completion · **read** only to debug
+- Workers: short brief + output contract — not "explore the whole repo"
+  unless the task needs it. Point them at README + docs first.
+- Before send: check owner in brief; if human, `wait --owner none` or ask
+- Inject auto-sets status=`working` and records pad baseline so
+  `wait --scratchpad` is **since-inject** (not absolute pad size)
+- Prefer `finish --stdin` / `finish --file` over raw pad write + status-set
+
+### Co-presence
+
+Human keystrokes always steal keys. Agent inject denied for 3s idle grace
+unless `release` or `--force`. Tombstones on exit until `kill`.
 
 ### Rules
 
-- Report status at transitions: `status-set working "running tests"` when you
-  start, `status-set blocked "..."`/`needs-human` when stuck, `done` when
-  finished. The human triages many panes by these badges.
-- Decisions belong in `ask`, not buried in terminal output: use
-  `seance ctl ask "Delete the old migration?" --choices yes,no` and wait.
-- Never fire-and-forget: every `send` is followed by `read` until resolved.
-- Never assume a worker finished because time passed — the screen is truth.
-- Durable results in scratchpads; screens are ephemeral.
+- `status-set` / `finish` at transitions so wait/roster work.
+- Decisions via `ask`, not buried in terminal output.
+- Durable results in scratchpads/files — screens are ephemeral.
 - Do not kill panes you did not create unless asked.
+- Fire-and-forget is wrong: every task has a `wait` condition.
+- Prefer `send --file` for any prompt with paths or `$ENV` tokens.
 "#;
 
 fn print_help() {
@@ -1009,41 +2026,52 @@ fn print_help() {
 seance ctl — engage the shared human+agent space from the command line
 
 USAGE:
-    seance ctl <command> [args] [--json]
+    seance ctl <command> [args] [--json] [--all|--scope WS]
 
 COMMANDS:
     list                          list panes (name, state, workspace, command)
     new  --name NAME [opts]       spawn a pane
-         --cwd DIR                  working directory (default: app default)
-         --command CMD              command (default: shell; use claude/codex/…)
-         --workspace WS             place in a named workspace
-         --file PATH                file pane (live doc + history) instead of PTY
-    send SESSION TEXT...          type TEXT into SESSION and submit it
-         --no-submit                leave TEXT in the input, do not press Enter
-    send-raw SESSION BYTES        inject raw bytes (no paste-wrap, no submit)
-                                    e.g. send-raw w $'\\x03'  (Ctrl-C)
-    read SESSION [--lines N]      print SESSION's visible screen (tail N lines)
-    status SESSION                metadata (running/exited, title, …)
-    kill SESSION                  terminate SESSION
-    scratchpad SESSION            path to SESSION's shared notes file
-    ask \"Q\" [--choices a,b]       ask the human (blocks until they answer)
-    propose PANE CMD --reason R   ghost command for human Enter/Esc
-    human                         where is the human? focus / workspace / asks
-    skill                         print engagement protocol for any agent
-    help                          show this help
+         --cwd DIR  --agent NAME  --command CMD  --workspace WS  --file PATH
+         --wait-ready             block until agent TUI accepts inject
+    send PANE TEXT...             paste + submit
+         --file PATH | --stdin    verbatim body (avoids shell $ expansion)
+         --no-submit  --force
+    send-raw PANE BYTES           raw PTY bytes (Ctrl-C = $'\\x03')
+    read PANE [--lines N]         rendered screen (debug)
+    status / kill / scratchpad|pad PANE
+         pad PANE --cat           print pad body
+    note [PANE] TEXT...           append attributed pad note
+         --file PATH  --replace
+    finish [PANE]                 pad body + status-set (worker bridge)
+         --file PATH | --stdin  --status done  --note N  --empty-ok  --replace
+    timeline [--since 10m]        attributed event log
+    status-set STATE [NOTE]       agent badge
+    ask \"Q\" [--choices a,b]       blocking human question
+    propose PANE CMD --reason R   ghost command (Enter/Esc)
+    human / brief / roster|stage  focus + dense workspace snapshot
+    fork [--workspace W] [--name N]
+    commands PANE / last-command PANE [--failed]
+    watch [opts]                  stream events
+         --kinds a,b  --pane P  --actor A  --since-seq N  --no-catch-up
+    whoami / caps / grant / revoke / policy
+    seize / release / drive PANE  co-presence ownership
+    wait PANE [opts]              block until condition
+         --status done  --scratchpad [--since-inject|--any-pad] --min-bytes N
+         --artifact PATH  --owner none  --ready  --any w1 w2  --timeout S
+    doctor                        agent profiles + binary health
+    skill                         full agent contract (paste into workers)
+    help
 
-GLOBAL:
-    --json                        emit the raw JSON response instead of text
-
-EXIT CODES:
-    0  ok      1  request failed      2  cannot connect (is seance running?)
+GLOBAL: --json  --all  --scope WS
 
 EXAMPLES:
-    seance ctl new --name build --cwd ~/proj --command claude
-    seance ctl send build \"run the test suite and summarize failures\"
-    seance ctl read build --lines 40
-    seance ctl send-raw build $'\\x03'        # Ctrl-C the running command
-    cat \"$(seance ctl scratchpad build)\"     # read the shared notes"
+    seance ctl new --name w --agent claude --wait-ready
+    seance ctl send w --file /tmp/task.md
+    seance ctl wait w --status done --timeout 600
+    seance ctl pad w --cat
+    seance ctl finish --stdin --status done < /tmp/ans.md
+    seance ctl roster --json
+    seance ctl doctor"
     );
 }
 
@@ -1086,6 +2114,49 @@ mod tests {
                 assert!(submit);
             }
             _ => panic!("expected send"),
+        }
+    }
+
+    #[test]
+    fn parse_send_file_reads_body() {
+        let dir = std::env::temp_dir().join(format!("seance-send-file-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("task.md");
+        std::fs::write(&path, "hello $SEANCE_SCRATCHPAD world\n").unwrap();
+        let req = parse_send(vec![
+            "w".into(),
+            "--file".into(),
+            path.to_string_lossy().into(),
+        ])
+        .unwrap();
+        match req {
+            ControlRequest::Send { pane, text, .. } => {
+                assert_eq!(pane, "w");
+                assert!(text.contains("$SEANCE_SCRATCHPAD"));
+                assert!(text.starts_with("hello"));
+            }
+            _ => panic!("expected send"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_finish_defaults() {
+        let req = parse_finish(vec!["--status".into(), "done".into(), "--empty-ok".into()]).unwrap();
+        match req {
+            ControlRequest::Finish {
+                status,
+                body,
+                append,
+                empty_ok,
+                ..
+            } => {
+                assert_eq!(status, "done");
+                assert!(body.is_none());
+                assert!(append);
+                assert!(empty_ok);
+            }
+            _ => panic!("expected finish"),
         }
     }
 

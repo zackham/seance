@@ -219,6 +219,7 @@ impl Render for RemoteTerminalView {
                         let snap = Arc::clone(&term.read(cx).snapshot);
                         let ghost = term.read(cx).ghost.clone();
                         let slug = term.read(cx).slug.clone();
+                        let input_origin = term.read(cx).last_input_origin.clone();
                         Layout {
                             slug,
                             bounds,
@@ -226,6 +227,7 @@ impl Render for RemoteTerminalView {
                             line_h,
                             snap,
                             ghost_text: ghost.map(|g| g.text),
+                            input_origin,
                         }
                     },
                     |_bounds, layout: Layout, window, cx| {
@@ -244,6 +246,8 @@ struct Layout {
     line_h: Pixels,
     snap: Arc<crate::runtime::snapshot::GridSnapshot>,
     ghost_text: Option<String>,
+    /// Causal tint: who last wrote stdin.
+    input_origin: Option<String>,
 }
 
 /// Shaped paint replay for a terminal whose grid hasn't changed.
@@ -262,6 +266,7 @@ struct ShapedPaintCache {
     cell_w: f32,
     line_h: f32,
     ghost: Option<String>,
+    input_origin: Option<String>,
     rects: Vec<(f32, f32, f32, f32, Hsla)>,
     texts: Vec<(f32, f32, ShapedLine)>,
     cursor: (f32, f32, f32, f32),
@@ -282,6 +287,7 @@ fn cache_matches(c: &ShapedPaintCache, layout: &Layout) -> bool {
         && c.cell_w == f32::from(layout.cell_w)
         && c.line_h == f32::from(layout.line_h)
         && c.ghost == layout.ghost_text
+        && c.input_origin == layout.input_origin
 }
 
 fn replay_shaped_paint(c: &ShapedPaintCache, window: &mut Window, cx: &mut App) {
@@ -399,6 +405,7 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
                 let c = c.clone();
                 drop(guard);
                 replay_shaped_paint(&c, window, cx);
+                paint_origin_gutter(layout, window);
                 return;
             }
         }
@@ -593,6 +600,7 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
                 cell_w: f32::from(layout.cell_w),
                 line_h: f32::from(layout.line_h),
                 ghost: layout.ghost_text.clone(),
+                input_origin: layout.input_origin.clone(),
                 rects: cache_rects,
                 texts: cache_texts,
                 cursor: (
@@ -605,6 +613,29 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
             },
         );
     }
+    paint_origin_gutter(layout, window);
+}
+
+/// 2px left gutter tinted by who last wrote stdin — causal attribution made
+/// visceral without cell-level byte tracking (which needs a parallel grid).
+fn paint_origin_gutter(layout: &Layout, window: &mut Window) {
+    let Some(ref origin) = layout.input_origin else {
+        return;
+    };
+    let color = if origin == "human" {
+        SeancePalette::text_faint().opacity(0.35)
+    } else if origin.starts_with("agent:") || origin == "cli" {
+        SeancePalette::violet().opacity(0.75)
+    } else if origin == "propose" || origin.contains("propose") {
+        SeancePalette::flame().opacity(0.7)
+    } else {
+        SeancePalette::success().opacity(0.55)
+    };
+    let gutter = Bounds {
+        origin: layout.bounds.origin,
+        size: gpui::size(px(2.0), layout.bounds.size.height),
+    };
+    window.paint_quad(fill(gutter, color));
 }
 
 #[derive(Clone, Copy, PartialEq)]

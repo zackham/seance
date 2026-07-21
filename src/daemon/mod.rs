@@ -185,11 +185,96 @@ fn serve_ctl(
                 continue;
             }
         };
+        // Streaming watch: ack then push matching events until disconnect.
+        if let ControlRequest::Watch {
+            since_seq,
+            kinds,
+            pane,
+            actor,
+            catch_up,
+            scope,
+            from: _,
+        } = req
+        {
+            return serve_watch(
+                writer,
+                engine,
+                since_seq.unwrap_or(0),
+                kinds,
+                pane,
+                actor,
+                scope,
+                catch_up,
+            );
+        }
         let resp = engine
             .lock()
             .map(|mut e| e.handle_control(req))
             .unwrap_or_else(|_| ControlResponse::err("engine lock poisoned"));
         writeln!(writer, "{}", serde_json::to_string(&resp)?)?;
+    }
+    Ok(())
+}
+
+/// Stream events matching filters as JSON lines after an initial ack.
+fn serve_watch(
+    mut writer: UnixStream,
+    _engine: SharedEngine,
+    since_seq: u64,
+    kinds: Option<Vec<String>>,
+    pane: Option<String>,
+    actor: Option<String>,
+    scope: Option<String>,
+    catch_up: bool,
+) -> Result<()> {
+    use crate::events;
+
+    let (rx, cursor) = events::subscribe();
+    let ack = ControlResponse::ok(serde_json::json!({
+        "watching": true,
+        "cursor": cursor,
+        "since_seq": since_seq,
+    }));
+    writeln!(writer, "{}", serde_json::to_string(&ack)?)?;
+    writer.flush()?;
+
+    let kinds_ref = kinds.as_deref();
+    let write_ev = |writer: &mut UnixStream, e: &events::Event| -> Result<()> {
+        if !events::matches_filter(
+            e,
+            scope.as_deref(),
+            pane.as_deref(),
+            actor.as_deref(),
+            kinds_ref,
+        ) {
+            return Ok(());
+        }
+        // Wrap as ControlResponse so clients can share the same decoder.
+        let resp = ControlResponse::ok(serde_json::to_value(e)?);
+        writeln!(writer, "{}", serde_json::to_string(&resp)?)?;
+        writer.flush()?;
+        Ok(())
+    };
+
+    if catch_up {
+        // Prefer in-memory ring; fall back to disk for deeper history.
+        let mut backlog = events::ring_since(since_seq);
+        if backlog.is_empty() && since_seq > 0 {
+            backlog = events::read_ex(0, since_seq, scope.as_deref(), pane.as_deref(), actor.as_deref(), kinds.as_deref(), 500);
+        } else if backlog.is_empty() && since_seq == 0 {
+            // Fresh subscriber with no cursor: last 50 matching from disk.
+            backlog = events::read_ex(0, 0, scope.as_deref(), pane.as_deref(), actor.as_deref(), kinds.as_deref(), 50);
+        }
+        for e in backlog {
+            write_ev(&mut writer, &e)?;
+        }
+    }
+
+    // Live stream until client disconnects or write fails.
+    while let Ok(e) = rx.recv() {
+        if write_ev(&mut writer, &e).is_err() {
+            break;
+        }
     }
     Ok(())
 }

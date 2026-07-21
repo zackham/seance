@@ -174,6 +174,22 @@ pub enum GuiEvent {
         verb: String,
         actor: String,
     },
+    /// Causal attribution: who last wrote stdin to this pane's PTY.
+    InputOrigin {
+        pane: String,
+        /// `human` | `agent:<slug>` | `cli` | `propose` | …
+        origin: String,
+    },
+    /// Co-presence: input ownership / drive mode changed.
+    Agency {
+        pane: String,
+        owner: String,
+        drive_mode: String,
+        human_idle: bool,
+        exited: bool,
+        #[serde(default)]
+        exit_code: Option<i32>,
+    },
     Ghost {
         pane: String,
         ghost: Option<GhostSnap>,
@@ -207,6 +223,17 @@ pub struct PaneInfo {
     /// For file panes: the path being watched.
     #[serde(default)]
     pub file: Option<String>,
+    /// Input owner: `none` | `human` | `agent:<id>` | `cli`.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// `pair` | `locked_human` | `agent_led`
+    #[serde(default)]
+    pub drive_mode: Option<String>,
+    /// Process exited but pane kept as tombstone.
+    #[serde(default)]
+    pub exited: bool,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -224,6 +251,17 @@ pub struct StatusInfo {
     pub slug: String,
     pub state: String,
     pub note: Option<String>,
+    /// Scratchpad revision at last status/note/finish write (0.9.5+).
+    #[serde(default)]
+    pub pad_rev: u64,
+}
+
+/// Pad rev + bytes recorded at last inject — wait uses this for since-inject evidence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InjectBaseline {
+    pub slug: String,
+    pub pad_rev: u64,
+    pub pad_bytes: u64,
 }
 
 /// Handoff message (old daemon → new) — FDs travel out-of-band via SCM_RIGHTS.
@@ -246,6 +284,9 @@ pub struct HandoffPane {
     pub title: Option<String>,
     pub text_snapshot: String,
     pub ghost: Option<GhostSnap>,
+    /// Co-presence state (0.9.5+). Missing → default agency.
+    #[serde(default)]
+    pub agency: Option<crate::agency::AgencySnap>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -257,6 +298,18 @@ pub struct HandoffBundle {
     pub workspace_order: Vec<String>,
     pub proposal_counter: u64,
     pub ask_counter: u64,
+    /// Live badges (0.9.5+) — survive `seance upgrade`.
+    #[serde(default)]
+    pub statuses: Vec<StatusInfo>,
+    /// Unanswered asks (0.9.5+).
+    #[serde(default)]
+    pub asks: Vec<AskInfo>,
+    /// Per-pane pad revision counters.
+    #[serde(default)]
+    pub pad_revs: Vec<(String, u64)>,
+    /// Inject baselines for evidence-bound wait.
+    #[serde(default)]
+    pub inject_baselines: Vec<InjectBaseline>,
 }
 
 /// Re-export control types for daemon routing.

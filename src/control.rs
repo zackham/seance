@@ -97,6 +97,9 @@ pub enum ControlRequest {
         text: String,
         #[serde(default = "default_true")]
         submit: bool,
+        /// Bypass human ownership (emergency). Prefer `seize`/`release`.
+        #[serde(default)]
+        force: bool,
         #[serde(default)]
         scope: Option<String>,
         #[serde(default)]
@@ -111,6 +114,8 @@ pub enum ControlRequest {
         #[serde(alias = "session")]
         pane: String,
         bytes_b64: String,
+        #[serde(default)]
+        force: bool,
         #[serde(default)]
         scope: Option<String>,
         #[serde(default)]
@@ -308,6 +313,201 @@ pub enum ControlRequest {
         #[serde(default)]
         from: Option<String>,
     },
+
+    /// Stream events matching filters. After the initial ack, the connection
+    /// emits one JSON event object per line until the client disconnects.
+    /// Handled specially by the daemon (not a one-shot request).
+    Watch {
+        /// Only events with seq > since_seq (catch-up from cursor).
+        #[serde(default)]
+        since_seq: Option<u64>,
+        /// Comma-separated kind prefixes or exact kinds (also accepted as array).
+        #[serde(default)]
+        kinds: Option<Vec<String>>,
+        #[serde(default)]
+        pane: Option<String>,
+        #[serde(default)]
+        actor: Option<String>,
+        /// If true, replay matching ring/disk events after since_seq before live.
+        #[serde(default = "default_true")]
+        catch_up: bool,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Who am I under the control plane? `{principal, workspace, policy, grants}`.
+    Whoami {
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// List policy + grants. `{default_policy, workspace_policy, grants}`.
+    Caps {
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Grant a capability to a principal. `principal` like `agent:slug` or `cli`.
+    CapsGrant {
+        principal: String,
+        /// Op name (`send`, `kill`, `new`, …) or `*`.
+        cap: String,
+        #[serde(default)]
+        workspace: Option<String>,
+        /// TTL seconds from now; omit for permanent.
+        #[serde(default)]
+        ttl_secs: Option<u64>,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Revoke grants. `cap` of `*` revokes all caps for the principal.
+    CapsRevoke {
+        principal: String,
+        #[serde(default = "default_star")]
+        cap: String,
+        #[serde(default)]
+        workspace: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Get policy for a workspace (or global default).
+    PolicyGet {
+        #[serde(default)]
+        workspace: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Set policy: `open` | `propose_required` | `locked`.
+    PolicySet {
+        mode: String,
+        #[serde(default)]
+        workspace: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Human (or force) claims keyboard ownership of a pane.
+    Seize {
+        #[serde(alias = "session")]
+        pane: String,
+        /// `human` (default) or principal string.
+        #[serde(default)]
+        as_owner: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Release ownership → `none` so either may drive next.
+    Release {
+        #[serde(alias = "session")]
+        pane: String,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Set drive mode: `pair` | `locked_human` | `agent_led`.
+    DriveMode {
+        #[serde(alias = "session")]
+        pane: String,
+        mode: String,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Agent launch profiles + binary health (`seance doctor agents`).
+    Doctor {
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// One-shot workspace brief for orchestrators (dense pane rows + focus).
+    Brief {
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Append (or overwrite) a note on a pane's scratchpad with attribution.
+    Note {
+        #[serde(alias = "session")]
+        #[serde(default)]
+        pane: Option<String>,
+        text: String,
+        /// Default true — append with author stamp. false = replace body.
+        #[serde(default = "default_true")]
+        append: bool,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Worker completion bridge: write scratchpad body + set status in one op.
+    /// Sandboxed agents that can reach the socket but not the FS still get
+    /// durable completion (body travels on the wire).
+    Finish {
+        #[serde(alias = "session")]
+        #[serde(default)]
+        pane: Option<String>,
+        /// Optional body to write to scratchpad.
+        #[serde(default)]
+        body: Option<String>,
+        #[serde(default = "default_true")]
+        append: bool,
+        #[serde(default = "default_done")]
+        status: String,
+        #[serde(default)]
+        status_note: Option<String>,
+        /// Allow `status=done` with no body (default false — evidence-bound).
+        #[serde(default)]
+        empty_ok: bool,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Stage/roster projection — dense pane rows for humans + orchestrators.
+    Roster {
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+}
+
+fn default_done() -> String {
+    "done".into()
+}
+
+fn default_star() -> String {
+    "*".into()
 }
 
 /// The reply to a [`ControlRequest`]. `ok` is the success flag; exactly one of
@@ -319,6 +519,102 @@ pub struct ControlResponse {
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+impl ControlRequest {
+    /// Attribution principal field (`from`) when present.
+    pub fn from_field(&self) -> &Option<String> {
+        match self {
+            Self::List { from, .. }
+            | Self::New { from, .. }
+            | Self::Send { from, .. }
+            | Self::SendRaw { from, .. }
+            | Self::Read { from, .. }
+            | Self::Status { from, .. }
+            | Self::Kill { from, .. }
+            | Self::Scratchpad { from, .. }
+            | Self::Timeline { from, .. }
+            | Self::StatusSet { from, .. }
+            | Self::Ask { from, .. }
+            | Self::AskResult { from, .. }
+            | Self::Propose { from, .. }
+            | Self::ProposeResult { from, .. }
+            | Self::Human { from, .. }
+            | Self::WorkspaceFork { from, .. }
+            | Self::CmdBegin { from, .. }
+            | Self::CmdEnd { from, .. }
+            | Self::Commands { from, .. }
+            | Self::LastCommand { from, .. }
+            | Self::Watch { from, .. }
+            | Self::Whoami { from, .. }
+            | Self::Caps { from, .. }
+            | Self::CapsGrant { from, .. }
+            | Self::CapsRevoke { from, .. }
+            | Self::PolicyGet { from, .. }
+            | Self::PolicySet { from, .. }
+            | Self::Seize { from, .. }
+            | Self::Release { from, .. }
+            | Self::DriveMode { from, .. }
+            | Self::Doctor { from, .. }
+            | Self::Brief { from, .. }
+            | Self::Note { from, .. }
+            | Self::Finish { from, .. }
+            | Self::Roster { from, .. } => from,
+        }
+    }
+
+    /// Best-effort workspace scope for policy checks.
+    pub fn workspace_hint(&self) -> Option<&str> {
+        match self {
+            Self::New {
+                workspace, scope, ..
+            }
+            | Self::WorkspaceFork {
+                workspace, scope, ..
+            }
+            | Self::PolicyGet {
+                workspace, scope, ..
+            }
+            | Self::PolicySet {
+                workspace, scope, ..
+            }
+            | Self::CapsGrant {
+                workspace, scope, ..
+            }
+            | Self::CapsRevoke {
+                workspace, scope, ..
+            } => workspace.as_deref().or(scope.as_deref()),
+            Self::List { scope, .. }
+            | Self::Send { scope, .. }
+            | Self::SendRaw { scope, .. }
+            | Self::Read { scope, .. }
+            | Self::Status { scope, .. }
+            | Self::Kill { scope, .. }
+            | Self::Scratchpad { scope, .. }
+            | Self::Timeline { scope, .. }
+            | Self::StatusSet { scope, .. }
+            | Self::Ask { scope, .. }
+            | Self::AskResult { scope, .. }
+            | Self::Propose { scope, .. }
+            | Self::ProposeResult { scope, .. }
+            | Self::Human { scope, .. }
+            | Self::CmdBegin { scope, .. }
+            | Self::CmdEnd { scope, .. }
+            | Self::Commands { scope, .. }
+            | Self::LastCommand { scope, .. }
+            | Self::Watch { scope, .. }
+            | Self::Whoami { scope, .. }
+            | Self::Caps { scope, .. }
+            | Self::Seize { scope, .. }
+            | Self::Release { scope, .. }
+            | Self::DriveMode { scope, .. }
+            | Self::Doctor { scope, .. }
+            | Self::Brief { scope, .. }
+            | Self::Note { scope, .. }
+            | Self::Finish { scope, .. }
+            | Self::Roster { scope, .. } => scope.as_deref(),
+        }
+    }
 }
 
 impl ControlResponse {

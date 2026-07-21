@@ -182,36 +182,38 @@ cannot connect (with an "is seance running?" hint).
 | command | usage |
 |---------|-------|
 | `list` | `seance ctl list` |
-| `new` | `seance ctl new --name NAME [--cwd DIR] [--command CMD] [--workspace WS]` |
-| `send` | `seance ctl send SESSION TEXT...` `[--no-submit]` |
-| `send-raw` | `seance ctl send-raw SESSION BYTES` |
-| `read` | `seance ctl read SESSION [--lines N]` |
-| `status` | `seance ctl status SESSION` |
-| `kill` | `seance ctl kill SESSION` |
-| `scratchpad` | `seance ctl scratchpad SESSION` |
-| `help` | `seance ctl help` |
+| `new` | `seance ctl new --name NAME [--cwd DIR] [--agent NAME\|--command CMD] [--workspace WS] [--wait-ready]` |
+| `send` | `seance ctl send PANE TEXT...` `[--file PATH\|--stdin] [--no-submit] [--force]` |
+| `send-raw` | `seance ctl send-raw PANE BYTES` |
+| `read` | `seance ctl read PANE [--lines N]` |
+| `status` | `seance ctl status PANE` |
+| `kill` | `seance ctl kill PANE` |
+| `scratchpad` / `pad` | `seance ctl pad PANE [--cat]` |
+| `note` | `seance ctl note [PANE] TEXT...` `[--file PATH] [--replace]` |
+| `finish` | `seance ctl finish [PANE] [--file PATH] [--status done] [--note N]` |
+| `brief` / `wait` / `doctor` | orchestrator denseness (see ORCHESTRATION.md) |
+| `skill` / `help` | agent contract + CLI help |
 
 Notes:
 
-- **`send`** joins all trailing words into the prompt, so you don't have to
-  quote it: `seance ctl send build run the full test suite`. Quote if you need
-  to preserve exact spacing or punctuation the shell would eat.
-- **`--no-submit`** stages text without pressing Enter.
-- **`send-raw`** interprets `BYTES` as a UTF-8 string and base64-encodes it.
-  Use shell `$'…'` escapes for control chars: `send-raw build $'\x03'` (Ctrl-C),
-  `send-raw build $'\r'` (bare Enter).
-- **`read`** prints the screen verbatim; **`scratchpad`** prints just the path,
-  so `cat "$(seance ctl scratchpad build)"` works.
+- **`send`** joins trailing words into the prompt. **Shell expands `$VARS`** —
+  for verbatim payloads use `--file` or `--stdin`.
+- **`--no-submit`** stages text without pressing Enter; inject auto-sets
+  `status=working`.
+- **`send-raw`**: `send-raw build $'\x03'` (Ctrl-C), `$'\r'` (Enter).
+- **`pad --cat`** prints body in one hop; **`finish`** writes pad + status via
+  the control plane (sandboxed workers).
 
 ### Examples
 
 ```bash
-seance ctl new --name build --cwd ~/proj --command claude
-seance ctl send build "run the test suite and summarize any failures"
-seance ctl read build --lines 40
-seance ctl send-raw build $'\x03'          # interrupt whatever's running
-cat "$(seance ctl scratchpad build)"       # read the shared notes
-seance ctl status build --json             # machine-readable status
+seance ctl new --name build --cwd ~/proj --agent claude --wait-ready
+seance ctl send build --file /tmp/task.md
+seance ctl wait build --status done --timeout 600
+seance ctl pad build --cat
+seance ctl send-raw build $'\x03'          # interrupt
+seance ctl finish --file /tmp/ans.md --status done   # from inside a worker
+seance ctl status build --json
 seance ctl kill build
 ```
 
@@ -232,3 +234,65 @@ Three ways to arm an agent (any CLI with shell access — not vendor-specific):
 
 Default `new` pane command is a **shell** (human can always take the keyboard).
 Pass `--command claude` / `codex` / `grok` / … for an agent worker.
+
+---
+
+## Foundation 0.9.1 — event bus, watch, capabilities
+
+### Event bus
+
+Every meaningful action publishes an `Event` with:
+
+| field | meaning |
+|-------|---------|
+| `id` / `seq` | stable id + monotonic sequence |
+| `actor` | `human` / `agent:<slug>` / `cli` / `daemon` / `system` |
+| `kind` | machine-readable (`ctl_send`, `cmd_start`, `focus`, …) |
+| `origin` | optional provenance (`ctl_send`, `human_keystroke`, `propose_accepted`, …) |
+| `caused_by` / `span` | causal chain + span id (e.g. command runs) |
+
+Durable: `~/.local/share/seance/events.jsonl`. Live: in-process subscribers.
+
+### `seance ctl watch`
+
+```bash
+seance ctl watch --kinds status_set,ask,cmd_end
+seance ctl watch --pane worker-1 --since-seq 42
+seance ctl watch --no-catch-up   # live only
+```
+
+After the ack line, the connection streams `ControlResponse` lines whose
+`data` is a full event object until the client disconnects. This is the
+epoll of the collab OS — prefer it over polling `read`.
+
+### Capabilities / policy
+
+Default policy is **`open`** (legacy behaviour). Persist at
+`~/.local/share/seance/caps.json`.
+
+```bash
+seance ctl policy                          # get
+seance ctl policy set propose_required     # send/send_raw need grant or propose
+seance ctl policy set locked               # mutating ops denied without grant
+seance ctl policy set open
+seance ctl grant agent:worker-1 send --ttl 3600
+seance ctl revoke agent:worker-1 send
+seance ctl whoami
+seance ctl caps
+```
+
+Human UI and daemon are always unrestricted. Always-free ops under any policy:
+list/read/status/timeline/watch/human/ask/propose/status_set/scratchpad/commands/…
+
+### Causal attribution tint
+
+PTY stdin is tagged with origin. The GUI paints a 2px left gutter:
+
+- faint — last input was human
+- violet — agent / cli inject
+- flame — accepted ghost proposal
+
+### Docs vs skill
+
+**Canonical agent contract is `seance ctl skill`.** This file and `ctl help`
+track the surface; when they disagree, skill + this foundation section win.

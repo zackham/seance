@@ -165,6 +165,13 @@ impl Pane {
             tiled: self.tiled,
             resume_on_restore: self.resume_on_restore,
             workspace: self.workspace.clone(),
+            status: None,
+            status_note: None,
+            pad_rev: 0,
+            owner: None,
+            drive_mode: None,
+            exited: false,
+            exit_code: None,
         }
     }
 }

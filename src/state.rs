@@ -47,6 +47,23 @@ pub struct PersistedPane {
     /// Named workspace this session belongs to (sidebar grouping).
     #[serde(default = "default_workspace")]
     pub workspace: String,
+    /// Last known status badge (0.9.5+ — survive cold restart).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_note: Option<String>,
+    /// Scratchpad revision counter.
+    #[serde(default)]
+    pub pad_rev: u64,
+    /// Agency owner string (`none`/`human`/`agent:…`/`cli`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive_mode: Option<String>,
+    #[serde(default)]
+    pub exited: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 fn default_kind() -> String {
@@ -374,6 +391,13 @@ mod tests {
                     command: "claude".to_string(),
                     tiled: true,
                     resume_on_restore: true,
+                    status: Some("working".into()),
+                    status_note: None,
+                    pad_rev: 2,
+                    owner: Some("agent:vita".into()),
+                    drive_mode: Some("pair".into()),
+                    exited: false,
+                    exit_code: None,
                 },
                 PersistedPane {
                     kind: "terminal".to_string(),
@@ -384,6 +408,13 @@ mod tests {
                     command: "claude --dangerously-skip-permissions".to_string(),
                     tiled: false,
                     resume_on_restore: false,
+                    status: None,
+                    status_note: None,
+                    pad_rev: 0,
+                    owner: None,
+                    drive_mode: None,
+                    exited: false,
+                    exit_code: None,
                 },
             ],
             sidebar_width: Some(280.0),

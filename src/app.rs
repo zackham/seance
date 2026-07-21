@@ -239,10 +239,21 @@ fn status_color(state: &str) -> gpui::Hsla {
     }
 }
 
+/// Co-presence chrome for a pane (mirrors daemon agency).
+#[derive(Clone, Debug)]
+struct OwnerChrome {
+    owner: String,
+    drive_mode: String,
+    exited: bool,
+    exit_code: Option<i32>,
+}
+
 pub struct SeanceApp {
     panes: Vec<Pane>,
     asks: Vec<PendingAsk>,
     statuses: std::collections::HashMap<String, PaneStatus>,
+    /// Co-presence ownership from daemon Agency events / State.
+    owners: std::collections::HashMap<String, OwnerChrome>,
     /// (pane slug -> (verb, actor, when)) — transient "driven by X" flashes.
     touches: std::collections::HashMap<String, (String, String, std::time::Instant)>,
     ask_counter: u64,
@@ -285,6 +296,7 @@ impl SeanceApp {
             panes: Vec::new(),
             asks: Vec::new(),
             statuses: std::collections::HashMap::new(),
+            owners: std::collections::HashMap::new(),
             touches: std::collections::HashMap::new(),
             ask_counter: 0,
             proposals: std::collections::HashMap::new(),
@@ -379,7 +391,22 @@ impl SeanceApp {
                     panes.iter().map(|p| p.slug.clone()).collect();
                 for info in &panes {
                     self.ensure_remote_pane_cx(info, cx);
+                    if let Some(owner) = &info.owner {
+                        self.owners.insert(
+                            info.slug.clone(),
+                            OwnerChrome {
+                                owner: owner.clone(),
+                                drive_mode: info
+                                    .drive_mode
+                                    .clone()
+                                    .unwrap_or_else(|| "pair".into()),
+                                exited: info.exited,
+                                exit_code: info.exit_code,
+                            },
+                        );
+                    }
                 }
+                self.owners.retain(|k, _| known.contains(k));
                 self.panes.retain(|p| known.contains(&p.slug));
                 // Daemon pane-list order is the persistence key for sidebar +
                 // tile layout. Reconcile local order so a State push (after
@@ -440,19 +467,18 @@ impl SeanceApp {
                 }
                 cx.notify();
             }
-            GuiEvent::PaneExited { slug, .. } => {
-                // Daemon also broadcasts PaneKilled and removes the pane; this
-                // is a belt-and-suspenders remove if Killed is delayed/lost.
-                self.panes.retain(|p| p.slug != slug);
-                if self.active_slug.as_deref() == Some(slug.as_str()) {
-                    self.active_slug = self.panes.first().map(|p| p.slug.clone());
-                }
-                if self.flipped.as_ref().is_some_and(|(s, _)| s == &slug) {
-                    self.flipped = None;
-                }
-                if self.whisper.as_ref().is_some_and(|(s, _)| s == &slug) {
-                    self.whisper = None;
-                }
+            GuiEvent::PaneExited { slug, exit_code } => {
+                // Tombstone: keep the pane; mark ownership chrome. Explicit
+                // kill still removes via PaneKilled.
+                let entry = self.owners.entry(slug.clone()).or_insert(OwnerChrome {
+                    owner: "none".into(),
+                    drive_mode: "pair".into(),
+                    exited: true,
+                    exit_code,
+                });
+                entry.exited = true;
+                entry.exit_code = exit_code;
+                entry.owner = "none".into();
                 cx.notify();
             }
             GuiEvent::Ask { ask } => {
@@ -476,6 +502,36 @@ impl SeanceApp {
             }
             GuiEvent::Touch { slug, verb, actor } => {
                 self.touch(&slug, &verb, &actor, cx);
+            }
+            GuiEvent::InputOrigin { pane, origin } => {
+                if let Some(rt) = self
+                    .panes
+                    .iter()
+                    .find(|p| p.slug == pane)
+                    .and_then(|p| p.remote_terminal())
+                    .cloned()
+                {
+                    rt.update(cx, |t, cx| t.set_input_origin(origin, cx));
+                }
+            }
+            GuiEvent::Agency {
+                pane,
+                owner,
+                drive_mode,
+                human_idle: _,
+                exited,
+                exit_code,
+            } => {
+                self.owners.insert(
+                    pane.clone(),
+                    OwnerChrome {
+                        owner,
+                        drive_mode,
+                        exited,
+                        exit_code,
+                    },
+                );
+                cx.notify();
             }
             GuiEvent::Ghost { pane, ghost } => {
                 if let Some(rt) = self
@@ -1151,537 +1207,29 @@ impl SeanceApp {
         );
     }
 
-    fn persist(&self, cx: &mut Context<Self>) {
-        let state = AppState {
-            panes: self.panes.iter().map(|s| s.persisted()).collect(),
-            sidebar_width: None,
-            drawer_width: None,
-            drawer_open: matches!(self.drawer, Drawer::Activity),
-            active_slug: self.active_slug.clone(),
-            selected_workspace: self.selected_workspace.clone(),
-            extra_workspaces: self.extra_workspaces.clone(),
-            workspace_order: self.workspace_order.clone(),
-            window_size: None,
-        };
-        if let Err(err) = state.save() {
-            eprintln!("[seance] state save failed: {err:#}");
-        }
-        let _ = cx;
+    /// No-op: the daemon (`Engine::persist`) is the sole writer of
+    /// `state.json`. Dual writers caused races after the daemon split.
+    fn persist(&self, _cx: &mut Context<Self>) {}
+
+    // ---- control plane (DEAD after daemon split) ----
+    //
+    // All ctl ops are handled by `Engine::handle_control` in the daemon.
+    // This method is retained only so old call sites don't break the
+    // compile if any residual reference remains; it must never be the
+    // live path.
+
+    #[allow(dead_code)]
+    /// Retired: control plane lives in the daemon (`Engine::handle_control`).
+    #[allow(dead_code)]
+    fn handle_control(&mut self, _request: ControlRequest, _cx: &mut Context<Self>) -> ControlResponse {
+        ControlResponse::err(
+            "control plane is daemon-only — this GUI path is retired (foundation 0.9.1)",
+        )
     }
 
-    // ---- control plane ----
 
-    fn handle_control(&mut self, request: ControlRequest, cx: &mut Context<Self>) -> ControlResponse {
-        use serde_json::json;
-        let ok = |data: serde_json::Value| ControlResponse {
-            ok: true,
-            data: Some(data),
-            error: None,
-        };
-        let err = |msg: String| ControlResponse {
-            ok: false,
-            data: None,
-            error: Some(msg),
-        };
-
-        // Scoped lookup: a workspace-scoped caller only sees its own panes.
-        let find_scoped = |app: &Self, key: &str, scope: &Option<String>| -> Result<usize, String> {
-            match app.find_session(key) {
-                Some(idx) => match scope {
-                    Some(ws) if app.panes[idx].workspace != *ws => Err(format!(
-                        "pane '{key}' is outside your workspace '{ws}' (use --all to cross)"
-                    )),
-                    _ => Ok(idx),
-                },
-                None => Err(match scope {
-                    Some(ws) => format!("no pane '{key}' in workspace '{ws}'"),
-                    None => format!("no pane '{key}'"),
-                }),
-            }
-        };
-
-        // Attribution: agents self-identify via `from` (their own pane slug).
-        let actor_of = |from: &Option<String>| -> String {
-            match from {
-                Some(f) => format!("agent:{f}"),
-                None => "cli".to_string(),
-            }
-        };
-
-        match request {
-            ControlRequest::List { scope, from } => {
-                let _ = actor_of(&from);
-                let panes: Vec<_> = self
-                    .panes
-                    .iter()
-                    .filter(|s| scope.as_deref().is_none_or(|ws| s.workspace == ws))
-                    .map(|s| {
-                        json!({
-                            "kind": s.kind_str(),
-                            "name": s.name,
-                            "slug": s.slug,
-                            "workspace": s.workspace,
-                            "command": s.command,
-                            "cwd": s.cwd,
-                            "tiled": s.tiled,
-                            "popped": s.popped.is_some(),
-                            "running": s.is_running(cx),
-                            "title": s.title(cx),
-                        })
-                    })
-                    .collect();
-                ok(json!({ "panes": panes, "scope": scope }))
-            }
-            ControlRequest::New {
-                name,
-                cwd,
-                command,
-                workspace,
-                file,
-                scope,
-                from,
-            } => {
-                let actor = actor_of(&from);
-                // Scoped callers spawn into their own workspace by default,
-                // and may not spawn into a different one.
-                let workspace = workspace.or_else(|| scope.clone());
-                if let (Some(ws), Some(sc)) = (workspace.as_deref(), scope.as_deref()) {
-                    if ws != sc {
-                        return err(format!(
-                            "scoped to workspace '{sc}' — cannot spawn into '{ws}' (use --all)"
-                        ));
-                    }
-                }
-                let slug = self.spawn_internal(
-                    SpawnRequest {
-                        name,
-                        cwd,
-                        command,
-                        workspace,
-                        tiled: true,
-                        resume: false,
-                        file,
-                    },
-                    cx,
-                );
-                match slug {
-                    Some(slug) => {
-                        let pane = self.panes.iter().find(|s| s.slug == slug).unwrap();
-                        events::log(
-                            &actor,
-                            Some(&pane.workspace),
-                            Some(&slug),
-                            "ctl_new",
-                            format!("spawned '{}'", pane.name),
-                        );
-                        ok(json!({
-                            "slug": slug,
-                            "workspace": pane.workspace,
-                            "scratchpad": pane.scratch_path.to_string_lossy(),
-                        }))
-                    }
-                    None => err("spawn failed (see seance stderr)".into()),
-                }
-            }
-            ControlRequest::Send {
-                pane,
-                text,
-                submit,
-                scope,
-                from,
-            } => match find_scoped(self, &pane, &scope) {
-                Ok(idx) => {
-                    let Some(terminal) = self.panes[idx].terminal().cloned() else {
-                        return err("not a terminal pane".into());
-                    };
-                    let actor = actor_of(&from);
-                    let slug = self.panes[idx].slug.clone();
-                    events::log(
-                        &actor,
-                        Some(&self.panes[idx].workspace),
-                        Some(&slug),
-                        "ctl_send",
-                        format!("sent {} chars{}", text.len(), if submit { " + submit" } else { "" }),
-                    );
-                    self.touch(&slug, "⚡ driven", &actor, cx);
-                    terminal.update(cx, |term, cx| {
-                        term.scroll_to_bottom();
-                        term.inject(text, submit, cx);
-                    });
-                    ok(serde_json::Value::Null)
-                }
-                Err(e) => err(e),
-            },
-            ControlRequest::SendRaw {
-                pane,
-                bytes_b64,
-                scope,
-                from,
-            } => match find_scoped(self, &pane, &scope) {
-                Ok(idx) => match base64_decode(&bytes_b64) {
-                    Ok(bytes) => {
-                        let Some(terminal) = self.panes[idx].terminal().cloned() else {
-                            return err("not a terminal pane".into());
-                        };
-                        let actor = actor_of(&from);
-                        let slug = self.panes[idx].slug.clone();
-                        events::log(
-                            &actor,
-                            Some(&self.panes[idx].workspace),
-                            Some(&slug),
-                            "ctl_send_raw",
-                            format!("sent {} raw bytes", bytes.len()),
-                        );
-                        self.touch(&slug, "⚡ driven", &actor, cx);
-                        terminal.update(cx, |term, _| {
-                            term.write_bytes(bytes);
-                        });
-                        ok(serde_json::Value::Null)
-                    }
-                    Err(e) => err(format!("bad base64: {e}")),
-                },
-                Err(e) => err(e),
-            },
-            ControlRequest::Read { pane, lines, scope, from } => {
-                match find_scoped(self, &pane, &scope) {
-                    Ok(idx) => {
-                        let actor = actor_of(&from);
-                        let slug = self.panes[idx].slug.clone();
-                        // Self-reads are routine; only surface cross-pane observation.
-                        if from.as_deref() != Some(slug.as_str()) {
-                            events::log(
-                                &actor,
-                                Some(&self.panes[idx].workspace),
-                                Some(&slug),
-                                "ctl_read",
-                                "read screen".to_string(),
-                            );
-                            self.touch(&slug, "👁 observed", &actor, cx);
-                        }
-                        let text = match self.panes[idx].terminal() {
-                            Some(t) => t.read(cx).screen_text(lines),
-                            None => {
-                                // File panes: reading = the document's content.
-                                self.panes[idx]
-                                    .file_view()
-                                    .map(|v| {
-                                        std::fs::read_to_string(v.read(cx).path())
-                                            .unwrap_or_default()
-                                    })
-                                    .unwrap_or_default()
-                            }
-                        };
-                        ok(json!({ "screen": text }))
-                    }
-                    Err(e) => err(e),
-                }
-            }
-            ControlRequest::Status { pane, scope, from } => match find_scoped(self, &pane, &scope) {
-                #[allow(unused_variables)]
-                Ok(idx) => {
-                    let s = &self.panes[idx];
-                    let exit_code = s
-                        .terminal()
-                        .and_then(|t| t.read(cx).exited.flatten());
-                    ok(json!({
-                        "kind": s.kind_str(),
-                        "name": s.name,
-                        "slug": s.slug,
-                        "workspace": s.workspace,
-                        "command": s.command,
-                        "running": s.is_running(cx),
-                        "exit_code": exit_code,
-                        "title": s.title(cx),
-                        "tiled": s.tiled,
-                        "popped": s.popped.is_some(),
-                    }))
-                }
-                Err(e) => err(e),
-            },
-            ControlRequest::Kill { pane, scope, from } => match find_scoped(self, &pane, &scope) {
-                Ok(idx) => {
-                    let actor = actor_of(&from);
-                    let slug = self.panes[idx].slug.clone();
-                    events::log(
-                        &actor,
-                        Some(&self.panes[idx].workspace),
-                        Some(&slug),
-                        "ctl_kill",
-                        format!("killed '{}'", self.panes[idx].name),
-                    );
-                    self.kill_session(&slug, cx);
-                    ok(serde_json::Value::Null)
-                }
-                Err(e) => err(e),
-            },
-            ControlRequest::Scratchpad { pane, scope, from } => match find_scoped(self, &pane, &scope) {
-                #[allow(unused_variables)]
-                Ok(idx) => ok(json!({
-                    "path": self.panes[idx].scratch_path.to_string_lossy(),
-                })),
-                Err(e) => err(e),
-            },
-            ControlRequest::Timeline {
-                since_secs,
-                pane,
-                actor,
-                limit,
-                scope,
-                from: _,
-            } => {
-                let since_ms = since_secs
-                    .map(|s| {
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0)
-                            .saturating_sub(s * 1000)
-                    })
-                    .unwrap_or(0);
-                let entries = events::read(
-                    since_ms,
-                    scope.as_deref(),
-                    pane.as_deref(),
-                    actor.as_deref(),
-                    limit.unwrap_or(100),
-                );
-                let rows: Vec<_> = entries
-                    .iter()
-                    .map(|e| {
-                        json!({
-                            "time": events::fmt_time(e.ts),
-                            "actor": e.actor,
-                            "pane": e.pane,
-                            "workspace": e.workspace,
-                            "kind": e.kind,
-                            "detail": e.detail,
-                        })
-                    })
-                    .collect();
-                ok(json!({ "events": rows }))
-            }
-            ControlRequest::StatusSet {
-                state,
-                note,
-                pane,
-                scope,
-                from,
-            } => {
-                let target = pane.or_else(|| from.clone());
-                let Some(target) = target else {
-                    return err("status-set: no pane (run inside a pane or pass --pane)".into());
-                };
-                match find_scoped(self, &target, &scope) {
-                    Ok(idx) => {
-                        let slug = self.panes[idx].slug.clone();
-                        let actor = actor_of(&from);
-                        events::log(
-                            &actor,
-                            Some(&self.panes[idx].workspace),
-                            Some(&slug),
-                            "status_set",
-                            format!("{state}{}", note.as_deref().map(|n| format!(": {n}")).unwrap_or_default()),
-                        );
-                        self.statuses.insert(
-                            slug,
-                            PaneStatus {
-                                state,
-                                note,
-                            },
-                        );
-                        cx.notify();
-                        ok(serde_json::Value::Null)
-                    }
-                    Err(e) => err(e),
-                }
-            }
-            ControlRequest::Ask {
-                question,
-                choices,
-                scope,
-                from,
-            } => {
-                self.ask_counter += 1;
-                let id = format!("ask-{}", self.ask_counter);
-                let from_label = from.clone().unwrap_or_else(|| "cli".into());
-                events::log(
-                    &actor_of(&from),
-                    scope.as_deref(),
-                    from.as_deref(),
-                    "ask",
-                    format!("asked: {question}"),
-                );
-                self.asks.push(PendingAsk {
-                    id: id.clone(),
-                    from: from_label,
-                    workspace: scope.clone(),
-                    question,
-                    choices: choices.unwrap_or_default(),
-                    answer: None,
-                });
-                cx.notify();
-                ok(json!({ "id": id }))
-            }
-            ControlRequest::Propose {
-                pane,
-                text,
-                reason,
-                scope,
-                from,
-            } => match find_scoped(self, &pane, &scope) {
-                Ok(idx) => {
-                    if self.panes[idx].terminal().is_none() {
-                        return err("not a terminal pane".into());
-                    }
-                    self.proposal_counter += 1;
-                    let id = format!("prop-{}", self.proposal_counter);
-                    let actor = actor_of(&from);
-                    let slug = self.panes[idx].slug.clone();
-                    let from_label = from.clone().unwrap_or_else(|| "cli".into());
-                    // Supersede any pending proposal on this pane.
-                    let old = self.panes[idx]
-                        .terminal()
-                        .and_then(|t| t.read(cx).ghost.as_ref().map(|g| g.id.clone()));
-                    if let Some(old_id) = old {
-                        if let Some(entry) = self.proposals.get_mut(&old_id) {
-                            entry.1 = Some("superseded".to_string());
-                        }
-                    }
-                    events::log(
-                        &actor,
-                        Some(&self.panes[idx].workspace),
-                        Some(&slug),
-                        "propose",
-                        format!("proposed: {text}"),
-                    );
-                    self.touch(&slug, "💭 proposal", &actor, cx);
-                    self.proposals.insert(id.clone(), (slug, None));
-                    self.panes[idx].terminal().unwrap().clone().update(cx, |term, _| {
-                        term.ghost = Some(crate::terminal::Ghost {
-                            id: id.clone(),
-                            text,
-                            from: from_label,
-                            reason,
-                        });
-                    });
-                    cx.notify();
-                    ok(json!({ "id": id }))
-                }
-                Err(e) => err(e),
-            },
-            ControlRequest::ProposeResult { id, .. } => match self.proposals.get(&id) {
-                Some((_, Some(outcome))) => {
-                    let outcome = outcome.clone();
-                    self.proposals.remove(&id);
-                    ok(json!({ "resolved": true, "outcome": outcome }))
-                }
-                Some((_, None)) => ok(json!({ "resolved": false })),
-                None => err(format!("no proposal '{id}'")),
-            },
-            ControlRequest::Human { .. } => ok(json!({
-                "focused_pane": self.active_slug,
-                "selected_workspace": self.selected_workspace,
-                "pending_asks": self.asks.iter().filter(|a| a.answer.is_none()).count(),
-            })),
-            ControlRequest::WorkspaceFork {
-                workspace,
-                name,
-                scope,
-                from,
-            } => {
-                let src = workspace
-                    .or_else(|| scope.clone())
-                    .or_else(|| self.selected_workspace.clone());
-                let Some(src) = src else {
-                    return err("fork: no source workspace".into());
-                };
-                let new_name = self.fork_workspace(&src, name, &actor_of(&from), cx);
-                match new_name {
-                    Some(n) => ok(json!({ "workspace": n })),
-                    None => err(format!("workspace '{src}' has no panes")),
-                }
-            }
-            ControlRequest::CmdBegin { command, cwd, from, .. } => {
-                let Some(pane) = from else {
-                    return err("cmd-begin: must be called from inside a pane".into());
-                };
-                let cwd = cwd.unwrap_or_default();
-                events::log(
-                    &format!("agent:{pane}"),
-                    None,
-                    Some(&pane),
-                    "cmd_start",
-                    format!("$ {command}"),
-                );
-                self.cmd_log.begin(&pane, command, cwd);
-                ok(serde_json::Value::Null)
-            }
-            ControlRequest::CmdEnd { exit, from, .. } => {
-                let Some(pane) = from else {
-                    return err("cmd-end: must be called from inside a pane".into());
-                };
-                self.cmd_log.end(&pane, exit);
-                if let Some(rec) = self.cmd_log.last(&pane, false) {
-                    events::log(
-                        &format!("agent:{pane}"),
-                        None,
-                        Some(&pane),
-                        "cmd_end",
-                        format!(
-                            "exit {} after {}ms: {}",
-                            exit,
-                            rec.duration_ms().unwrap_or(0),
-                            rec.command
-                        ),
-                    );
-                }
-                cx.notify();
-                ok(serde_json::Value::Null)
-            }
-            ControlRequest::Commands { pane, limit, scope, .. } => {
-                match find_scoped(self, &pane, &scope) {
-                    Ok(idx) => {
-                        let slug = self.panes[idx].slug.clone();
-                        let records = self.cmd_log.list(&slug, limit.unwrap_or(50));
-                        ok(serde_json::to_value(records).unwrap_or(serde_json::Value::Null))
-                    }
-                    Err(e) => err(e),
-                }
-            }
-            ControlRequest::LastCommand { pane, failed_only, scope, .. } => {
-                match find_scoped(self, &pane, &scope) {
-                    Ok(idx) => {
-                        let slug = self.panes[idx].slug.clone();
-                        match self.cmd_log.last(&slug, failed_only) {
-                            Some(rec) => {
-                                ok(serde_json::to_value(rec).unwrap_or(serde_json::Value::Null))
-                            }
-                            None => err("no matching command".into()),
-                        }
-                    }
-                    Err(e) => err(e),
-                }
-            }
-            ControlRequest::AskResult { id, .. } => {
-                match self.asks.iter().position(|a| a.id == id) {
-                    Some(idx) => {
-                        if let Some(answer) = self.asks[idx].answer.clone() {
-                            self.asks.remove(idx);
-                            cx.notify();
-                            ok(json!({ "answered": true, "answer": answer }))
-                        } else {
-                            ok(json!({ "answered": false }))
-                        }
-                    }
-                    None => err(format!("no ask '{id}'")),
-                }
-            }
-        }
-    }
-
-    /// Fork a workspace: respawn each pane (name/cwd/command preserved) into a
-    /// fresh workspace and copy scratchpad contents. PTYs restart; layout,
-    /// commands, and notes carry over.
+    /// Fork a workspace via the daemon (sole owner of PTYs + scratch copy).
+    /// GUI never spawns local PTYs post-daemon-split.
     fn fork_workspace(
         &mut self,
         src: &str,
@@ -1689,68 +1237,25 @@ impl SeanceApp {
         actor: &str,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        let members: Vec<(String, String, String, bool, String)> = self
-            .panes
-            .iter()
-            .filter(|p| p.workspace == src)
-            .map(|p| {
-                (
-                    p.name.clone(),
-                    p.cwd.clone(),
-                    p.command.clone(),
-                    p.tiled,
-                    p.scratch_path.to_string_lossy().to_string(),
-                )
-            })
-            .collect();
-        if members.is_empty() {
+        if !self.panes.iter().any(|p| p.workspace == src) {
             return None;
         }
-        let existing = self.workspaces();
+        if let Err(e) = self.client.fork_workspace(src, name.clone()) {
+            eprintln!("[seance] fork_workspace via daemon failed: {e:#}");
+            return None;
+        }
         let new_ws = name
-            .map(|n| crate::state::slugify(&n))
-            .filter(|n| !n.is_empty() && !existing.contains(n))
-            .unwrap_or_else(|| {
-                let mut n = 2;
-                loop {
-                    let candidate = format!("{src}-fork-{n}");
-                    if !existing.contains(&candidate) {
-                        break candidate;
-                    }
-                    n += 1;
-                }
-            });
+            .as_ref()
+            .map(|n| crate::state::slugify(n))
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| format!("{src}-fork"));
         events::log(
             actor,
             Some(&new_ws),
             None,
             "workspace_forked",
-            format!("forked '{src}' -> '{new_ws}' ({} panes)", members.len()),
+            format!("fork requested '{src}' -> '{new_ws}' (daemon)"),
         );
-        for (pname, cwd, command, tiled, old_scratch) in members {
-            let slug = self.spawn_internal(
-                SpawnRequest {
-                    name: pname,
-                    cwd: Some(cwd),
-                    command: Some(command),
-                    workspace: Some(new_ws.clone()),
-                    tiled,
-                    resume: false,
-                    file: None,
-                },
-                cx,
-            );
-            // Carry the notes across.
-            if let Some(slug) = slug {
-                if let Some(new_pane) = self.panes.iter().find(|p| p.slug == slug) {
-                    if let Ok(content) = std::fs::read_to_string(&old_scratch) {
-                        let _ = std::fs::write(&new_pane.scratch_path, content);
-                    }
-                }
-            }
-        }
-        self.selected_workspace = Some(new_ws.clone());
-        self.persist(cx);
         cx.notify();
         Some(new_ws)
     }
@@ -2390,6 +1895,7 @@ impl SeanceApp {
                         pane,
                         active.as_deref(),
                         self.statuses.get(&pane.slug),
+                        self.owners.get(&pane.slug),
                         self.touches.get(&pane.slug),
                         whisper,
                         flipped,
@@ -2554,6 +2060,17 @@ fn render_session_row(
                     pane.name.clone()
                 }),
         )
+        // Stage/roster lite: show badge text so humans see status without
+        // flipping every pane (0.9.5).
+        .when_some(status.map(|s| s.state.clone()), |d, st| {
+            d.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(dot_color)
+                    .child(st),
+            )
+        })
         .child(
             div()
                 .id(SharedString::from(format!("tile-{slug}")))
@@ -2625,6 +2142,7 @@ fn render_pane(
     pane: &Pane,
     active: Option<&str>,
     status: Option<&PaneStatus>,
+    owner: Option<&OwnerChrome>,
     touch: Option<&(String, String, std::time::Instant)>,
     whisper: Option<&Entity<InputState>>,
     flipped: Option<&Entity<ScratchpadDrawer>>,
@@ -2638,6 +2156,34 @@ fn render_pane(
     let title = pane.title(cx).unwrap_or_else(|| pane.command.clone());
     // Local or daemon-backed terminal panes both get arm/whisper chrome.
     let has_terminal = pane.terminal().is_some() || pane.remote_terminal().is_some();
+    let exited = owner.map(|o| o.exited).unwrap_or(false);
+    let owner_label = owner.map(|o| {
+        if o.exited {
+            match o.exit_code {
+                Some(c) => format!("☠ exit {c}"),
+                None => "☠ exited".into(),
+            }
+        } else if o.owner == "human" {
+            "⌨ you".into()
+        } else if o.owner == "none" {
+            "· free".into()
+        } else if o.owner.starts_with("agent:") || o.owner == "cli" {
+            format!("⚡ {}", o.owner.trim_start_matches("agent:"))
+        } else {
+            o.owner.clone()
+        }
+    });
+    let owner_border = owner.and_then(|o| {
+        if o.exited {
+            Some(SeancePalette::danger())
+        } else if o.owner == "human" {
+            Some(SeancePalette::flame())
+        } else if o.owner.starts_with("agent:") || o.owner == "cli" {
+            Some(SeancePalette::violet())
+        } else {
+            None
+        }
+    });
 
     // Body: notes face if flipped, otherwise the terminal/file content.
     // Soft fade when the notes face appears (cheap stand-in for a card flip).
@@ -2774,7 +2320,9 @@ fn render_pane(
         .flex_col()
         .rounded_md()
         .border_1()
-        .border_color(if is_flipped {
+        .border_color(if let Some(c) = owner_border {
+            c
+        } else if is_flipped {
             SeancePalette::violet()
         } else if is_active {
             SeancePalette::flame_dim()
@@ -2782,6 +2330,7 @@ fn render_pane(
             SeancePalette::border()
         })
         .bg(SeancePalette::bg())
+        .opacity(if exited { 0.72 } else { 1.0 })
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener({
@@ -2805,6 +2354,21 @@ fn render_pane(
                 } else {
                     SeancePalette::bg_elevated()
                 })
+                .children(owner_label.map(|lab| {
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(if exited {
+                            SeancePalette::danger()
+                        } else if lab.starts_with('⌨') {
+                            SeancePalette::flame()
+                        } else if lab.starts_with('⚡') {
+                            SeancePalette::violet()
+                        } else {
+                            SeancePalette::text_faint()
+                        })
+                        .child(lab)
+                }))
                 .child(
                     div()
                         .flex_none()

@@ -161,6 +161,9 @@ pub struct PtySession {
     master_fd: Arc<Mutex<Option<RawFd>>>,
     title: Arc<Mutex<Option<String>>>,
     pub ghost: Arc<Mutex<Option<GhostSnap>>>,
+    /// Last actor/origin that wrote stdin to this PTY (for causal tint).
+    /// Values: `human` | `agent:<slug>` | `cli` | `propose` | …
+    pub last_input_origin: Arc<Mutex<Option<String>>>,
     rev: AtomicU64,
     exited: Arc<AtomicBool>,
     cols: Arc<Mutex<u16>>,
@@ -330,6 +333,7 @@ impl PtySession {
             master_fd: master_fd_slot,
             title,
             ghost: Arc::new(Mutex::new(ghost)),
+            last_input_origin: Arc::new(Mutex::new(None)),
             rev: AtomicU64::new(1),
             exited,
             cols: cols_a,
@@ -356,6 +360,15 @@ impl PtySession {
 
     pub fn write_bytes(&self, bytes: Vec<u8>) {
         let _ = self.io_tx.send(IoMsg::Write(bytes));
+    }
+
+    /// Record who last wrote stdin (for causal tint + event origin).
+    pub fn set_input_origin(&self, origin: impl Into<String>) {
+        *self.last_input_origin.lock().unwrap() = Some(origin.into());
+    }
+
+    pub fn input_origin(&self) -> Option<String> {
+        self.last_input_origin.lock().unwrap().clone()
     }
 
     pub fn paste(&self, text: &str) {
@@ -506,6 +519,7 @@ impl PtySession {
             app_cursor,
             mouse_mode,
             sgr_mouse,
+            last_input_origin: self.input_origin(),
         }
     }
 

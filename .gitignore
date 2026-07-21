@@ -7,3 +7,6 @@
 .idea/
 .vscode/
 *.log
+
+# agent collab test outputs (local)
+data/agent-collab-runs/

@@ -48,6 +48,8 @@ pub struct EnginePane {
     pub scratch_path: PathBuf,
     pub file: Option<String>,
     pub session: Option<PtySession>,
+    /// Co-presence: who holds the keys.
+    pub agency: crate::agency::Agency,
 }
 
 pub struct PendingAsk {
@@ -68,10 +70,17 @@ pub struct Engine {
     pub store: ScratchpadStore,
     pub cmd_log: CommandLog,
     pub asks: Vec<PendingAsk>,
+    /// status slug → (state, note)
     pub statuses: HashMap<String, (String, Option<String>)>,
+    /// Scratchpad revision per pane (bumped on note/finish/atomic pad write).
+    pub pad_revs: HashMap<String, u64>,
+    /// At last inject: (pad_rev, pad_bytes) — evidence for wait --since-inject.
+    pub inject_baselines: HashMap<String, (u64, u64)>,
     pub proposals: HashMap<String, (String, Option<String>)>,
     pub proposal_counter: u64,
     pub ask_counter: u64,
+    /// Capability / consent store (daemon-enforced policy).
+    pub caps: crate::caps::CapStore,
     event_tx: Sender<SessionEvent>,
     /// Broadcast: clones of GUI event senders.
     gui_txs: Vec<Sender<GuiEvent>>,
@@ -110,9 +119,12 @@ impl Engine {
             cmd_log: CommandLog::new(),
             asks: Vec::new(),
             statuses: HashMap::new(),
+            pad_revs: HashMap::new(),
+            inject_baselines: HashMap::new(),
             proposals: HashMap::new(),
             proposal_counter: 0,
             ask_counter: 0,
+            caps: crate::caps::CapStore::load(),
             event_tx,
             gui_txs: Vec::new(),
             last_grid_push: HashMap::new(),
@@ -121,7 +133,25 @@ impl Engine {
         };
 
         for p in &state.panes {
+            let slug = p.slug.clone();
+            if let Some(st) = &p.status {
+                eng.statuses
+                    .insert(slug.clone(), (st.clone(), p.status_note.clone()));
+            }
+            if p.pad_rev > 0 {
+                eng.pad_revs.insert(slug.clone(), p.pad_rev);
+            }
             let _ = eng.spawn_from_persisted(p);
+            // Restore agency onto the pane we just spawned.
+            if let Some(pane) = eng.panes.iter_mut().find(|x| x.slug == slug) {
+                let snap = crate::agency::AgencySnap {
+                    owner: p.owner.clone().unwrap_or_else(|| "none".into()),
+                    drive_mode: p.drive_mode.clone().unwrap_or_else(|| "pair".into()),
+                    exited: p.exited,
+                    exit_code: p.exit_code,
+                };
+                pane.agency = crate::agency::Agency::from_snap(&snap);
+            }
         }
 
         if eng.panes.is_empty() {
@@ -158,11 +188,41 @@ impl Engine {
             workspace_order: bundle.workspace_order,
             store,
             cmd_log: CommandLog::new(),
-            asks: Vec::new(),
-            statuses: HashMap::new(),
+            asks: bundle
+                .asks
+                .into_iter()
+                .map(|a| PendingAsk {
+                    id: a.id,
+                    from: a.from,
+                    workspace: a.workspace,
+                    question: a.question,
+                    choices: a.choices,
+                    answer: a.answer,
+                })
+                .collect(),
+            statuses: {
+                let mut m = HashMap::new();
+                for s in &bundle.statuses {
+                    m.insert(s.slug.clone(), (s.state.clone(), s.note.clone()));
+                }
+                m
+            },
+            pad_revs: {
+                let mut m: HashMap<String, u64> = bundle.pad_revs.into_iter().collect();
+                for s in &bundle.statuses {
+                    m.entry(s.slug.clone()).or_insert(s.pad_rev);
+                }
+                m
+            },
+            inject_baselines: bundle
+                .inject_baselines
+                .into_iter()
+                .map(|b| (b.slug, (b.pad_rev, b.pad_bytes)))
+                .collect(),
             proposals: HashMap::new(),
             proposal_counter: bundle.proposal_counter,
             ask_counter: bundle.ask_counter,
+            caps: crate::caps::CapStore::load(),
             event_tx: event_tx.clone(),
             gui_txs: Vec::new(),
             last_grid_push: HashMap::new(),
@@ -175,6 +235,11 @@ impl Engine {
 
         for hp in bundle.panes {
             let scratch_path = eng.store.path_for(&hp.slug);
+            let agency = hp
+                .agency
+                .as_ref()
+                .map(crate::agency::Agency::from_snap)
+                .unwrap_or_default();
             if hp.kind == "file" {
                 eng.panes.push(EnginePane {
                     kind: "file".into(),
@@ -188,6 +253,7 @@ impl Engine {
                     scratch_path,
                     file: hp.file,
                     session: None,
+                    agency,
                 });
                 continue;
             }
@@ -232,6 +298,7 @@ impl Engine {
                 scratch_path,
                 file: None,
                 session,
+                agency,
             });
         }
         Ok((eng, event_rx))
@@ -405,24 +472,38 @@ impl Engine {
                 }
             }
             SessionEvent::Exited { slug, code } => {
-                // Shell `exit` (or any child death) → close the pane. Leaving
-                // a dead "exited" tile was worse than a clean disappear.
+                // Tombstone: keep the pane so the human can read the corpse and
+                // decide; do not auto-remove. Explicit `kill` clears it.
+                let code = *code;
+                if let Some(p) = self.panes.iter_mut().find(|p| p.slug == *slug) {
+                    if let Some(s) = p.session.take() {
+                        // Process already dead; drop without re-killing if possible.
+                        drop(s);
+                    }
+                    p.agency.mark_exited(code);
+                }
                 events::log(
                     "daemon",
                     None,
                     Some(slug),
                     "pane_exited",
-                    format!("process exited ({code:?}) — closing pane"),
+                    format!("process exited ({code:?}) — tombstone retained"),
                 );
                 self.broadcast(GuiEvent::PaneExited {
                     slug: slug.clone(),
-                    exit_code: *code,
+                    exit_code: code,
                 });
-                self.kill_pane(slug);
-                self.broadcast(GuiEvent::PaneKilled {
-                    slug: slug.clone(),
-                });
-                // Full state so any GUI that only listens for State stays in sync.
+                if let Some(p) = self.panes.iter().find(|p| p.slug == *slug) {
+                    let w = p.agency.to_wire();
+                    self.broadcast(GuiEvent::Agency {
+                        pane: slug.clone(),
+                        owner: w.owner,
+                        drive_mode: w.drive_mode,
+                        human_idle: w.human_idle,
+                        exited: w.exited,
+                        exit_code: w.exit_code,
+                    });
+                }
                 self.broadcast(self.full_state_event());
                 self.persist();
             }
@@ -463,32 +544,144 @@ impl Engine {
                     slug: slug.clone(),
                     state: state.clone(),
                     note: note.clone(),
+                    pad_rev: self.pad_revs.get(slug).copied().unwrap_or(0),
                 })
                 .collect(),
         }
     }
 
+    /// Dense one-row summary for orchestrators (`list` / `brief` / `roster`).
+    fn pane_summary_json(&self, p: &EnginePane) -> serde_json::Value {
+        let w = p.agency.to_wire();
+        let running = if p.kind == "file" {
+            true
+        } else {
+            p.session
+                .as_ref()
+                .map(|s| s.is_running())
+                .unwrap_or(false)
+                && !p.agency.exited
+        };
+        let scratch = p.scratch_path.to_string_lossy().to_string();
+        let scratchpad_bytes = std::fs::metadata(&p.scratch_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let (status, status_note) = self
+            .statuses
+            .get(&p.slug)
+            .map(|(s, n)| (Some(s.clone()), n.clone()))
+            .unwrap_or((None, None));
+        let pad_rev = self.pad_revs.get(&p.slug).copied().unwrap_or(0);
+        let (inject_pad_rev, inject_pad_bytes) = self
+            .inject_baselines
+            .get(&p.slug)
+            .copied()
+            .map(|(r, b)| (Some(r), Some(b)))
+            .unwrap_or((None, None));
+        let open_asks = self
+            .asks
+            .iter()
+            .filter(|a| a.answer.is_none() && a.from == p.slug)
+            .count();
+        json!({
+            "kind": p.kind,
+            "name": p.name,
+            "slug": p.slug,
+            "workspace": p.workspace,
+            "command": p.command,
+            "cwd": p.cwd,
+            "tiled": p.tiled,
+            "running": running,
+            "exited": w.exited,
+            "exit_code": w.exit_code,
+            "owner": w.owner,
+            "drive_mode": w.drive_mode,
+            "human_idle": w.human_idle,
+            "title": p.session.as_ref().and_then(|s| s.title()),
+            "status": status,
+            "status_note": status_note,
+            "scratchpad": scratch,
+            "scratchpad_bytes": scratchpad_bytes,
+            "pad_rev": pad_rev,
+            "inject_pad_rev": inject_pad_rev,
+            "inject_pad_bytes": inject_pad_bytes,
+            "open_asks": open_asks,
+        })
+    }
+
     fn pane_infos(&self) -> Vec<PaneInfo> {
         self.panes
             .iter()
-            .map(|p| PaneInfo {
-                kind: p.kind.clone(),
-                name: p.name.clone(),
-                slug: p.slug.clone(),
-                workspace: p.workspace.clone(),
-                command: p.command.clone(),
-                cwd: p.cwd.clone(),
-                tiled: p.tiled,
-                running: p
-                    .session
-                    .as_ref()
-                    .map(|s| s.is_running())
-                    .unwrap_or(true),
-                title: p.session.as_ref().and_then(|s| s.title()),
-                scratchpad: p.scratch_path.to_string_lossy().to_string(),
-                file: p.file.clone(),
+            .map(|p| {
+                let running = if p.kind == "file" {
+                    true
+                } else {
+                    p.session
+                        .as_ref()
+                        .map(|s| s.is_running())
+                        .unwrap_or(false)
+                        && !p.agency.exited
+                };
+                let w = p.agency.to_wire();
+                PaneInfo {
+                    kind: p.kind.clone(),
+                    name: p.name.clone(),
+                    slug: p.slug.clone(),
+                    workspace: p.workspace.clone(),
+                    command: p.command.clone(),
+                    cwd: p.cwd.clone(),
+                    tiled: p.tiled,
+                    running,
+                    title: p.session.as_ref().and_then(|s| s.title()),
+                    scratchpad: p.scratch_path.to_string_lossy().to_string(),
+                    file: p.file.clone(),
+                    owner: Some(w.owner),
+                    drive_mode: Some(w.drive_mode),
+                    exited: w.exited,
+                    exit_code: w.exit_code,
+                }
             })
             .collect()
+    }
+
+    fn broadcast_agency(&mut self, slug: &str) {
+        if let Some(p) = self.panes.iter().find(|p| p.slug == slug) {
+            let w = p.agency.to_wire();
+            self.broadcast(GuiEvent::Agency {
+                pane: slug.to_string(),
+                owner: w.owner,
+                drive_mode: w.drive_mode,
+                human_idle: w.human_idle,
+                exited: w.exited,
+                exit_code: w.exit_code,
+            });
+        }
+    }
+
+    fn human_steal_pane(&mut self, slug: &str) {
+        let changed = self
+            .panes
+            .iter_mut()
+            .find(|p| p.slug == slug)
+            .map(|p| p.agency.human_steal())
+            .unwrap_or(false);
+        if changed {
+            events::log_ex(
+                "human",
+                self.selected_workspace.as_deref(),
+                Some(slug),
+                "agency.stolen",
+                "human took the keys".into(),
+                events::LogOpts {
+                    origin: Some("human_keystroke".into()),
+                    ..Default::default()
+                },
+            );
+            self.broadcast_agency(slug);
+        } else if let Some(p) = self.panes.iter_mut().find(|p| p.slug == slug) {
+            // Refresh idle timer even if already human.
+            p.agency.last_human_input = Some(std::time::Instant::now());
+        }
     }
 
     pub fn handle_gui(&mut self, req: GuiRequest) -> Option<GuiEvent> {
@@ -515,11 +708,33 @@ impl Engine {
             }
             GuiRequest::Input { pane, bytes_b64 } => {
                 if let Ok(bytes) = base64_decode(&bytes_b64) {
+                    let n = bytes.len();
+                    let is_ctrl = bytes.first().is_some_and(|b| *b < 0x20);
+                    // Human always wins the keys.
+                    self.human_steal_pane(&pane);
                     if let Some(s) = self.session_mut(&pane) {
+                        s.set_input_origin("human");
                         s.scroll_to_bottom();
                         s.write_bytes(bytes);
                         s.bump_rev();
                     }
+                    if n >= 2 || is_ctrl {
+                        events::log_ex(
+                            "human",
+                            self.selected_workspace.as_deref(),
+                            Some(&pane),
+                            "terminal.input",
+                            format!("{n} bytes"),
+                            events::LogOpts {
+                                origin: Some("human_keystroke".into()),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    self.broadcast(GuiEvent::InputOrigin {
+                        pane: pane.clone(),
+                        origin: "human".into(),
+                    });
                 }
                 None
             }
@@ -543,11 +758,29 @@ impl Engine {
                 self.snapshot_pane(&pane).map(|s| Self::grid_event(s, None))
             }
             GuiRequest::Inject { pane, text, submit } => {
+                let n = text.len();
+                self.human_steal_pane(&pane);
                 if let Some(s) = self.session_mut(&pane) {
+                    s.set_input_origin("human");
                     s.scroll_to_bottom();
                     s.inject(text, submit);
                     s.bump_rev();
                 }
+                events::log_ex(
+                    "human",
+                    self.selected_workspace.as_deref(),
+                    Some(&pane),
+                    "terminal.input",
+                    format!("inject {n} chars"),
+                    events::LogOpts {
+                        origin: Some("inject".into()),
+                        ..Default::default()
+                    },
+                );
+                self.broadcast(GuiEvent::InputOrigin {
+                    pane: pane.clone(),
+                    origin: "human".into(),
+                });
                 None
             }
             GuiRequest::GhostAccept { pane } => {
@@ -555,13 +788,30 @@ impl Engine {
                     .session_mut(&pane)
                     .and_then(|s| s.ghost.lock().unwrap().take());
                 if let Some(g) = ghost {
+                    let from = g.from.clone();
                     if let Some(entry) = self.proposals.get_mut(&g.id) {
                         entry.1 = Some("accepted".into());
                     }
                     if let Some(s) = self.session_mut(&pane) {
+                        s.set_input_origin("propose");
                         s.inject(g.text, true);
                     }
-                    events::log("human", None, Some(&pane), "propose_accepted", "accepted".into());
+                    events::log_ex(
+                        "human",
+                        None,
+                        Some(&pane),
+                        "propose_accepted",
+                        format!("accepted proposal from {from}"),
+                        events::LogOpts {
+                            origin: Some("propose_accepted".into()),
+                            caused_by: Some(g.id.clone()),
+                            ..Default::default()
+                        },
+                    );
+                    self.broadcast(GuiEvent::InputOrigin {
+                        pane: pane.clone(),
+                        origin: "propose".into(),
+                    });
                 }
                 self.broadcast(GuiEvent::Ghost {
                     pane: pane.clone(),
@@ -822,6 +1072,7 @@ impl Engine {
                 scratch_path,
                 file: Some(path.to_string_lossy().to_string()),
                 session: None,
+                agency: crate::agency::Agency::default(),
             });
             events::log("daemon", None, Some(&slug), "pane_spawned", "file pane".into());
             return Ok(slug);
@@ -858,6 +1109,7 @@ impl Engine {
             scratch_path,
             file: None,
             session: Some(session),
+            agency: crate::agency::Agency::default(),
         });
         events::log(
             "daemon",
@@ -893,6 +1145,7 @@ impl Engine {
                 scratch_path: self.store.path_for(&p.slug),
                 file: Some(path.to_string_lossy().to_string()),
                 session: None,
+                agency: crate::agency::Agency::default(),
             });
             return Ok(());
         }
@@ -928,6 +1181,7 @@ impl Engine {
             scratch_path: self.store.path_for(&p.slug),
             file: None,
             session: Some(session),
+            agency: crate::agency::Agency::default(),
         });
         Ok(())
     }
@@ -1100,15 +1354,30 @@ impl Engine {
             panes: self
                 .panes
                 .iter()
-                .map(|p| PersistedPane {
-                    kind: p.kind.clone(),
-                    name: p.name.clone(),
-                    slug: p.slug.clone(),
-                    cwd: p.cwd.clone(),
-                    command: p.command.clone(),
-                    tiled: p.tiled,
-                    resume_on_restore: p.resume_on_restore,
-                    workspace: p.workspace.clone(),
+                .map(|p| {
+                    let snap = p.agency.to_snap();
+                    let (status, status_note) = self
+                        .statuses
+                        .get(&p.slug)
+                        .map(|(s, n)| (Some(s.clone()), n.clone()))
+                        .unwrap_or((None, None));
+                    PersistedPane {
+                        kind: p.kind.clone(),
+                        name: p.name.clone(),
+                        slug: p.slug.clone(),
+                        cwd: p.cwd.clone(),
+                        command: p.command.clone(),
+                        tiled: p.tiled,
+                        resume_on_restore: p.resume_on_restore,
+                        workspace: p.workspace.clone(),
+                        status,
+                        status_note,
+                        pad_rev: self.pad_revs.get(&p.slug).copied().unwrap_or(0),
+                        owner: Some(snap.owner),
+                        drive_mode: Some(snap.drive_mode),
+                        exited: snap.exited,
+                        exit_code: snap.exit_code,
+                    }
                 })
                 .collect(),
             sidebar_width: None,
@@ -1148,27 +1417,32 @@ impl Engine {
                 .unwrap_or_else(|| "cli".into())
         };
 
+        // Capability check (Watch is handled specially by the daemon).
+        if !matches!(request, Watch { .. }) {
+            let principal = crate::caps::principal_of(request.from_field());
+            let op = crate::caps::op_name(&request);
+            let ws = request.workspace_hint();
+            if let Err(msg) = self.caps.check(&principal, op, ws) {
+                events::log(&principal, ws, None, "cap_denied", format!("{op}: {msg}"));
+                return err(msg);
+            }
+        }
+
         match request {
             List { scope, .. } => {
                 let panes: Vec<_> = self
                     .panes
                     .iter()
                     .filter(|p| scope.as_deref().is_none_or(|ws| p.workspace == ws))
-                    .map(|p| {
-                        json!({
-                            "kind": p.kind,
-                            "name": p.name,
-                            "slug": p.slug,
-                            "workspace": p.workspace,
-                            "command": p.command,
-                            "cwd": p.cwd,
-                            "tiled": p.tiled,
-                            "running": p.session.as_ref().map(|s| s.is_running()).unwrap_or(true),
-                            "title": p.session.as_ref().and_then(|s| s.title()),
-                        })
-                    })
+                    .map(|p| self.pane_summary_json(p))
                     .collect();
-                ok(json!({"panes": panes, "scope": scope}))
+                ok(json!({
+                    "panes": panes,
+                    "scope": scope,
+                    "event_seq": events::current_seq(),
+                    "focused_pane": self.focused_pane,
+                    "selected_workspace": self.selected_workspace,
+                }))
             }
             New {
                 name,
@@ -1239,28 +1513,74 @@ impl Engine {
                 pane,
                 text,
                 submit,
+                force,
                 scope,
                 from,
             } => match find(self, &pane, &scope) {
                 Ok(idx) => {
                     let slug = self.panes[idx].slug.clone();
                     let ws = self.panes[idx].workspace.clone();
-                    let Some(session) = self.panes[idx].session.as_ref() else {
-                        return err("not a terminal pane".into());
-                    };
-                    events::log(
-                        &actor(&from),
+                    let act = actor(&from);
+                    let exited = self.panes[idx].agency.exited;
+                    if let Err(e) = self.panes[idx].agency.may_inject(&act, force) {
+                        events::log(&act, Some(&ws), Some(&slug), "agency.denied", e.clone());
+                        return err(e);
+                    }
+                    if self.panes[idx].session.is_none() {
+                        return err(if exited {
+                            "pane has exited (tombstone)".into()
+                        } else {
+                            "not a terminal pane".into()
+                        });
+                    }
+                    self.panes[idx].agency.agent_claim(&act);
+                    events::log_ex(
+                        &act,
                         Some(&ws),
                         Some(&slug),
                         "ctl_send",
                         format!("sent {} chars", text.len()),
+                        events::LogOpts {
+                            origin: Some("ctl_send".into()),
+                            ..Default::default()
+                        },
                     );
-                    session.scroll_to_bottom();
-                    session.inject(text, submit);
+                    if let Some(session) = self.panes[idx].session.as_ref() {
+                        session.set_input_origin(&act);
+                        session.scroll_to_bottom();
+                        session.inject(text, submit);
+                    }
+                    // Early signal for orchestrators: inject received → working.
+                    // Capture pad baseline so wait --scratchpad is since-inject, not absolute.
+                    let pad_bytes = std::fs::metadata(&self.panes[idx].scratch_path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    let pad_rev = self.pad_revs.get(&slug).copied().unwrap_or(0);
+                    self.inject_baselines
+                        .insert(slug.clone(), (pad_rev, pad_bytes));
+                    self.statuses
+                        .insert(slug.clone(), ("working".into(), Some(format!("inject from {act}"))));
+                    self.broadcast(GuiEvent::Status {
+                        slug: slug.clone(),
+                        state: "working".into(),
+                        note: Some(format!("inject from {act}")),
+                    });
+                    events::log(
+                        &act,
+                        Some(&ws),
+                        Some(&slug),
+                        "status_set",
+                        format!("working: inject from {act}"),
+                    );
+                    self.broadcast_agency(&slug);
+                    self.broadcast(GuiEvent::InputOrigin {
+                        pane: slug.clone(),
+                        origin: act.clone(),
+                    });
                     self.broadcast(GuiEvent::Touch {
                         slug: slug.clone(),
                         verb: "⚡ driven".into(),
-                        actor: actor(&from),
+                        actor: act,
                     });
                     ok(serde_json::Value::Null)
                 }
@@ -1269,23 +1589,43 @@ impl Engine {
             SendRaw {
                 pane,
                 bytes_b64,
+                force,
                 scope,
                 from,
             } => match find(self, &pane, &scope) {
                 Ok(idx) => match base64_decode(&bytes_b64) {
                     Ok(bytes) => {
                         let slug = self.panes[idx].slug.clone();
-                        let Some(session) = self.panes[idx].session.as_ref() else {
+                        let ws = self.panes[idx].workspace.clone();
+                        let act = actor(&from);
+                        if let Err(e) = self.panes[idx].agency.may_inject(&act, force) {
+                            events::log(&act, Some(&ws), Some(&slug), "agency.denied", e.clone());
+                            return err(e);
+                        }
+                        if self.panes[idx].session.is_none() {
                             return err("not a terminal pane".into());
-                        };
-                        events::log(
-                            &actor(&from),
-                            Some(&self.panes[idx].workspace),
+                        }
+                        self.panes[idx].agency.agent_claim(&act);
+                        events::log_ex(
+                            &act,
+                            Some(&ws),
                             Some(&slug),
                             "ctl_send_raw",
                             format!("{} bytes", bytes.len()),
+                            events::LogOpts {
+                                origin: Some("ctl_send_raw".into()),
+                                ..Default::default()
+                            },
                         );
-                        session.write_bytes(bytes);
+                        if let Some(session) = self.panes[idx].session.as_ref() {
+                            session.set_input_origin(&act);
+                            session.write_bytes(bytes);
+                        }
+                        self.broadcast_agency(&slug);
+                        self.broadcast(GuiEvent::InputOrigin {
+                            pane: slug.clone(),
+                            origin: act,
+                        });
                         ok(serde_json::Value::Null)
                     }
                     Err(e) => err(format!("bad base64: {e}")),
@@ -1411,17 +1751,35 @@ impl Engine {
                 let Some(target) = target else {
                     return err("status-set: no pane".into());
                 };
+                if let Err(e) = validate_status(&state) {
+                    return err(e);
+                }
                 match find(self, &target, &scope) {
                     Ok(idx) => {
                         let slug = self.panes[idx].slug.clone();
+                        let ws = self.panes[idx].workspace.clone();
+                        let act = actor(&from);
+                        if let Err(e) = assert_self_or_cross(&slug, &from, &act) {
+                            return err(e);
+                        }
                         self.statuses
                             .insert(slug.clone(), (state.clone(), note.clone()));
+                        let detail = match &note {
+                            Some(n) => format!("{state}: {n}"),
+                            None => state.clone(),
+                        };
+                        events::log(&act, Some(&ws), Some(&slug), "status_set", detail);
                         self.broadcast(GuiEvent::Status {
-                            slug,
-                            state,
-                            note,
+                            slug: slug.clone(),
+                            state: state.clone(),
+                            note: note.clone(),
                         });
-                        ok(serde_json::Value::Null)
+                        self.persist();
+                        ok(json!({
+                            "slug": slug,
+                            "status": state,
+                            "pad_rev": self.pad_revs.get(&slug).copied().unwrap_or(0),
+                        }))
                     }
                     Err(e) => err(e),
                 }
@@ -1502,11 +1860,34 @@ impl Engine {
                 Some((_, None)) => ok(json!({"resolved": false})),
                 None => err(format!("no proposal '{id}'")),
             },
-            Human { .. } => ok(json!({
-                "focused_pane": self.focused_pane,
-                "selected_workspace": self.selected_workspace,
-                "pending_asks": self.asks.iter().filter(|a| a.answer.is_none()).count(),
-            })),
+            Human { scope, .. } => {
+                let panes: Vec<_> = self
+                    .panes
+                    .iter()
+                    .filter(|p| scope.as_deref().is_none_or(|ws| p.workspace == ws))
+                    .map(|p| {
+                        let w = p.agency.to_wire();
+                        json!({
+                            "slug": p.slug,
+                            "workspace": p.workspace,
+                            "owner": w.owner,
+                            "drive_mode": w.drive_mode,
+                            "human_idle": w.human_idle,
+                            "exited": w.exited,
+                            "exit_code": w.exit_code,
+                            "running": p.session.as_ref().map(|s| s.is_running()).unwrap_or(false)
+                                && !p.agency.exited,
+                            "title": p.session.as_ref().and_then(|s| s.title()),
+                        })
+                    })
+                    .collect();
+                ok(json!({
+                    "focused_pane": self.focused_pane,
+                    "selected_workspace": self.selected_workspace,
+                    "pending_asks": self.asks.iter().filter(|a| a.answer.is_none()).count(),
+                    "panes": panes,
+                }))
+            }
             WorkspaceFork {
                 workspace,
                 name,
@@ -1534,8 +1915,21 @@ impl Engine {
                 let Some(pane) = from else {
                     return err("cmd-begin: must run inside a pane".into());
                 };
-                self.cmd_log
-                    .begin(&pane, command, cwd.unwrap_or_default());
+                let cwd = cwd.unwrap_or_default();
+                let seq = self.cmd_log.begin(&pane, command.clone(), cwd.clone());
+                let span = format!("cmd:{pane}:{seq}");
+                events::log_ex(
+                    &format!("agent:{pane}"),
+                    None,
+                    Some(&pane),
+                    "cmd_start",
+                    format!("$ {command}"),
+                    events::LogOpts {
+                        span: Some(span),
+                        origin: Some("shell_hook".into()),
+                        ..Default::default()
+                    },
+                );
                 ok(serde_json::Value::Null)
             }
             CmdEnd { exit, from, .. } => {
@@ -1543,6 +1937,29 @@ impl Engine {
                     return err("cmd-end: must run inside a pane".into());
                 };
                 self.cmd_log.end(&pane, exit);
+                let (detail, span) = match self.cmd_log.last(&pane, false) {
+                    Some(rec) => (
+                        format!(
+                            "exit {exit} · {}ms · $ {}",
+                            rec.duration_ms().unwrap_or(0),
+                            rec.command
+                        ),
+                        Some(format!("cmd:{pane}:{}", rec.seq)),
+                    ),
+                    None => (format!("exit {exit}"), None),
+                };
+                events::log_ex(
+                    &format!("agent:{pane}"),
+                    None,
+                    Some(&pane),
+                    "cmd_end",
+                    detail,
+                    events::LogOpts {
+                        span,
+                        origin: Some("shell_hook".into()),
+                        ..Default::default()
+                    },
+                );
                 ok(serde_json::Value::Null)
             }
             Commands {
@@ -1581,7 +1998,398 @@ impl Engine {
                 }
                 None => err(format!("no ask '{id}'")),
             },
+            // Watch is handled by the daemon connection loop (streaming).
+            Watch { .. } => ok(json!({
+                "watching": true,
+                "cursor": events::current_seq(),
+                "note": "daemon streams events after this ack",
+            })),
+            Whoami { scope, from } => {
+                let principal = actor(&from);
+                let policy = self.caps.policy_for(scope.as_deref());
+                let grants: Vec<_> = self
+                    .caps
+                    .grants
+                    .iter()
+                    .filter(|g| g.principal == principal || g.principal == "*")
+                    .cloned()
+                    .collect();
+                ok(json!({
+                    "principal": principal,
+                    "workspace": scope,
+                    "policy": policy.as_str(),
+                    "grants": grants,
+                    "event_seq": events::current_seq(),
+                }))
+            }
+            Caps { .. } => ok(json!({
+                "default_policy": self.caps.default_policy.as_str(),
+                "workspace_policy": self.caps.workspace_policy.iter().map(|(k,v)| (k, v.as_str())).collect::<HashMap<_,_>>(),
+                "grants": self.caps.grants,
+            })),
+            CapsGrant {
+                principal,
+                cap,
+                workspace,
+                ttl_secs,
+                from,
+                ..
+            } => {
+                let expires_ms = ttl_secs.map(|s| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64 + s * 1000)
+                        .unwrap_or(0)
+                });
+                let g = crate::caps::Grant {
+                    principal: principal.clone(),
+                    cap: cap.clone(),
+                    workspace: workspace.clone(),
+                    expires_ms,
+                };
+                self.caps.grant(g);
+                let _ = self.caps.save();
+                events::log(
+                    &actor(&from),
+                    workspace.as_deref(),
+                    None,
+                    "cap_grant",
+                    format!("granted {cap} to {principal}"),
+                );
+                ok(json!({"granted": true, "principal": principal, "cap": cap}))
+            }
+            CapsRevoke {
+                principal,
+                cap,
+                workspace,
+                from,
+                ..
+            } => {
+                let n = self
+                    .caps
+                    .revoke(&principal, &cap, workspace.as_deref());
+                let _ = self.caps.save();
+                events::log(
+                    &actor(&from),
+                    workspace.as_deref(),
+                    None,
+                    "cap_revoke",
+                    format!("revoked {n} grant(s) of {cap} from {principal}"),
+                );
+                ok(json!({"revoked": n}))
+            }
+            PolicyGet { workspace, scope, .. } => {
+                let ws = workspace.or(scope);
+                let policy = self.caps.policy_for(ws.as_deref());
+                ok(json!({
+                    "workspace": ws,
+                    "policy": policy.as_str(),
+                    "default_policy": self.caps.default_policy.as_str(),
+                }))
+            }
+            PolicySet {
+                mode,
+                workspace,
+                scope,
+                from,
+            } => {
+                let Some(mode) = crate::caps::PolicyMode::parse(&mode) else {
+                    return err(format!(
+                        "unknown policy '{mode}' (open|propose_required|locked)"
+                    ));
+                };
+                let ws = workspace.or(scope);
+                self.caps.set_policy(ws.clone(), mode.clone());
+                let _ = self.caps.save();
+                events::log(
+                    &actor(&from),
+                    ws.as_deref(),
+                    None,
+                    "policy_set",
+                    format!("policy -> {}", mode.as_str()),
+                );
+                ok(json!({"policy": mode.as_str(), "workspace": ws}))
+            }
+            Seize {
+                pane,
+                as_owner,
+                scope,
+                from,
+            } => match find(self, &pane, &scope) {
+                Ok(idx) => {
+                    let slug = self.panes[idx].slug.clone();
+                    let who = as_owner.unwrap_or_else(|| "human".into());
+                    if who == "human" || actor(&from) == "human" {
+                        self.panes[idx].agency.human_steal();
+                    } else {
+                        self.panes[idx].agency.agent_claim(&who);
+                    }
+                    events::log(
+                        &actor(&from),
+                        Some(&self.panes[idx].workspace),
+                        Some(&slug),
+                        "agency.seized",
+                        format!("owner={}", self.panes[idx].agency.owner.as_str()),
+                    );
+                    self.broadcast_agency(&slug);
+                    self.broadcast(self.full_state_event());
+                    ok(json!(self.panes[idx].agency.to_wire()))
+                }
+                Err(e) => err(e),
+            },
+            Release {
+                pane, scope, from, ..
+            } => match find(self, &pane, &scope) {
+                Ok(idx) => {
+                    let slug = self.panes[idx].slug.clone();
+                    self.panes[idx].agency.release();
+                    events::log(
+                        &actor(&from),
+                        Some(&self.panes[idx].workspace),
+                        Some(&slug),
+                        "agency.released",
+                        "owner=none".into(),
+                    );
+                    self.broadcast_agency(&slug);
+                    self.broadcast(self.full_state_event());
+                    ok(json!(self.panes[idx].agency.to_wire()))
+                }
+                Err(e) => err(e),
+            },
+            DriveMode {
+                pane,
+                mode,
+                scope,
+                from,
+            } => match find(self, &pane, &scope) {
+                Ok(idx) => {
+                    let Some(dm) = crate::agency::DriveMode::parse(&mode) else {
+                        return err(format!(
+                            "unknown drive mode '{mode}' (pair|locked_human|agent_led)"
+                        ));
+                    };
+                    let slug = self.panes[idx].slug.clone();
+                    self.panes[idx].agency.drive_mode = dm;
+                    events::log(
+                        &actor(&from),
+                        Some(&self.panes[idx].workspace),
+                        Some(&slug),
+                        "agency.drive_mode",
+                        mode.clone(),
+                    );
+                    self.broadcast_agency(&slug);
+                    ok(json!(self.panes[idx].agency.to_wire()))
+                }
+                Err(e) => err(e),
+            },
+            Doctor { .. } => {
+                let rows = crate::agents::doctor();
+                ok(serde_json::to_value(rows).unwrap_or(json!([])))
+            }
+            Brief { scope, .. } => {
+                let panes: Vec<_> = self
+                    .panes
+                    .iter()
+                    .filter(|p| scope.as_deref().is_none_or(|ws| p.workspace == ws))
+                    .map(|p| self.pane_summary_json(p))
+                    .collect();
+                ok(json!({
+                    "focused_pane": self.focused_pane,
+                    "selected_workspace": self.selected_workspace,
+                    "pending_asks": self.asks.iter().filter(|a| a.answer.is_none()).count(),
+                    "event_seq": events::current_seq(),
+                    "scope": scope,
+                    "panes": panes,
+                }))
+            }
+            Note {
+                pane,
+                text,
+                append,
+                scope,
+                from,
+            } => {
+                let target = pane.or_else(|| from.clone());
+                let Some(target) = target else {
+                    return err("note: need pane or $SEANCE_SESSION".into());
+                };
+                match find(self, &target, &scope) {
+                    Ok(idx) => {
+                        let path = self.panes[idx].scratch_path.clone();
+                        let slug = self.panes[idx].slug.clone();
+                        let ws = self.panes[idx].workspace.clone();
+                        let author = actor(&from);
+                        if let Err(e) = assert_self_or_cross(&slug, &from, &author) {
+                            return err(e);
+                        }
+                        let stamp = format!(
+                            "\n\n---\n<!-- {} · {} -->\n\n",
+                            author,
+                            chrono_lite_stamp()
+                        );
+                        let chunk = format!("{stamp}{text}\n");
+                        let result = if append {
+                            atomic_append_pad(&path, &chunk)
+                        } else {
+                            atomic_write_pad(&path, &format!("{text}\n"))
+                        };
+                        match result {
+                            Ok(()) => {
+                                let rev = self.bump_pad_rev(&slug);
+                                let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                                events::log(
+                                    &author,
+                                    Some(&ws),
+                                    Some(&slug),
+                                    "note",
+                                    format!("{} chars rev={rev}", text.len()),
+                                );
+                                self.persist();
+                                ok(json!({
+                                    "path": path.to_string_lossy(),
+                                    "append": append,
+                                    "pad_rev": rev,
+                                    "scratchpad_bytes": bytes,
+                                }))
+                            }
+                            Err(e) => err(e),
+                        }
+                    }
+                    Err(e) => err(e),
+                }
+            }
+            Finish {
+                pane,
+                body,
+                append,
+                status,
+                status_note,
+                empty_ok,
+                scope,
+                from,
+            } => {
+                let target = pane.or_else(|| from.clone());
+                let Some(target) = target else {
+                    return err("finish: need pane or $SEANCE_SESSION".into());
+                };
+                if let Err(e) = validate_status(&status) {
+                    return err(e);
+                }
+                let body_empty = body.as_ref().map(|b| b.trim().is_empty()).unwrap_or(true);
+                if status == "done" && body_empty && !empty_ok {
+                    return err(
+                        "finish: status=done requires a body (or --empty-ok). \
+                         Evidence-bound completion: write the answer, then finish."
+                            .into(),
+                    );
+                }
+                match find(self, &target, &scope) {
+                    Ok(idx) => {
+                        let path = self.panes[idx].scratch_path.clone();
+                        let slug = self.panes[idx].slug.clone();
+                        let ws = self.panes[idx].workspace.clone();
+                        let author = actor(&from);
+                        if let Err(e) = assert_self_or_cross(&slug, &from, &author) {
+                            return err(e);
+                        }
+                        let mut rev = self.pad_revs.get(&slug).copied().unwrap_or(0);
+                        if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
+                            let stamp = format!(
+                                "\n\n---\n<!-- {} · {} · finish -->\n\n",
+                                author,
+                                chrono_lite_stamp()
+                            );
+                            let chunk = format!("{stamp}{body}\n");
+                            let write_res = if append {
+                                atomic_append_pad(&path, &chunk)
+                            } else {
+                                atomic_write_pad(&path, &format!("{body}\n"))
+                            };
+                            if let Err(e) = write_res {
+                                return err(format!("finish: scratchpad write failed: {e}"));
+                            }
+                            rev = self.bump_pad_rev(&slug);
+                        }
+                        let note = status_note.clone();
+                        self.statuses
+                            .insert(slug.clone(), (status.clone(), note.clone()));
+                        self.broadcast(GuiEvent::Status {
+                            slug: slug.clone(),
+                            state: status.clone(),
+                            note: note.clone(),
+                        });
+                        events::log(
+                            &author,
+                            Some(&ws),
+                            Some(&slug),
+                            "status_set",
+                            match &note {
+                                Some(n) => format!("{status}: {n}"),
+                                None => status.clone(),
+                            },
+                        );
+                        events::log(
+                            &author,
+                            Some(&ws),
+                            Some(&slug),
+                            "finish",
+                            format!("status={status} rev={rev}"),
+                        );
+                        self.persist();
+                        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        ok(json!({
+                            "slug": slug,
+                            "status": status,
+                            "scratchpad": path.to_string_lossy(),
+                            "scratchpad_bytes": bytes,
+                            "pad_rev": rev,
+                        }))
+                    }
+                    Err(e) => err(e),
+                }
+            }
+            Roster { scope, .. } => {
+                let mut panes: Vec<_> = self
+                    .panes
+                    .iter()
+                    .filter(|p| scope.as_deref().is_none_or(|ws| p.workspace == ws))
+                    .map(|p| self.pane_summary_json(p))
+                    .collect();
+                // Terminals first, then by status priority (blocked/needs-human first).
+                panes.sort_by(|a, b| {
+                    let rank = |p: &serde_json::Value| -> u8 {
+                        match p.get("status").and_then(|s| s.as_str()) {
+                            Some("needs-human") => 0,
+                            Some("blocked") => 1,
+                            Some("working") => 2,
+                            Some("planning") => 3,
+                            Some("done") => 5,
+                            Some("idle") => 6,
+                            _ => 4,
+                        }
+                    };
+                    rank(a).cmp(&rank(b)).then_with(|| {
+                        let sa = a.get("slug").and_then(|s| s.as_str()).unwrap_or("");
+                        let sb = b.get("slug").and_then(|s| s.as_str()).unwrap_or("");
+                        sa.cmp(sb)
+                    })
+                });
+                ok(json!({
+                    "focused_pane": self.focused_pane,
+                    "selected_workspace": self.selected_workspace,
+                    "pending_asks": self.asks.iter().filter(|a| a.answer.is_none()).count(),
+                    "event_seq": events::current_seq(),
+                    "scope": scope,
+                    "panes": panes,
+                }))
+            }
         }
+    }
+
+    fn bump_pad_rev(&mut self, slug: &str) -> u64 {
+        let e = self.pad_revs.entry(slug.to_string()).or_insert(0);
+        *e = e.saturating_add(1);
+        *e
     }
 
     /// Build handoff bundle + list of (fd_index, raw fd) for SCM_RIGHTS.
@@ -1607,6 +2415,7 @@ impl Engine {
                 title: None,
                 text_snapshot: String::new(),
                 ghost: None,
+                agency: Some(p.agency.to_snap()),
             };
             if let Some(s) = &p.session {
                 let (cols, rows) = s.size();
@@ -1629,6 +2438,39 @@ impl Engine {
             }
             panes.push(hp);
         }
+        let statuses: Vec<StatusInfo> = self
+            .statuses
+            .iter()
+            .map(|(slug, (state, note))| StatusInfo {
+                slug: slug.clone(),
+                state: state.clone(),
+                note: note.clone(),
+                pad_rev: self.pad_revs.get(slug).copied().unwrap_or(0),
+            })
+            .collect();
+        let asks: Vec<AskInfo> = self
+            .asks
+            .iter()
+            .filter(|a| a.answer.is_none())
+            .map(|a| AskInfo {
+                id: a.id.clone(),
+                from: a.from.clone(),
+                workspace: a.workspace.clone(),
+                question: a.question.clone(),
+                choices: a.choices.clone(),
+                answer: a.answer.clone(),
+            })
+            .collect();
+        let pad_revs: Vec<(String, u64)> = self.pad_revs.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let inject_baselines: Vec<InjectBaseline> = self
+            .inject_baselines
+            .iter()
+            .map(|(slug, (rev, bytes))| InjectBaseline {
+                slug: slug.clone(),
+                pad_rev: *rev,
+                pad_bytes: *bytes,
+            })
+            .collect();
         let bundle = HandoffBundle {
             panes,
             selected_workspace: self.selected_workspace.clone(),
@@ -1637,9 +2479,89 @@ impl Engine {
             workspace_order: self.workspace_order.clone(),
             proposal_counter: self.proposal_counter,
             ask_counter: self.ask_counter,
+            statuses,
+            asks,
+            pad_revs,
+            inject_baselines,
         };
         Ok((bundle, fds))
     }
+}
+
+const VALID_STATUSES: &[&str] = &[
+    "planning",
+    "working",
+    "blocked",
+    "needs-human",
+    "done",
+    "idle",
+];
+
+fn validate_status(state: &str) -> Result<(), String> {
+    if VALID_STATUSES.contains(&state) {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid status '{state}' — use one of: {}",
+            VALID_STATUSES.join("|")
+        ))
+    }
+}
+
+/// Agents may only mutate their own pane's status/pad unless `from` is unset
+/// (external cli orchestrator) or target matches session.
+fn assert_self_or_cross(target_slug: &str, from: &Option<String>, actor: &str) -> Result<(), String> {
+    // External orchestrator (no $SEANCE_SESSION) → cli may cross-pane.
+    if from.is_none() || actor == "cli" || actor == "agent:cli" {
+        return Ok(());
+    }
+    let principal = from.as_deref().unwrap_or("");
+    let principal = principal.strip_prefix("agent:").unwrap_or(principal);
+    if principal == target_slug {
+        return Ok(());
+    }
+    Err(format!(
+        "self-only: agent '{principal}' cannot status/note/finish pane '{target_slug}' \
+         (orchestrators outside a pane may; or set $SEANCE_SESSION to self)"
+    ))
+}
+
+/// Atomic replace via temp+rename in the same directory.
+fn atomic_write_pad(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let tmp = parent.join(format!(
+        ".{}.tmp.{}",
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("pad"),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, contents).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })
+}
+
+/// Atomic append: read existing + write new via temp+rename.
+fn atomic_append_pad(path: &std::path::Path, chunk: &str) -> Result<(), String> {
+    let mut body = if path.exists() {
+        std::fs::read_to_string(path).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
+    body.push_str(chunk);
+    atomic_write_pad(path, &body)
+}
+
+/// Cheap local stamp without chrono dep (HH:MM:SS).
+fn chrono_lite_stamp() -> String {
+    events::fmt_time(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    )
 }
 
 /// Wrapper so from_handoff can take owned fds with index.

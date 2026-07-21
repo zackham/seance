@@ -13,7 +13,7 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) · **Status:** 0.9 public
+**License:** MIT · **Platform:** Linux (Wayland / X11) · **Status:** 0.9.1
 
 ## Why it exists
 
@@ -44,6 +44,9 @@ the keyboard). Point `--command` at whatever agent CLI you use.
 - **Human-in-the-loop** — `ask` (blocking choices), `propose` (ghost command until you accept), `human` (where is focus?)
 - **Status + timeline** — agent self-report badges; attributed event log
 - **Daemon architecture** — upgrade the binary without killing the circle
+- **Event bus** — sequenced, attributable events + `seance ctl watch` subscriptions
+- **Causal tint** — left gutter shows who last wrote stdin (human / agent / propose)
+- **Capabilities** — `policy open|propose_required|locked` + per-principal grants
 
 ## Quick start
 
@@ -113,6 +116,7 @@ pane — agents only see their circle unless you pass `--all`.
 | [docs/PERF-TERMINAL.md](docs/PERF-TERMINAL.md) | multi-pane paint notes |
 | [docs/THEME.md](docs/THEME.md) | candlelit palette |
 | [docs/PLAYBOOK.md](docs/PLAYBOOK.md) | GPUI pin / build |
+| [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md) | multi-agent swarm playbook (claude/codex/grok) |
 | [CLAUDE.md](CLAUDE.md) | notes for coding agents working *on* this repo |
 
 Canonical agent instructions ship in the binary: **`seance ctl skill`**.
@@ -130,9 +134,11 @@ Pin discipline: `gpui-component` rev-pinned; zed patched to `deps/zed` at
 
 ## Not yet
 
-- OSC 8 hyperlinks
+- OSC 8 hyperlinks / OSC-133 shell markers (bash hooks work today)
 - manually resizable splits (grid is auto-balanced)
 - GPU glyph atlas (CPU path is already multi-pane smooth)
+- new pane kinds (roster / timeline / review — see vita roadmap)
+- worktree-backed agent rooms, best-of-N
 
 ## License
 
