@@ -41,8 +41,9 @@ seance restart-gui                          # UI only
 
 **In-seance orchestrator**, not an external worker driver:
 
-1. Script bootstraps one **orchestrator pane** + product task files
-2. Orchestrator (live in seance) spawns claude/grok/codex, product task only
+1. Script bootstraps one **orchestrator pane**, ⚡-arms it (`SEANCE_ARM_PROMPT`),
+   then gives a short “spawn claude/grok/codex + product task” ask
+2. Orchestrator learns ctl from arm → `ctl skill`, not from harness hand-holding
 3. **After** product finish, outer agent interviews panes about ergonomics
    (workers must not know the interview is coming during product work)
 
@@ -55,9 +56,10 @@ seance restart-gui                          # UI only
 After orchestration changes, re-run this and read orch + worker pads before
 claiming A+. Prefer their evidence over vibes.
 
-**0.9.6 contract:** `send` returns `task_id`; `wait --status done` requires pad
-growth since inject (`--badge-only` to skip); `seance ctl task` re-reads the
-durable inject body; exit flips working→idle.
+**0.9.7 contract:** `send` → `task_id` + sidecar; `wait --status done` is
+evidence-bound (`--badge-only` to skip); `wait … --cat` / `harvest` fan-in
+harvests pads; `ctl task` / `whoami` re-read inject; exit → idle; roster shows
+**slug** (ctl id) when name differs.
 
 ## Product rules (don’t regress these)
 

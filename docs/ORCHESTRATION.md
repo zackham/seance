@@ -4,7 +4,7 @@ How a master agent (or human at a shell) runs Claude / Codex / Grok as
 **visible sibling panes** and drives them — with **transferrable agency** so a
 human can watch and jump into any session without restarting it.
 
-Validated live 2026-07-20 on seance **0.9.5** against:
+Validated live 2026-07-20 on seance **0.9.7** (in-seance orchestrator + ⚡ arm):
 
 | Agent | Profile (`--agent`) | Result |
 |-------|---------------------|--------|
@@ -17,37 +17,41 @@ for Claude by wrapping interactive Claude in a PTY + hooks + bracketed paste.
 Seance already **is** that PTY surface — the remaining work is orchestration
 hygiene, not re-implementing decap.
 
+Live harness: [`docs/AGENT_COLLAB_TEST.md`](AGENT_COLLAB_TEST.md) /
+`./scripts/agent-collab-test.sh` (orchestrator **pane**, not external script).
+
 ---
 
-## Orchestrator A+ (0.9.3–0.9.4) — for agents driving the stage
+## Orchestrator A+ (0.9.3–0.9.7) — for agents driving the stage
 
 What makes *silicon* orchestration A+ (not human watching):
 
 ```bash
 seance ctl doctor
-seance ctl brief --json                 # owner · status · pad bytes · title
+seance ctl roster                       # slug · owner · status · task · pad@rev
 seance ctl new --name w --agent claude --wait-ready
 # FOOTGUN: shell expands $VARS in bare send text — use --file
+# NOTE: created slug may be w-2 if w exists — use the id `created` prints
 cat > /tmp/task.md <<'EOF'
 Review README.md + docs/ORCHESTRATION.md. Answer in markdown.
-Write to your scratchpad, then: seance ctl status-set done
-(or: seance ctl finish --file /tmp/ans.md --status done)
+When done: seance ctl finish --stdin --status done
 QUESTION: ...
 EOF
-seance ctl send w --file /tmp/task.md
-seance ctl wait w --status done --timeout 600
-seance ctl pad w --cat                  # one-hop verify
-# or: seance ctl wait w --scratchpad --min-bytes 400
-# fan-in: seance ctl wait --any w1 w2 w3 --status done
+seance ctl send w --file /tmp/task.md   # → task=task-N status=working
+seance ctl wait w --status done --timeout 600 --cat   # evidence + harvest
+# fan-in harvest:
+seance ctl harvest w-claude-4 w-grok-4 w-codex-4 --timeout 900
 ```
 
 | Anti-pattern | A+ pattern |
 |--------------|------------|
 | `sleep 5; read; grep` | `wait --status done` / `--scratchpad` |
-| 4× `read` for state | `brief --json` once |
+| 4× `read` for state | `roster` / `brief --json` once |
 | hand-rolled absolute paths | `--agent claude --wait-ready` |
 | bare `send` with `$SEANCE_*` | `send --file` / `--stdin` |
-| path → cat → read for pad | `pad --cat` or `finish` |
+| path → cat → read for pad | `wait … --cat` / `harvest` / `pad --cat` |
+| badge-only “done” | evidence-bound wait (pad grew since inject) |
+| external bash as master | **orchestrator pane** inside seance (⚡ arm first) |
 | codex sandbox blocks pad | profile uses `danger-full-access` + `finish` |
 | re-task false-ready on old done | inject auto-sets `status=working` |
 

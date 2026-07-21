@@ -207,7 +207,19 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
         "wait" => {
             // Client-side wait loop (not a single control op).
             return run_wait(sub_args, scope, from, json_out);
-        },
+        }
+        // Convenience: fan-in wait --status done --cat
+        "harvest" => {
+            let mut args = sub_args;
+            if !args.iter().any(|a| a == "--status") {
+                args.push("--status".into());
+                args.push("done".into());
+            }
+            if !args.iter().any(|a| a == "--cat" || a == "--harvest") {
+                args.push("--cat".into());
+            }
+            return run_wait(args, scope, from, json_out);
+        }
         other => Err(format!("unknown subcommand '{other}' (try `seance ctl help`)")),
     };
 
@@ -1116,6 +1128,8 @@ fn run_wait(
     let mut since_inject = true;
     // --status done requires pad evidence by default (0.9.6); --badge-only skips.
     let mut evidence = true;
+    // After success, dump each satisfied pane's pad body (master harvest path).
+    let mut cat_pads = false;
     let mut task_id: Option<String> = None;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -1129,6 +1143,7 @@ fn run_wait(
             "--since-inject" => since_inject = true,
             "--any-pad" => since_inject = false, // absolute pad size (legacy)
             "--badge-only" => evidence = false,
+            "--cat" | "--harvest" => cat_pads = true,
             "--task" => task_id = it.next(),
             "--min-bytes" => {
                 min_bytes = it
@@ -1154,6 +1169,7 @@ fn run_wait(
                     "wait PANE [PANE...] [opts]\n  \
                      --status done   (default: also require pad growth since inject)\n  \
                      --badge-only    status badge only (legacy / no evidence)\n  \
+                     --cat|--harvest print each pad body after success (fan-in harvest)\n  \
                      --task ID       wait until that task_id is done\n  \
                      --scratchpad [--since-inject|--any-pad] --min-bytes N\n  \
                      --artifact PATH  --owner none  --ready  --any  --timeout S"
@@ -1429,22 +1445,85 @@ fn run_wait(
         };
 
         if success {
-            if json_out {
-                println!(
-                    "{{\"ok\":true,\"ready\":{},\"elapsed_ms\":{}}}",
-                    serde_json::to_string(&satisfied).unwrap_or_else(|_| "[]".into()),
-                    started.elapsed().as_millis()
-                );
-            } else if any {
-                println!("ready {}", satisfied.join(" "));
+            let label = if status.as_deref() == Some("done") {
+                "done"
+            } else if ready {
+                "ready"
             } else {
-                println!("ready {}", panes.join(" "));
+                "ok"
+            };
+            let list = if any {
+                satisfied.as_slice()
+            } else {
+                panes.as_slice()
+            };
+            if json_out {
+                // Optionally attach pad bodies when harvesting.
+                if cat_pads {
+                    let mut pads = serde_json::Map::new();
+                    for p in list {
+                        if let Some(body) = harvest_pad_body(p, &scope, &from) {
+                            pads.insert(p.clone(), serde_json::Value::String(body));
+                        }
+                    }
+                    println!(
+                        "{{\"ok\":true,\"{label}\":{},\"elapsed_ms\":{},\"pads\":{}}}",
+                        serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
+                        started.elapsed().as_millis(),
+                        serde_json::Value::Object(pads)
+                    );
+                } else {
+                    println!(
+                        "{{\"ok\":true,\"{label}\":{},\"elapsed_ms\":{}}}",
+                        serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
+                        started.elapsed().as_millis()
+                    );
+                }
+            } else {
+                println!("{label} {}", list.join(" "));
+                if cat_pads {
+                    for p in list {
+                        println!("----- {p} -----");
+                        match harvest_pad_body(p, &scope, &from) {
+                            Some(body) => {
+                                print!("{body}");
+                                if !body.ends_with('\n') {
+                                    println!();
+                                }
+                            }
+                            None => println!("(no pad)"),
+                        }
+                    }
+                }
             }
             return 0;
         }
 
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
+}
+
+/// Resolve a pane's scratchpad path via ctl and read the body (harvest helper).
+fn harvest_pad_body(pane: &str, scope: &Option<String>, from: &Option<String>) -> Option<String> {
+    let req = with_identity(
+        ControlRequest::Scratchpad {
+            pane: pane.to_string(),
+            scope: None,
+            from: None,
+        },
+        scope.clone(),
+        from.clone(),
+    );
+    let r = send_request(&req).ok()?;
+    if !r.ok {
+        return None;
+    }
+    let path = r.data.as_ref().and_then(|d| {
+        d.as_str()
+            .map(|s| s.to_string())
+            .or_else(|| d.get("path").and_then(|p| p.as_str()).map(|s| s.to_string()))
+    })?;
+    std::fs::read_to_string(path).ok()
 }
 
 /// `watch [--kinds a,b] [--pane P] [--actor A] [--since-seq N] [--no-catch-up]`
@@ -1806,6 +1885,29 @@ fn print_ok_human(sub: &str, response: &ControlResponse) {
                 );
             }
         }
+        "whoami" => {
+            if let Some(obj) = data.as_object() {
+                for k in [
+                    "principal",
+                    "session",
+                    "workspace",
+                    "policy",
+                    "task_id",
+                    "task_status",
+                    "hint",
+                ] {
+                    if let Some(v) = obj.get(k) {
+                        if let Some(s) = v.as_str() {
+                            println!("{k:<14} {s}");
+                        } else if !v.is_null() {
+                            println!("{k:<14} {v}");
+                        }
+                    }
+                }
+            } else {
+                println!("{data}");
+            }
+        }
         "send" | "finish" | "status-set" | "note" => {
             // Dense one-liners for orchestrator feedback (task_id, pad_rev).
             if let Some(obj) = data.as_object() {
@@ -1892,6 +1994,15 @@ fn print_session_rows(arr: &[serde_json::Value]) {
     }
     for s in arr {
         let name = str_field(s, "name").unwrap_or_else(|| "?".into());
+        let slug = str_field(s, "slug").unwrap_or_default();
+        // Always prefer slug for the left column when it differs — ctl needs slug.
+        let label = if !slug.is_empty() && slug != name {
+            format!("{slug} ({name})")
+        } else if !slug.is_empty() {
+            slug.clone()
+        } else {
+            name.clone()
+        };
         let running = s.get("running").and_then(|v| v.as_bool());
         let exited = s.get("exited").and_then(|v| v.as_bool()).unwrap_or(false);
         let owner = str_field(s, "owner").unwrap_or_else(|| "-".into());
@@ -1901,6 +2012,7 @@ fn print_session_rows(arr: &[serde_json::Value]) {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let title = str_field(s, "title").unwrap_or_default();
+        let task = str_field(s, "task_id").unwrap_or_default();
         let state = if exited {
             "tombstone"
         } else {
@@ -1911,9 +2023,12 @@ fn print_session_rows(arr: &[serde_json::Value]) {
             }
         };
         let ws = str_field(s, "workspace").unwrap_or_default();
-        let mut line = format!("{name:<16} {state:<10} owner={owner:<12}");
+        let mut line = format!("{label:<22} {state:<10} owner={owner:<18}");
         if !status.is_empty() {
             line.push_str(&format!(" status={status}"));
+        }
+        if !task.is_empty() {
+            line.push_str(&format!(" task={task}"));
         }
         let pad_rev = s.get("pad_rev").and_then(|v| v.as_u64()).unwrap_or(0);
         if pad_b > 0 || pad_rev > 0 {
@@ -2068,104 +2183,73 @@ fn base64_encode(input: &[u8]) -> String {
 /// source of truth — docs/CONTROL.md points here rather than duplicating.
 const SKILL_TEXT: &str = r#"## Working in seance (human + agent shared space)
 
-You are (or will be) inside **seance** — a multi-pane co-working space where
-every pane is live on the human's screen. Agents, shells, and the human share
-one circle. Work is meant to be visible, interruptible, and attributable — not
-hidden in a background job. If `$SEANCE_SESSION` is set, you are in a pane
-right now.
+You are inside **seance** — multi-pane live terminals on the human's screen.
+Visibility is the product. If `$SEANCE_SESSION` is set, you are in a pane now.
 
-Environment:
+### Environment
 
-- `$SEANCE_SESSION`    your pane id
-- `$SEANCE_WORKSPACE`  your workspace — your `seance ctl` calls see and affect
-                       ONLY panes in this workspace (scoping is automatic)
-- `$SEANCE_SCRATCHPAD` markdown shared live with the human (flip notes on this
-                       pane) — durable notes go here; screens scroll away
-- `$SEANCE_SOCKET`     the control socket (the CLI finds it automatically)
+- `$SEANCE_SESSION`    your pane **slug** (use this id in ctl, not display name)
+- `$SEANCE_WORKSPACE`  auto-scopes ctl to this circle
+- `$SEANCE_SCRATCHPAD` shared notes path (screens scroll away)
+- `$SEANCE_SOCKET`     control socket (ctl finds it)
 
-Use `seance ctl` to discover, create, and drive sibling panes. The human
-watches every terminal live — that visibility is the product.
+### Hot path — worker (you received a task)
 
-### Commands
+1. Re-read your assignment (durable, not scrollback):
+     `seance ctl task`          # or `ctl inbox`
+     `seance ctl whoami`        # shows task_id when set
+   Sidecars next to the pad: `$SEANCE_SCRATCHPAD` with extension `.taskid` / `.task.json`
+2. Do the work. Prefer intermediate `status-set working|blocked|needs-human`.
+3. Complete with **one call** (pad body + status + task close):
+     `seance ctl finish --stdin --status done --note … <<'EOF'
+     …answer…
+     EOF`
+   or `finish --file PATH --status done`.
+   `status=done` **requires a body**. Returns `task=… status=done rev=N pad=…B`.
 
-- `seance ctl list`                          panes in your workspace + state
-- `seance ctl new --name N [--cwd D] [--agent claude|grok|codex|shell]`
-      spawn a pane. Prefer `--agent` over hand-rolled `--command`. Add
-      `--wait-ready` to block until the agent TUI accepts inject.
-- `seance ctl send PANE TEXT...`             paste TEXT + submit.
-      **FOOTGUN:** your shell expands `$VARS` in TEXT. For long/verbatim
-      payloads use `send PANE --file PATH` or `send PANE --stdin`.
-      `--no-submit` stages only; `--force` overrides agency deny.
-- `seance ctl send-raw PANE $'\x03'`         raw keys: Ctrl-C / Enter / Esc.
-- `seance ctl read PANE [--lines N]`         rendered screen (debug only).
-- `seance ctl status PANE` / `kill PANE`
-- `seance ctl scratchpad PANE` / `pad PANE`  path of shared notes
-- `seance ctl pad PANE --cat`                print pad body (one hop verify)
-- `seance ctl note [PANE] TEXT...`           append attributed note to pad
-      (`--replace` overwrites; `--file PATH` for body)
-- `seance ctl finish [PANE] [--file PATH|--stdin] [--status done] [--note N]`
-      worker completion bridge: attributed pad write + status-set in one call.
-      `status=done` requires a body unless `--empty-ok`. Self-pane only when
-      `$SEANCE_SESSION` is set. Returns `pad_rev` + bytes.
-- `seance ctl status-set STATE [NOTE]`       planning|working|blocked|
-      needs-human|done|idle only — human-visible badge (validated enum)
-- `seance ctl roster` / `stage`              dense stage view (sorted by urgency)
-- `seance ctl ask "QUESTION" --choices a,b`  blocks until human answers
-- `seance ctl timeline --since 10m`          attributed event log
-- `seance ctl propose PANE CMD --reason R`   ghost text; prefer over send
-      for risky shell commands
-- `seance ctl human` / `brief` / `wait` / `watch` / `doctor` / `skill`
-- `seance ctl seize|release|drive PANE`      co-presence ownership
-- `seance ctl whoami` / `caps` / `policy` / `grant` / `revoke`
-
-Exit codes: 0 ok · 1 request failed · 2 seance not reachable.
-Scoping: `$SEANCE_WORKSPACE` auto-scopes; `--all` only if human asks.
-
-### The loop that works (A+ — token-efficient)
+### Hot path — orchestrator (you drive siblings)
 
 Prefer structure over screens. **Never** poll `read` in a sleep loop.
 
 ```bash
 seance ctl doctor
-seance ctl brief --json
-seance ctl new --name w1 --cwd "$PWD" --agent claude --wait-ready
-# write task to a file so $SEANCE_SCRATCHPAD is NOT expanded by your shell:
-cat > /tmp/task-w1.md <<'EOF'
-Read README.md and docs/ORCHESTRATION.md in this repo (~/work/seance).
-Answer the question below in markdown. Append ONLY to your scratchpad
-(use `seance ctl finish --file /tmp/ans.md` or write $SEANCE_SCRATCHPAD
-then `seance ctl status-set done`). Review the actual code when useful.
-QUESTION: ...
-EOF
-seance ctl send w1 --file /tmp/task-w1.md
-seance ctl wait w1 --status done --timeout 600
-# or: seance ctl wait w1 --scratchpad --min-bytes 200   # since last inject
-seance ctl pad w1 --cat
-seance ctl roster --json
-# fan-in: seance ctl wait w1 w2 w3 --status done
+seance ctl roster                              # slug, status, task, pad@rev
+seance ctl new --name w --cwd "$PWD" --agent claude --wait-ready
+# NOTE: created slug may be w-2 if w exists — use the id `created` prints
+# FOOTGUN: shell expands $VARS in bare send — always --file for tasks:
+seance ctl send w-2 --file /tmp/task.md        # returns task=task-N status=working
+seance ctl wait w-2 --status done --timeout 600 --cat   # evidence-bound + harvest
+# fan-in harvest:
+seance ctl wait w-claude-4 w-grok-4 w-codex-4 --status done --cat
 ```
 
-- **brief/roster** for state · **wait** for completion · **read** only to debug
-- Workers: short brief + output contract — not "explore the whole repo"
-  unless the task needs it. Point them at README + docs first.
-- Before send: check owner in brief; if human, `wait --owner none` or ask
-- Inject auto-sets status=`working` and records pad baseline so
-  `wait --scratchpad` is **since-inject** (not absolute pad size)
-- Prefer `finish --stdin` / `finish --file` over raw pad write + status-set
+- `wait --status done` requires **pad growth since inject** (not badge-only).
+  Use `--badge-only` only if you intentionally skip evidence.
+- `--cat` / `--harvest` prints each pad body after success (one round-trip fan-in).
+- `send` returns `task_id`; roster shows `task=task-N`.
+
+### Commands (rest)
+
+- `new --agent claude|grok|codex|shell`  (+ `--wait-ready`)
+- `send --file|--stdin` · `send-raw` · `read` (debug)
+- `pad [PANE] --cat` · `note` · `finish` · `status-set` · `task`/`inbox`
+- `roster`/`stage` · `brief` · `human` · `wait` · `watch` · `doctor`
+- `propose` (ghost cmd) · `ask` · `seize`/`release`/`drive`
+- `whoami` · `caps` · `policy` · `grant`/`revoke`
+
+Exit: 0 ok · 1 failed · 2 not reachable. Scope: `$SEANCE_WORKSPACE`; `--all` only if asked.
 
 ### Co-presence
 
-Human keystrokes always steal keys. Agent inject denied for 3s idle grace
-unless `release` or `--force`. Tombstones on exit until `kill`.
+Human keys always steal. Inject denied 3s after human input unless `release`/`--force`.
+Exit → tombstone + status idle until `kill`.
 
 ### Rules
 
-- `status-set` / `finish` at transitions so wait/roster work.
-- Decisions via `ask`, not buried in terminal output.
-- Durable results in scratchpads/files — screens are ephemeral.
-- Do not kill panes you did not create unless asked.
-- Fire-and-forget is wrong: every task has a `wait` condition.
-- Prefer `send --file` for any prompt with paths or `$ENV` tokens.
+- Every task has a `wait` condition (or you are the worker finishing).
+- Decisions via `ask`; durable text via pad/`finish`; screens are ephemeral.
+- Prefer `propose` for risky shell. Don't kill panes you didn't create.
+- Prefer `send --file` whenever the text has `$` or multi-line body.
 "#;
 
 fn print_help() {
@@ -2204,8 +2288,10 @@ COMMANDS:
     whoami / caps / grant / revoke / policy
     seize / release / drive PANE  co-presence ownership
     wait PANE [opts]              block until condition
-         --status done  --scratchpad [--since-inject|--any-pad] --min-bytes N
-         --artifact PATH  --owner none  --ready  --any w1 w2  --timeout S
+         --status done [--cat|--harvest]  --badge-only  --task ID
+         --scratchpad [--since-inject|--any-pad] --min-bytes N
+         --artifact PATH  --owner none  --ready  --any  --timeout S
+    task|inbox [--id ID] [PANE]   durable inject body (default: self)
     doctor                        agent profiles + binary health
     skill                         full agent contract (paste into workers)
     help
@@ -2214,11 +2300,12 @@ GLOBAL: --json  --all  --scope WS
 
 EXAMPLES:
     seance ctl new --name w --agent claude --wait-ready
-    seance ctl send w --file /tmp/task.md
-    seance ctl wait w --status done --timeout 600
-    seance ctl pad w --cat
+    seance ctl send w --file /tmp/task.md          # → task=task-N
+    seance ctl wait w --status done --timeout 600 --cat
+    seance ctl wait a b c --status done --cat      # fan-in harvest
+    seance ctl task                                # re-read my inject
     seance ctl finish --stdin --status done < /tmp/ans.md
-    seance ctl roster --json
+    seance ctl roster
     seance ctl doctor"
     );
 }

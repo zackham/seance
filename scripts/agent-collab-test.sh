@@ -2,16 +2,16 @@
 # agent-collab-test — bootstrap an *in-seance* orchestrator pane
 #
 # This script does NOT drive workers itself. It only:
-#   1. opens a workspace + file panes for the human to watch
+#   1. opens a workspace + product task file panes
 #   2. spawns one orchestrator agent pane (claude by default)
-#   3. injects a brief: "you are the master — spawn claude/grok/codex,
-#      give them a product task, wait, synthesize, finish"
+#   3. ⚡-arms it with SEANCE_ARM_PROMPT (exact text from src/app.rs — same as
+#      the arm button), then sends a short task: spawn claude/grok/codex,
+#      run the product task, synthesize, finish
 #   4. waits for the orchestrator to status=done
-#   5. dumps pads + a run dir so a human/outer agent can *then* interview
-#      everyone about ergonomics (workers must NOT know that interview is coming)
+#   5. dumps pads so a human/outer agent can *then* interview about ergonomics
 #
-# Ergonomics interviews are intentionally OUT of band: after this script exits,
-# the outer agent (or you) injects a second prompt into each pane.
+# The harness does not teach ctl. Arm → `seance ctl skill` should.
+# Ergonomics interviews stay OUT of band (after product work).
 #
 # Usage:
 #   ./scripts/agent-collab-test.sh
@@ -69,96 +69,79 @@ except Exception:
 
 log "repo=$REPO workspace=$WS orch_agent=$ORCH_AGENT timeout=${TIMEOUT}s"
 
-# --- pure product task for WORKERS (no ergonomics interview language) ---
+# --- pure product task for WORKERS ---
 cat > "$WORKER_TASK" <<EOF
-# seance product task (worker)
+# seance product task
 
-You are a worker pane inside **seance**. cwd is the seance repo:
-  $REPO
+cwd: $REPO
 
-## Do this first
-Review real docs and source (do not invent APIs from memory):
-- README.md
-- docs/ORCHESTRATION.md
-- docs/CONTROL.md
-- docs/AGENT_COLLAB_TEST.md (methodology only — ignore any stale ergonomics wording)
-- seance ctl skill && seance ctl help && seance ctl roster
-- src/ctl.rs, src/agency.rs, src/events.rs, src/caps.rs
-- src/runtime/engine.rs (send / finish / task / handoff)
+Review the seance repo (README, docs/, src/ as needed — don't invent APIs).
+Answer in markdown (≤ ~80 lines):
 
-## Answer (markdown, ≤ ~80 lines)
 1. Highest-leverage product improvements for seance as a human↔agent collab stage
-   (visibility, co-presence, multi-agent orchestration) — prioritize ruthlessly.
+   (visibility, co-presence, multi-agent orchestration). Prioritize ruthlessly.
 2. What already works that we must not break.
 3. One concrete next ship (pane or API) vs one idea to refuse forever.
 4. Cite files/lines where you can.
 
-## Complete
-Write the full answer with:
-  seance ctl finish --stdin --status done --note product <<'ANS'
-  # worker: <claude|grok|codex>
-  ...answer...
-  ANS
-(or finish --file /tmp/ans-\$SEANCE_SESSION.md --status done --note product)
+When done, put the full answer on your seance scratchpad and mark yourself done
+via seance ctl (finish or pad + status-set — follow seance orientation if armed).
 
-Stay in this repo. Do not spawn siblings. Do not interview anyone.
+Stay in this repo. Do not spawn siblings.
 EOF
 
-# --- orchestrator brief: YOU are the seance master pane ---
+# --- ⚡ arm prompt: EXACT copy of SEANCE_ARM_PROMPT in src/app.rs ---
+# Extracted at run time so the harness always tests the real arm button text.
+ARM_FILE="$RUN_DIR/arm-prompt.md"
+python3 - "$REPO" "$ARM_FILE" <<'PY'
+import re, sys
+from pathlib import Path
+repo, out = sys.argv[1], sys.argv[2]
+src = (Path(repo) / "src/app.rs").read_text()
+i = src.index('const SEANCE_ARM_PROMPT')
+i = src.index('= "', i) + 3
+chunk = src[i:]
+out_chars = []
+j = 0
+while j < len(chunk):
+    c = chunk[j]
+    if c == '"':
+        break
+    if c == "\\" and j + 1 < len(chunk):
+        n = chunk[j + 1]
+        if n == "\n":
+            j += 2
+            continue
+        if n == '"':
+            out_chars.append('"'); j += 2; continue
+        if n == "n":
+            out_chars.append("\n"); j += 2; continue
+        if n == "t":
+            out_chars.append("\t"); j += 2; continue
+        if n == "\\":
+            out_chars.append("\\"); j += 2; continue
+        out_chars.append(n); j += 2; continue
+    out_chars.append(c); j += 1
+Path(out).write_text("".join(out_chars))
+print(f"arm prompt {len(out_chars)} chars → {out}")
+PY
+
+# --- post-arm task: minimal — orchestration learned from skill, not this brief ---
 cat > "$ORCH_BRIEF" <<EOF
-# you are the orchestrator pane
+Spawn three agent panes in this workspace (claude, grok, and codex) with cwd
+$REPO. Give each the product task at:
 
-You are a **master agent inside seance**, not an external script. This pane is
-live on the human's screen. Your job is multi-agent product work — not a
-meta-study of ergonomics.
-
-Workspace is already scoped via \$SEANCE_WORKSPACE ($WS).
-Repo: $REPO
-Worker product task file (on disk, also opened as a file pane if present):
   $WORKER_TASK
 
-## Protocol (learn it for real)
-1. \`seance ctl skill\` and \`seance ctl doctor\`
-2. Prefer structure over screens: brief / roster / wait / send --file / pad --cat / task
-3. \`send --file\` for long payloads (shell expands \$VARS in bare send text)
-4. \`wait PANE… --status done\` is evidence-bound (pad must grow since inject)
-5. Workers complete with \`finish\` (body required for done)
+(use send --file so the body is verbatim). Have them complete it, collect their
+answers, write a short synthesis to your scratchpad, and mark yourself done.
 
-## What to do
-1. Spawn three worker panes in **this** workspace, cwd=$REPO:
-     seance ctl new --name w-claude --cwd $REPO --agent claude --wait-ready
-     seance ctl new --name w-grok   --cwd $REPO --agent grok   --wait-ready
-     seance ctl new --name w-codex  --cwd $REPO --agent codex  --wait-ready
-   (Use unique names if needed; record the real slugs from \`created …\`.)
-2. Inject the **product task only** — send the contents of:
-     $WORKER_TASK
-   via \`seance ctl send <slug> --file $WORKER_TASK\`
-   Do **not** add ergonomics / debrief / interview instructions. Workers should
-   only think about seance product improvements.
-3. Fan-in: \`seance ctl wait <slugs…> --status done --timeout 900\`
-   If a pane stalls on a paste "Enter:send" UI, \`send-raw <slug> \$'\\r'\` once.
-4. Collect answers: \`seance ctl pad <slug> --cat\` for each worker.
-5. Write a short synthesis on **your** scratchpad (orchestrator view: what they
-   agreed on, disagreements, what you'd ship next). Then:
-     seance ctl finish --stdin --status done --note orch-synthesis <<'SYN'
-     # orchestrator synthesis
-     ...
-     worker slugs: …
-     SYN
-
-## Rules
-- You drive workers with seance ctl from **this** pane (you have \$SEANCE_SESSION).
-- Prefer --file / finish / wait / roster over read loops.
-- Do not kill panes you did not create.
-- Do not ask workers about their "experience using seance" — product answers only.
-- When fully done, your status must be **done** with a non-empty finish body.
-
-Begin now.
+Repo root: $REPO
 EOF
 
 # file panes for human watch
 ctl new --name worker-task --file "$WORKER_TASK" 2>&1 || true
-ctl new --name orch-brief --file "$ORCH_BRIEF" 2>&1 || true
+ctl new --name orch-task --file "$ORCH_BRIEF" 2>&1 || true
 
 # spawn orchestrator *pane* (the point of this harness)
 STAMP=$(date +%H%M%S)
@@ -172,9 +155,24 @@ ORCH_SLUG=$(parse_created_slug "$out")
 [[ -n "$ORCH_SLUG" ]] || ORCH_SLUG="$ORCH_NAME"
 log "orchestrator slug=$ORCH_SLUG"
 
-log "inject orchestrator brief via --file"
+# Phase A: same inject as the ⚡ arm button
+log "⚡ arm orchestrator (SEANCE_ARM_PROMPT from src/app.rs)"
+ctl send "$ORCH_SLUG" --file "$ARM_FILE" 2>&1 || {
+  log "arm send failed — Enter nudge"
+  ctl send-raw "$ORCH_SLUG" $'\r' 2>&1 || true
+}
+# Give the agent a beat to run ctl skill / confirm orientation.
+# Arm ends with "wait for the next instruction" — then we send the real task.
+sleep 8
+# If still owned by agent mid-turn, release isn't needed for re-inject from cli
+# (same cli principal). Nudge Enter if paste stalled.
+ctl send-raw "$ORCH_SLUG" $'\r' 2>/dev/null || true
+sleep 2
+
+# Phase B: minimal product orchestration ask
+log "inject post-arm task (minimal — no protocol hand-holding)"
 ctl send "$ORCH_SLUG" --file "$ORCH_BRIEF" 2>&1 || {
-  log "send failed — Enter nudge"
+  log "task send failed — Enter nudge"
   ctl send-raw "$ORCH_SLUG" $'\r' 2>&1 || true
 }
 

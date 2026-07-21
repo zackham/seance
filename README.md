@@ -13,7 +13,7 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) · **Status:** 0.9.1
+**License:** MIT · **Platform:** Linux (Wayland / X11) · **Status:** 0.9.7
 
 ## Why it exists
 
@@ -40,9 +40,11 @@ the keyboard). Point `--command` at whatever agent CLI you use.
 - **Workspaces** — keep circles of work apart; sidebar drag-reorder
 - **Notes on the back of every pane** — shared markdown (`$SEANCE_SCRATCHPAD`); human and agent both read/write
 - **File panes** — live markdown/text + history/diff when you’re co-editing a document
-- **Control plane** — `seance ctl` so any pane (or external script) can spawn, send, read, kill
+- **Control plane** — `seance ctl` so any pane (or external script) can spawn, send, wait, harvest
+- **Orchestrator A+** — `--agent` profiles, `wait --status done` (evidence-bound), `send --file`, task envelopes, `harvest`
 - **Human-in-the-loop** — `ask` (blocking choices), `propose` (ghost command until you accept), `human` (where is focus?)
 - **Status + timeline** — agent self-report badges; attributed event log
+- **Co-presence** — human keystrokes steal keys; seize / release / drive
 - **Daemon architecture** — upgrade the binary without killing the circle
 - **Event bus** — sequenced, attributable events + `seance ctl watch` subscriptions
 - **Causal tint** — left gutter shows who last wrote stdin (human / agent / propose)
@@ -62,13 +64,21 @@ Requirements: recent Rust, Vulkan-capable drivers, a monospace font
 (default *CaskaydiaMono Nerd Font Mono* — change in `src/term_font.rs`).
 
 ```bash
-seance ctl skill                 # agent-facing protocol (paste into any agent)
-seance ctl list --all
-seance ctl new --name worker --command claude
-seance ctl send worker "summarize the failing tests"
-seance ctl read worker --lines 40
-seance ctl ask "Ship this?" --choices yes,no
+seance ctl skill                 # agent-facing protocol (⚡ arm / paste)
+seance ctl doctor                # claude / grok / codex profiles
+seance ctl roster                # slug · owner · status · task · pad@rev
+seance ctl new --name w --agent claude --wait-ready
+seance ctl send w --file /tmp/task.md          # verbatim; returns task_id
+seance ctl wait w --status done --timeout 600 --cat   # evidence + harvest
+seance ctl harvest w1 w2 w3 --timeout 900      # fan-in done + pad bodies
+seance ctl task                                # durable inject body (self)
+seance ctl finish --stdin --status done <<'EOF'
+answer
+EOF
 ```
+
+Multi-agent live test (in-seance orchestrator): `./scripts/agent-collab-test.sh`
+— see `docs/AGENT_COLLAB_TEST.md`.
 
 ## Keybinds
 

@@ -2113,12 +2113,32 @@ impl Engine {
                     .filter(|g| g.principal == principal || g.principal == "*")
                     .cloned()
                     .collect();
+                let session = from.clone();
+                let (task_id, task_status, task_chars) = session
+                    .as_ref()
+                    .and_then(|slug| {
+                        let tid = self.active_tasks.get(slug).cloned().or_else(|| {
+                            self.tasks
+                                .values()
+                                .filter(|t| t.pane == *slug)
+                                .max_by_key(|t| t.created_ms)
+                                .map(|t| t.id.clone())
+                        })?;
+                        let t = self.tasks.get(&tid)?;
+                        Some((Some(tid), Some(t.status.clone()), Some(t.body.len())))
+                    })
+                    .unwrap_or((None, None, None));
                 ok(json!({
                     "principal": principal,
+                    "session": session,
                     "workspace": scope,
                     "policy": policy.as_str(),
                     "grants": grants,
                     "event_seq": events::current_seq(),
+                    "task_id": task_id,
+                    "task_status": task_status,
+                    "task_body_chars": task_chars,
+                    "hint": "seance ctl task   # re-read durable inject body for this pane",
                 }))
             }
             Caps { .. } => ok(json!({
@@ -2586,6 +2606,13 @@ impl Engine {
             created_ms: now_ms(),
             finished_ms: None,
         };
+        // Sidecar next to scratchpad so workers can discover task_id without
+        // env (agents don't re-exec on inject). Paths:
+        //   <scratch>.taskid  → bare id
+        //   <scratch>.task.json → id + status + body
+        if let Some(p) = self.panes.iter().find(|p| p.slug == slug) {
+            write_task_sidecar(&p.scratch_path, &rec);
+        }
         self.tasks.insert(id.clone(), rec);
         self.active_tasks.insert(slug.to_string(), id.clone());
         id
@@ -2606,6 +2633,9 @@ impl Engine {
             }
             t.status = "done".into();
             t.finished_ms = Some(now_ms());
+            if let Some(p) = self.panes.iter().find(|p| p.slug == slug) {
+                write_task_sidecar(&p.scratch_path, t);
+            }
         }
         self.active_tasks.remove(slug);
         Some(tid)
@@ -2758,6 +2788,25 @@ fn task_json(t: &TaskRecord) -> serde_json::Value {
         "body": t.body,
         "body_chars": t.body.len(),
     })
+}
+
+/// Write discoverable task id next to the scratchpad (worker re-orientation).
+fn write_task_sidecar(scratch_path: &std::path::Path, rec: &TaskRecord) {
+    let id_path = scratch_path.with_extension("taskid");
+    let json_path = scratch_path.with_extension("task.json");
+    let _ = std::fs::write(&id_path, format!("{}\n", rec.id));
+    let summary = json!({
+        "id": rec.id,
+        "pane": rec.pane,
+        "status": rec.status,
+        "created_ms": rec.created_ms,
+        "body": rec.body,
+        "body_chars": rec.body.len(),
+        "hint": "seance ctl task   # or: cat $SEANCE_SCRATCHPAD with .taskid extension",
+    });
+    if let Ok(s) = serde_json::to_string_pretty(&summary) {
+        let _ = std::fs::write(&json_path, s);
+    }
 }
 
 const VALID_STATUSES: &[&str] = &[

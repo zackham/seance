@@ -183,38 +183,43 @@ cannot connect (with an "is seance running?" hint).
 |---------|-------|
 | `list` | `seance ctl list` |
 | `new` | `seance ctl new --name NAME [--cwd DIR] [--agent NAME\|--command CMD] [--workspace WS] [--wait-ready]` |
-| `send` | `seance ctl send PANE TEXT...` `[--file PATH\|--stdin] [--no-submit] [--force]` |
+| `send` | `seance ctl send PANE TEXT...` `[--file PATH\|--stdin] [--no-submit] [--force]` → `task_id` |
 | `send-raw` | `seance ctl send-raw PANE BYTES` |
-| `read` | `seance ctl read PANE [--lines N]` |
-| `status` | `seance ctl status PANE` |
-| `kill` | `seance ctl kill PANE` |
-| `scratchpad` / `pad` | `seance ctl pad PANE [--cat]` |
+| `read` | `seance ctl read PANE [--lines N]` (debug) |
+| `status` / `kill` | `seance ctl status\|kill PANE` |
+| `scratchpad` / `pad` | `seance ctl pad [PANE] [--cat]` (default: `$SEANCE_SESSION`) |
 | `note` | `seance ctl note [PANE] TEXT...` `[--file PATH] [--replace]` |
-| `finish` | `seance ctl finish [PANE] [--file PATH] [--status done] [--note N]` |
-| `brief` / `wait` / `doctor` | orchestrator denseness (see ORCHESTRATION.md) |
-| `skill` / `help` | agent contract + CLI help |
+| `finish` | `seance ctl finish [PANE] [--file\|--stdin] [--status done] [--note N] [--task ID]` |
+| `task` / `inbox` | durable inject body (`--id` or self) |
+| `roster` / `stage` / `brief` | dense stage projection |
+| `wait` | `wait PANE… --status done [--cat\|--harvest] [--badge-only] …` |
+| `harvest` | alias: `wait … --status done --cat` |
+| `whoami` | principal + session + active `task_id` |
+| `doctor` / `skill` / `help` | profiles + agent contract |
 
 Notes:
 
-- **`send`** joins trailing words into the prompt. **Shell expands `$VARS`** —
-  for verbatim payloads use `--file` or `--stdin`.
-- **`--no-submit`** stages text without pressing Enter; inject auto-sets
-  `status=working`.
-- **`send-raw`**: `send-raw build $'\x03'` (Ctrl-C), `$'\r'` (Enter).
-- **`pad --cat`** prints body in one hop; **`finish`** writes pad + status via
-  the control plane (sandboxed workers).
+- **`send`**: shell expands `$VARS` — use `--file`/`--stdin`. Inject creates a
+  **task envelope** (`task_id`), sets `status=working`, records pad baseline.
+  Sidecars: `<scratch>.taskid` / `<scratch>.task.json`.
+- **`wait --status done`**: evidence-bound (pad must grow since inject) unless
+  `--badge-only`. Prints `done …` (not `ready`) when waiting on done.
+- **`--cat` / `harvest`**: after success, print each pane's pad body (fan-in).
+- **`finish`**: pad body + status + task close; `done` requires body.
+- **Roster** prefers **slug** when name≠slug (ctl needs slug).
 
 ### Examples
 
 ```bash
 seance ctl new --name build --cwd ~/proj --agent claude --wait-ready
-seance ctl send build --file /tmp/task.md
-seance ctl wait build --status done --timeout 600
-seance ctl pad build --cat
-seance ctl send-raw build $'\x03'          # interrupt
-seance ctl finish --file /tmp/ans.md --status done   # from inside a worker
-seance ctl status build --json
-seance ctl kill build
+seance ctl send build --file /tmp/task.md          # task=task-N
+seance ctl wait build --status done --timeout 600 --cat
+seance ctl harvest w1 w2 w3 --timeout 900
+seance ctl task                                    # inside a worker
+seance ctl finish --stdin --status done <<'EOF'
+answer
+EOF
+seance ctl roster
 ```
 
 ---
