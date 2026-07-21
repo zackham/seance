@@ -172,6 +172,8 @@ impl Pane {
             drive_mode: None,
             exited: false,
             exit_code: None,
+            inject_pad_rev: None,
+            inject_pad_bytes: None,
         }
     }
 }

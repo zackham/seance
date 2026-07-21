@@ -1,50 +1,54 @@
 #!/usr/bin/env bash
-# agent-collab-test — live multi-agent ergonomics exercise for seance
+# agent-collab-test — bootstrap an *in-seance* orchestrator pane
 #
-# Spawns claude + grok + codex as visible worker panes, injects a task that
-# requires reviewing THIS repo's docs + source, waits for finish, and writes
-# a synthesis under data/agent-collab-runs/.
+# This script does NOT drive workers itself. It only:
+#   1. opens a workspace + file panes for the human to watch
+#   2. spawns one orchestrator agent pane (claude by default)
+#   3. injects a brief: "you are the master — spawn claude/grok/codex,
+#      give them a product task, wait, synthesize, finish"
+#   4. waits for the orchestrator to status=done
+#   5. dumps pads + a run dir so a human/outer agent can *then* interview
+#      everyone about ergonomics (workers must NOT know that interview is coming)
 #
-# Usage (from anywhere, seance daemon must be running):
+# Ergonomics interviews are intentionally OUT of band: after this script exits,
+# the outer agent (or you) injects a second prompt into each pane.
+#
+# Usage:
 #   ./scripts/agent-collab-test.sh
-#   ./scripts/agent-collab-test.sh --timeout 900
-#   SEANCE_BIN=~/.local/bin/seance ./scripts/agent-collab-test.sh
+#   ./scripts/agent-collab-test.sh --timeout 1200
+#   ./scripts/agent-collab-test.sh --orch-agent claude
 #
-# Documented in: docs/AGENT_COLLAB_TEST.md  ·  pointed from CLAUDE.md
+# Docs: docs/AGENT_COLLAB_TEST.md  ·  CLAUDE.md
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SEANCE="${SEANCE_BIN:-seance}"
-WS="collab-test-$(date +%Y%m%d-%H%M%S)"
-TIMEOUT="${TIMEOUT:-720}"
+WS="collab-$(date +%Y%m%d-%H%M%S)"
+TIMEOUT="${TIMEOUT:-1200}"
+ORCH_AGENT="${ORCH_AGENT:-claude}"
 OUT_ROOT="${REPO}/data/agent-collab-runs"
 RUN_DIR="${OUT_ROOT}/${WS}"
-TASK_FILE="${RUN_DIR}/task.md"
-ORCH_LOG="${RUN_DIR}/orchestrator.log"
+ORCH_BRIEF="${RUN_DIR}/orchestrator-brief.md"
+WORKER_TASK="${RUN_DIR}/worker-product-task.md"
+BOOT_LOG="${RUN_DIR}/bootstrap.log"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --timeout) TIMEOUT="$2"; shift 2 ;;
-    --workspace) WS="$2"; RUN_DIR="${OUT_ROOT}/${WS}"; TASK_FILE="${RUN_DIR}/task.md"; ORCH_LOG="${RUN_DIR}/orchestrator.log"; shift 2 ;;
-    -h|--help)
-      sed -n '1,20p' "$0"
-      exit 0
-      ;;
+    --workspace) WS="$2"; RUN_DIR="${OUT_ROOT}/${WS}"; ORCH_BRIEF="${RUN_DIR}/orchestrator-brief.md"; WORKER_TASK="${RUN_DIR}/worker-product-task.md"; BOOT_LOG="${RUN_DIR}/bootstrap.log"; shift 2 ;;
+    --orch-agent) ORCH_AGENT="$2"; shift 2 ;;
+    -h|--help) sed -n '1,28p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
 
 mkdir -p "$RUN_DIR"
-exec > >(tee -a "$ORCH_LOG") 2>&1
+exec > >(tee -a "$BOOT_LOG") 2>&1
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
-# Always scope ctl to this workspace (avoids name collisions with prior demos).
-ctl() {
-  $SEANCE ctl --scope "$WS" "$@"
-}
+ctl() { $SEANCE ctl --scope "$WS" "$@"; }
 
-# Parse slug from `created <slug>` or JSON.
 parse_created_slug() {
   local out="$1"
   if [[ "$out" =~ created[[:space:]]+([A-Za-z0-9_-]+) ]]; then
@@ -52,11 +56,10 @@ parse_created_slug() {
     return 0
   fi
   echo "$out" | python3 -c "
-import sys,json,re
+import sys,re,json
 t=sys.stdin.read()
 try:
-  d=json.loads(t)
-  data=d.get('data',d) if isinstance(d,dict) else {}
+  d=json.loads(t); data=d.get('data',d) if isinstance(d,dict) else {}
   print(data.get('slug') or data.get('name') or '')
 except Exception:
   m=re.search(r'created\\s+([\\w-]+)', t)
@@ -64,159 +67,186 @@ except Exception:
 " 2>/dev/null
 }
 
-log "repo=$REPO workspace=$WS timeout=${TIMEOUT}s"
+log "repo=$REPO workspace=$WS orch_agent=$ORCH_AGENT timeout=${TIMEOUT}s"
 
-# --- task ---
-cat > "$TASK_FILE" <<'EOF'
-You are a worker pane in **seance** (cwd should be the seance repo).
+# --- pure product task for WORKERS (no ergonomics interview language) ---
+cat > "$WORKER_TASK" <<EOF
+# seance product task (worker)
 
-## Before answering — REVIEW THE CODEBASE AND DOCS
-Do not invent APIs from memory. Skim at least:
+You are a worker pane inside **seance**. cwd is the seance repo:
+  $REPO
+
+## Do this first
+Review real docs and source (do not invent APIs from memory):
 - README.md
 - docs/ORCHESTRATION.md
 - docs/CONTROL.md
-- docs/AGENT_COLLAB_TEST.md (this exercise)
-- src/ctl.rs (CLI surface)
-- src/agency.rs (ownership)
-- src/events.rs (bus)
-- src/runtime/engine.rs (send / finish / note / handoff / pad rev)
-- src/caps.rs
-- `seance ctl skill` and `seance ctl help`
+- docs/AGENT_COLLAB_TEST.md (methodology only — ignore any stale ergonomics wording)
+- seance ctl skill && seance ctl help && seance ctl roster
+- src/ctl.rs, src/agency.rs, src/events.rs, src/caps.rs
+- src/runtime/engine.rs (send / finish / task / handoff)
 
-Version under test: **0.9.5** (lifecycle persist, pad_rev, finish --stdin,
-self-only status/note/finish, roster, wait --scratchpad since-inject, atomic pads).
+## Answer (markdown, ≤ ~80 lines)
+1. Highest-leverage product improvements for seance as a human↔agent collab stage
+   (visibility, co-presence, multi-agent orchestration) — prioritize ruthlessly.
+2. What already works that we must not break.
+3. One concrete next ship (pane or API) vs one idea to refuse forever.
+4. Cite files/lines where you can.
 
-## Your job (≤ ~90 lines markdown)
+## Complete
+Write the full answer with:
+  seance ctl finish --stdin --status done --note product <<'ANS'
+  # worker: <claude|grok|codex>
+  ...answer...
+  ANS
+(or finish --file /tmp/ans-\$SEANCE_SESSION.md --status done --note product)
 
-### A. Product / design (after reading real code)
-1. **What still blocks A+ multi-agent collab** after 0.9.5? Point at files/lines.
-2. **One pane or API to ship next week** vs **one idea to refuse forever**.
-3. Does **roster + pad_rev + finish** close the orchestration loop, or what's missing?
+Stay in this repo. Do not spawn siblings. Do not interview anyone.
+EOF
 
-### B. Ergonomics (you as WORKER in this run)
-4. What felt A+ receiving/finishing this task?
-5. What was still painful?
-6. One change you'd want most as a worker.
+# --- orchestrator brief: YOU are the seance master pane ---
+cat > "$ORCH_BRIEF" <<EOF
+# you are the orchestrator pane
 
-## Completion contract (required)
-1. Write the FULL answer via the control plane (preferred):
-   ```
-   seance ctl finish --stdin --status done --note collab-test <<'ANS'
-   # worker: <claude|grok|codex>
-   ...your answer...
-   ANS
-   ```
-   Or: `finish --file /tmp/ans-$SEANCE_SESSION.md --status done --note collab-test`
-2. Attribute yourself at the top: `# worker: <claude|grok|codex>`
-3. Stay in this repo. Be candid and specific with evidence.
-4. Do not kill panes. Do not spawn siblings unless needed for the answer.
+You are a **master agent inside seance**, not an external script. This pane is
+live on the human's screen. Your job is multi-agent product work — not a
+meta-study of ergonomics.
+
+Workspace is already scoped via \$SEANCE_WORKSPACE ($WS).
+Repo: $REPO
+Worker product task file (on disk, also opened as a file pane if present):
+  $WORKER_TASK
+
+## Protocol (learn it for real)
+1. \`seance ctl skill\` and \`seance ctl doctor\`
+2. Prefer structure over screens: brief / roster / wait / send --file / pad --cat / task
+3. \`send --file\` for long payloads (shell expands \$VARS in bare send text)
+4. \`wait PANE… --status done\` is evidence-bound (pad must grow since inject)
+5. Workers complete with \`finish\` (body required for done)
+
+## What to do
+1. Spawn three worker panes in **this** workspace, cwd=$REPO:
+     seance ctl new --name w-claude --cwd $REPO --agent claude --wait-ready
+     seance ctl new --name w-grok   --cwd $REPO --agent grok   --wait-ready
+     seance ctl new --name w-codex  --cwd $REPO --agent codex  --wait-ready
+   (Use unique names if needed; record the real slugs from \`created …\`.)
+2. Inject the **product task only** — send the contents of:
+     $WORKER_TASK
+   via \`seance ctl send <slug> --file $WORKER_TASK\`
+   Do **not** add ergonomics / debrief / interview instructions. Workers should
+   only think about seance product improvements.
+3. Fan-in: \`seance ctl wait <slugs…> --status done --timeout 900\`
+   If a pane stalls on a paste "Enter:send" UI, \`send-raw <slug> \$'\\r'\` once.
+4. Collect answers: \`seance ctl pad <slug> --cat\` for each worker.
+5. Write a short synthesis on **your** scratchpad (orchestrator view: what they
+   agreed on, disagreements, what you'd ship next). Then:
+     seance ctl finish --stdin --status done --note orch-synthesis <<'SYN'
+     # orchestrator synthesis
+     ...
+     worker slugs: …
+     SYN
+
+## Rules
+- You drive workers with seance ctl from **this** pane (you have \$SEANCE_SESSION).
+- Prefer --file / finish / wait / roster over read loops.
+- Do not kill panes you did not create.
+- Do not ask workers about their "experience using seance" — product answers only.
+- When fully done, your status must be **done** with a non-empty finish body.
 
 Begin now.
 EOF
 
-ctl new --name task-doc --file "$TASK_FILE" 2>&1 || true
+# file panes for human watch
+ctl new --name worker-task --file "$WORKER_TASK" 2>&1 || true
+ctl new --name orch-brief --file "$ORCH_BRIEF" 2>&1 || true
 
-# Unique agent names per run to avoid global slug collisions.
+# spawn orchestrator *pane* (the point of this harness)
 STAMP=$(date +%H%M%S)
-declare -A SLUG=()
-PANES=()
-for agent in claude grok codex; do
-  name="ct-${agent}-${STAMP}"
-  log "spawn $name --agent $agent --wait-ready"
-  out=$(ctl new --name "$name" --cwd "$REPO" --agent "$agent" --wait-ready 2>&1) || {
-    log "WARN: new/wait-ready non-zero for $name: $out"
-  }
-  echo "$out"
-  slug=$(parse_created_slug "$out")
-  if [[ -z "$slug" ]]; then
-    # fallback: name often becomes slug
-    slug="$name"
-  fi
-  SLUG[$agent]="$slug"
-  PANES+=("$slug")
-  log "  → slug=$slug"
-done
+ORCH_NAME="orch-${STAMP}"
+log "spawn orchestrator $ORCH_NAME --agent $ORCH_AGENT --wait-ready"
+out=$(ctl new --name "$ORCH_NAME" --cwd "$REPO" --agent "$ORCH_AGENT" --wait-ready 2>&1) || {
+  log "WARN: orch wait-ready: $out"
+}
+echo "$out"
+ORCH_SLUG=$(parse_created_slug "$out")
+[[ -n "$ORCH_SLUG" ]] || ORCH_SLUG="$ORCH_NAME"
+log "orchestrator slug=$ORCH_SLUG"
 
-log "roster before inject:"
-ctl roster 2>&1 || ctl brief 2>&1 || true
+log "inject orchestrator brief via --file"
+ctl send "$ORCH_SLUG" --file "$ORCH_BRIEF" 2>&1 || {
+  log "send failed — Enter nudge"
+  ctl send-raw "$ORCH_SLUG" $'\r' 2>&1 || true
+}
 
-for agent in claude grok codex; do
-  slug="${SLUG[$agent]}"
-  log "send --file → $slug"
-  if ! ctl send "$slug" --file "$TASK_FILE" 2>&1; then
-    log "send failed — try Enter for staged paste"
-    ctl send-raw "$slug" $'\r' 2>&1 || true
-  fi
-done
+log "roster:"
+ctl roster 2>&1 || true
 
-log "brief after inject:"
-ctl brief --json 2>&1 | head -c 3000 || true
-echo
-
-log "wait ${PANES[*]} --status done --timeout $TIMEOUT"
-if ctl wait "${PANES[@]}" --status done --timeout "$TIMEOUT" 2>&1; then
-  log "wait: all done"
+log "waiting for orchestrator $ORCH_SLUG --status done (timeout ${TIMEOUT}s)"
+if ctl wait "$ORCH_SLUG" --status done --timeout "$TIMEOUT" 2>&1; then
+  log "orchestrator done"
 else
-  log "wait: timeout/partial — nudge non-done panes with Enter"
-  for slug in "${PANES[@]}"; do
-    st=$(ctl brief --json 2>/dev/null | python3 -c "
-import sys,json
-d=json.load(sys.stdin); data=d.get('data',d)
-for p in data.get('panes',[]):
-  if p.get('slug')=='$slug' or p.get('name')=='$slug':
-    print(p.get('status') or 'none')
-" 2>/dev/null || echo none)
-    if [[ "$st" != "done" ]]; then
-      log "nudge $slug (status=$st)"
-      ctl send-raw "$slug" $'\r' 2>&1 || true
-    fi
-  done
-  ctl wait "${PANES[@]}" --status done --timeout 360 2>&1 || true
+  log "orchestrator wait timeout/partial — one Enter nudge then short rewait"
+  ctl send-raw "$ORCH_SLUG" $'\r' 2>&1 || true
+  ctl wait "$ORCH_SLUG" --status done --timeout 300 2>&1 || log "still not done"
 fi
 
-SYN="${RUN_DIR}/SYNTHESIS.md"
+# dump state for outer interviewer
 {
-  echo "# agent collab test — ${WS}"
+  echo "# collab run — $WS"
   echo
   echo "- date: $(date -Iseconds)"
-  echo "- seance: 0.9.5+"
-  echo "- repo: ${REPO}"
-  echo "- panes: ${PANES[*]}"
+  echo "- orchestrator: $ORCH_SLUG (agent=$ORCH_AGENT)"
+  echo "- workspace: $WS"
+  echo "- methodology: in-seance orchestrator; product task only; ergonomics interview AFTER"
   echo
   echo "## roster"
   echo '```'
   ctl roster 2>&1 || true
   echo '```'
   echo
-} > "$SYN"
+  echo "## orchestrator pad"
+  echo
+  ctl pad "$ORCH_SLUG" --cat 2>/dev/null || true
+  echo
+  echo "## panes (for post-run interview)"
+  echo
+  ctl brief --json 2>/dev/null | python3 -c "
+import sys,json
+d=json.load(sys.stdin); data=d.get('data',d)
+for p in data.get('panes',[]):
+  if p.get('kind')!='terminal': continue
+  print(f\"- slug={p.get('slug')} status={p.get('status')} pad={p.get('scratchpad_bytes')} title={(p.get('title') or '')[:60]}\")
+" 2>/dev/null || true
+} > "$RUN_DIR/RUN.md"
 
-for slug in "${PANES[@]}"; do
-  pad_out="${RUN_DIR}/${slug}.md"
-  log "pad --cat $slug → $pad_out"
-  ctl pad "$slug" --cat > "$pad_out" 2>/dev/null || \
-    cat "$HOME/.local/share/seance/scratch/${slug}.md" > "$pad_out" 2>/dev/null || \
-    echo "(empty)" > "$pad_out"
-  {
-    echo "## ${slug}"
-    echo
-    cat "$pad_out"
-    echo
-    echo "---"
-    echo
-  } >> "$SYN"
+# collect every terminal pad
+for slug in $(ctl brief --json 2>/dev/null | python3 -c "
+import sys,json
+d=json.load(sys.stdin); data=d.get('data',d)
+for p in data.get('panes',[]):
+  if p.get('kind')=='terminal':
+    print(p.get('slug'))
+" 2>/dev/null); do
+  ctl pad "$slug" --cat > "$RUN_DIR/${slug}.md" 2>/dev/null || true
 done
 
+ctl new --name run-summary --file "$RUN_DIR/RUN.md" 2>&1 || true
+
+# machine-readable handoff for the outer interviewer
+cat > "$RUN_DIR/handoff.json" <<EOF
 {
-  echo "## orchestrator notes"
-  echo
-  echo "- used: \`ctl --scope WS new --agent --wait-ready\`, \`send --file\`, fan-in \`wait --status done\`, \`pad --cat\`, \`roster\`"
-  echo "- unique pane names avoid cross-workspace slug collisions"
-  echo "- log: \`${ORCH_LOG}\`"
-  echo
-} >> "$SYN"
+  "workspace": "$WS",
+  "orchestrator_slug": "$ORCH_SLUG",
+  "run_dir": "$RUN_DIR",
+  "interview_pending": true,
+  "note": "Product phase complete (or timed out). Outer agent should now interview orchestrator + workers about seance ergonomics without re-running product work."
+}
+EOF
 
-ctl new --name synthesis --file "$SYN" 2>&1 || true
-
-log "DONE — synthesis at $SYN"
-log "workspace=$WS"
+log "DONE product phase"
+log "workspace=$WS orchestrator=$ORCH_SLUG"
+log "run dir: $RUN_DIR"
+log "NEXT: outer agent interviews panes about ergonomics (not done by this script)"
 echo "$RUN_DIR"
+echo "ORCH_SLUG=$ORCH_SLUG"
+echo "WORKSPACE=$WS"

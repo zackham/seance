@@ -487,6 +487,9 @@ pub enum ControlRequest {
         /// Allow `status=done` with no body (default false — evidence-bound).
         #[serde(default)]
         empty_ok: bool,
+        /// Bind completion to a dispatch task id (from `send` response).
+        #[serde(default)]
+        task: Option<String>,
         #[serde(default)]
         scope: Option<String>,
         #[serde(default)]
@@ -495,6 +498,20 @@ pub enum ControlRequest {
 
     /// Stage/roster projection — dense pane rows for humans + orchestrators.
     Roster {
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Durable inject inbox / task envelope (0.9.6).
+    /// No args → active task for `$SEANCE_SESSION` / pane. `--id` for a task id.
+    Task {
+        #[serde(alias = "session")]
+        #[serde(default)]
+        pane: Option<String>,
+        #[serde(default)]
+        id: Option<String>,
         #[serde(default)]
         scope: Option<String>,
         #[serde(default)]
@@ -559,7 +576,8 @@ impl ControlRequest {
             | Self::Brief { from, .. }
             | Self::Note { from, .. }
             | Self::Finish { from, .. }
-            | Self::Roster { from, .. } => from,
+            | Self::Roster { from, .. }
+            | Self::Task { from, .. } => from,
         }
     }
 
@@ -612,7 +630,8 @@ impl ControlRequest {
             | Self::Brief { scope, .. }
             | Self::Note { scope, .. }
             | Self::Finish { scope, .. }
-            | Self::Roster { scope, .. } => scope.as_deref(),
+            | Self::Roster { scope, .. }
+            | Self::Task { scope, .. } => scope.as_deref(),
         }
     }
 }

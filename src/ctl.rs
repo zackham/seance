@@ -201,6 +201,7 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
         "doctor" => Ok(ControlRequest::Doctor { scope: None, from: None }),
         "brief" => Ok(ControlRequest::Brief { scope: None, from: None }),
         "roster" | "stage" => Ok(ControlRequest::Roster { scope: None, from: None }),
+        "task" | "inbox" => parse_task(sub_args),
         "note" => parse_note(sub_args),
         "finish" => parse_finish(sub_args),
         "wait" => {
@@ -668,6 +669,7 @@ fn with_identity(
             status,
             status_note,
             empty_ok,
+            task,
             ..
         } => Finish {
             pane,
@@ -676,6 +678,17 @@ fn with_identity(
             status,
             status_note,
             empty_ok,
+            task,
+            scope,
+            from,
+        },
+        Task {
+            pane,
+            id,
+            ..
+        } => Task {
+            pane,
+            id,
             scope,
             from,
         },
@@ -844,6 +857,7 @@ fn parse_finish(args: Vec<String>) -> Result<ControlRequest, String> {
     let mut status_note = None;
     let mut empty_ok = false;
     let mut stdin = false;
+    let mut task = None;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -853,10 +867,11 @@ fn parse_finish(args: Vec<String>) -> Result<ControlRequest, String> {
             "--replace" => append = false,
             "--status" => status = it.next().ok_or("finish: --status needs value")?,
             "--note" => status_note = Some(it.next().ok_or("finish: --note needs value")?),
+            "--task" => task = Some(it.next().ok_or("finish: --task needs TASK_ID")?),
             "--empty-ok" => empty_ok = true,
             "--help" | "-h" => {
                 return Err(
-                    "__help__\nfinish [--pane P] [--file PATH | --stdin] [--status done] [--note N] [--empty-ok]\n  \
+                    "__help__\nfinish [--pane P] [--file PATH | --stdin] [--status done] [--note N] [--task ID] [--empty-ok]\n  \
                      Writes scratchpad (via daemon) + status-set. status=done requires a body unless --empty-ok.\n  \
                      Prefer --stdin/--file so shell never expands $VARS."
                         .into(),
@@ -898,6 +913,7 @@ fn parse_finish(args: Vec<String>) -> Result<ControlRequest, String> {
         status,
         status_note,
         empty_ok,
+        task,
         scope: None,
         from: None,
     })
@@ -976,12 +992,49 @@ fn parse_kill(args: Vec<String>) -> Result<ControlRequest, String> {
     Ok(ControlRequest::Kill { pane, scope: None, from: None })
 }
 
-/// `scratchpad SESSION`
+/// `scratchpad [SESSION]` — defaults to `$SEANCE_SESSION` when unset.
 fn parse_scratchpad(args: Vec<String>) -> Result<ControlRequest, String> {
     // --cat handled in run_ctl after response (client-side read of path).
     let filtered: Vec<String> = args.into_iter().filter(|a| a != "--cat").collect();
-    let pane = single_positional(filtered, "scratchpad")?;
+    let pane = if filtered.is_empty() {
+        std::env::var("SEANCE_SESSION")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "scratchpad: expected SESSION (or set $SEANCE_SESSION inside a pane)".to_string()
+            })?
+    } else {
+        single_positional(filtered, "scratchpad")?
+    };
     Ok(ControlRequest::Scratchpad { pane, scope: None, from: None })
+}
+
+/// `task [--id ID] [PANE]` — durable inject inbox / task envelope.
+fn parse_task(args: Vec<String>) -> Result<ControlRequest, String> {
+    let mut pane = None;
+    let mut id = None;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--id" | "--task" => id = Some(it.next().ok_or("task: --id needs value")?),
+            "--help" | "-h" => {
+                return Err(
+                    "__help__\ntask [--id TASK_ID] [PANE]\n  \
+                     Show active inject inbox for a pane (default $SEANCE_SESSION).\n  \
+                     Body is the durable text from the last `send`."
+                        .into(),
+                );
+            }
+            other if !other.starts_with('-') => pane = Some(other.to_string()),
+            other => return Err(format!("task: unexpected '{other}'")),
+        }
+    }
+    Ok(ControlRequest::Task {
+        pane,
+        id,
+        scope: None,
+        from: None,
+    })
 }
 
 fn parse_seize(args: Vec<String>) -> Result<ControlRequest, String> {
@@ -1061,6 +1114,9 @@ fn run_wait(
     let mut timeout_secs: u64 = 300;
     // Default true when --scratchpad: require growth since last inject.
     let mut since_inject = true;
+    // --status done requires pad evidence by default (0.9.6); --badge-only skips.
+    let mut evidence = true;
+    let mut task_id: Option<String> = None;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1072,6 +1128,8 @@ fn run_wait(
             "--scratchpad" | "--pad" => scratchpad = true,
             "--since-inject" => since_inject = true,
             "--any-pad" => since_inject = false, // absolute pad size (legacy)
+            "--badge-only" => evidence = false,
+            "--task" => task_id = it.next(),
             "--min-bytes" => {
                 min_bytes = it
                     .next()
@@ -1094,8 +1152,11 @@ fn run_wait(
             "--help" | "-h" => {
                 println!(
                     "wait PANE [PANE...] [opts]\n  \
-                     --status done  --scratchpad [--since-inject|--any-pad] --min-bytes N\n  \
-                     --artifact PATH  --owner none  --ready  --any  --timeout S  --contains S"
+                     --status done   (default: also require pad growth since inject)\n  \
+                     --badge-only    status badge only (legacy / no evidence)\n  \
+                     --task ID       wait until that task_id is done\n  \
+                     --scratchpad [--since-inject|--any-pad] --min-bytes N\n  \
+                     --artifact PATH  --owner none  --ready  --any  --timeout S"
                 );
                 return 0;
             }
@@ -1210,11 +1271,51 @@ fn run_wait(
             if let Some(want_st) = &status {
                 ok &= st == Some(want_st.as_str());
                 want_default = false;
+                // Evidence-bound done (0.9.6): badge alone is not enough when
+                // an inject baseline exists.
+                if evidence && want_st == "done" {
+                    let inj_rev = row.get("inject_pad_rev").and_then(|v| v.as_u64());
+                    let inj_bytes = row
+                        .get("inject_pad_bytes")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let pad_rev = row.get("pad_rev").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if let Some(r) = inj_rev {
+                        let rev_ok = pad_rev > r;
+                        let bytes_ok = pad_bytes > inj_bytes;
+                        ok &= rev_ok || bytes_ok;
+                    }
+                }
+            }
+            if let Some(want_tid) = &task_id {
+                let got = row.get("task_id").and_then(|v| v.as_str());
+                let tstat = row.get("task_status").and_then(|v| v.as_str());
+                // Match this dispatch: done only when THIS id reports done
+                // (and preferably with pad evidence when evidence=true).
+                ok &= got == Some(want_tid.as_str()) && tstat == Some("done");
+                if evidence && ok {
+                    let inj_rev = row.get("inject_pad_rev").and_then(|v| v.as_u64());
+                    let inj_bytes = row
+                        .get("inject_pad_bytes")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let pad_rev = row.get("pad_rev").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if let Some(r) = inj_rev {
+                        ok &= pad_rev > r || pad_bytes > inj_bytes;
+                    }
+                }
+                want_default = false;
             }
             if ready {
                 // Boot-ready: running, not exited, no known blocking dialogs on screen.
                 ok &= running && !exited;
                 want_default = false;
+            }
+            // Fail-fast: waiting for done but pane already exited/tombstoned.
+            if exited && status.as_deref() == Some("done") {
+                ok = false;
+                // Leave unsatisfied so timeout reports clearly; orchestrator
+                // can see status=idle from exit handler.
             }
             if scratchpad {
                 if since_inject {
@@ -1688,6 +1789,53 @@ fn print_ok_human(sub: &str, response: &ControlResponse) {
 
     match sub {
         "list" | "ls" | "brief" | "roster" | "stage" => print_list(data),
+        "task" | "inbox" => {
+            if let Some(body) = data.get("body").and_then(|v| v.as_str()) {
+                let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let st = data.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                let pane = data.get("pane").and_then(|v| v.as_str()).unwrap_or("?");
+                eprintln!("# task {id}  pane={pane}  status={st}");
+                print!("{body}");
+                if !body.ends_with('\n') {
+                    println!();
+                }
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string())
+                );
+            }
+        }
+        "send" | "finish" | "status-set" | "note" => {
+            // Dense one-liners for orchestrator feedback (task_id, pad_rev).
+            if let Some(obj) = data.as_object() {
+                let mut parts = Vec::new();
+                if let Some(s) = obj.get("slug").and_then(|v| v.as_str()) {
+                    parts.push(s.to_string());
+                }
+                if let Some(t) = obj.get("task_id").and_then(|v| v.as_str()) {
+                    parts.push(format!("task={t}"));
+                }
+                if let Some(s) = obj.get("status").and_then(|v| v.as_str()) {
+                    parts.push(format!("status={s}"));
+                }
+                if let Some(r) = obj.get("pad_rev").and_then(|v| v.as_u64()) {
+                    parts.push(format!("rev={r}"));
+                }
+                if let Some(b) = obj.get("scratchpad_bytes").and_then(|v| v.as_u64()) {
+                    parts.push(format!("pad={b}B"));
+                }
+                if parts.is_empty() {
+                    println!("ok");
+                } else {
+                    println!("{}", parts.join(" "));
+                }
+            } else if data.is_null() {
+                println!("ok");
+            } else {
+                println!("{data}");
+            }
+        }
         "timeline" | "tl" => {
             if let Some(events) = data.get("events").and_then(|v| v.as_array()) {
                 if events.is_empty() {

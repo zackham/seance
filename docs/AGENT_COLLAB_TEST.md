@@ -1,82 +1,111 @@
 # Agent collab test
 
-Live multi-agent ergonomics exercise for seance. Spawns **claude**, **grok**,
-and **codex** as visible worker panes, injects a task that requires reviewing
-**this repo’s docs and source**, waits for `finish`, and writes a durable run
-under `data/agent-collab-runs/`.
+Live multi-agent exercise for seance with an **in-seance orchestrator pane**.
 
-## Why this exists
+## What this is (and is not)
 
-Orchestration quality is only real when exercised against real agent CLIs on
-the human’s screen. This test is the regression harness for:
+| This harness | Not this |
+|--------------|----------|
+| Spawns one **orchestrator agent pane** inside seance | External bash driving all three workers |
+| Orchestrator uses `seance ctl` to spawn/drive claude+grok+codex | Script hard-codes worker spawn + inject |
+| Workers get a **product** task only (seance improvements) | Workers primed for an ergonomics debrief |
+| Outer agent (or human) **interviews after** product work | Ergonomics questions baked into the first inject |
 
-- `send --file` (no shell `$` expansion)
-- inject → `status=working` + pad baseline
-- `wait` fan-in on `--status done`
-- `finish` / `pad --cat` / `roster`
-- codex pad+socket reachability
-- worker self-report vs evidence (`pad_rev`, since-inject)
+The point: exercise the real master path (a pane on the human's screen figuring
+out orchestration), and measure ergonomics honestly — workers should not
+optimize for an interview while doing product work.
+
+## Phases
+
+```
+┌─────────────────────┐     ┌──────────────────────────┐     ┌────────────────────┐
+│ 1. Bootstrap script │ --> │ 2. Orchestrator pane     │ --> │ 3. Outer interview │
+│    (this repo)      │     │    (claude in seance)    │     │    (you / session) │
+└─────────────────────┘     └──────────────────────────┘     └────────────────────┘
+  open workspace              spawn w-claude/grok/codex         inject debrief
+  spawn orch pane             product task only                 after finish
+  inject orch brief           wait + synthesize + finish
+  wait orch done
+```
+
+### Phase 1 — bootstrap (`./scripts/agent-collab-test.sh`)
+
+- Creates `data/agent-collab-runs/<workspace>/`
+- Writes `worker-product-task.md` (pure product) and `orchestrator-brief.md`
+- Opens those as file panes
+- `new --agent claude --wait-ready` for **one** orchestrator
+- `send --file` the orchestrator brief
+- `wait` until orchestrator `status=done`
+- Dumps pads + `RUN.md` + `handoff.json`
+
+### Phase 2 — orchestrator (inside seance)
+
+Briefed to:
+
+1. `ctl skill` / `doctor`
+2. Spawn three workers with `--agent` + `--wait-ready`
+3. `send --file` the **product** task only (no ergonomics language)
+4. `wait … --status done`
+5. Collect pads, write synthesis on **its** pad, `finish`
+
+### Phase 3 — interview (outer agent / human)
+
+**After** phase 1 exits, interview each terminal pane about experience:
+
+- What felt A+ about working *in* seance?
+- What was painful (inject, finish, pad, wait, discoverability)?
+- One change you'd want most (as worker or as orchestrator)?
+
+Do **not** re-run the product task. Prefer `send --file` of a short debrief
+prompt; wait; `pad --cat`.
+
+Suggested debrief inject (workers):
+
+```text
+Product work is done — do not redo it.
+
+Short ergonomics debrief only (≤40 lines). You were a worker pane in seance.
+1. What felt A+?
+2. What was painful?
+3. One change you'd want most as a worker.
+
+seance ctl finish --stdin --status done --note debrief <<'ANS'
+# debrief: <agent>
+...
+ANS
+```
+
+Suggested debrief for the **orchestrator** pane: same questions from the
+master seat (send/wait/fan-in/discoverability).
 
 ## Prerequisites
 
 ```bash
-# seance daemon + GUI running
-cargo build --release && seance upgrade   # if you just changed the binary
-seance ctl doctor                         # claude / grok / codex all ok
+cargo build --release && seance upgrade
+seance ctl doctor    # claude / grok / codex ok
 ```
 
 ## Run
 
 ```bash
-# from repo root
 ./scripts/agent-collab-test.sh
-
-# longer timeout (default 720s)
-./scripts/agent-collab-test.sh --timeout 900
+./scripts/agent-collab-test.sh --timeout 1200
+./scripts/agent-collab-test.sh --orch-agent claude
 ```
-
-Script is executable; location: `scripts/agent-collab-test.sh`.
 
 ## Outputs
 
 | path | content |
 |------|---------|
-| `data/agent-collab-runs/<workspace>/task.md` | exact inject payload |
-| `data/agent-collab-runs/<workspace>/w-*.md` | each worker pad |
-| `data/agent-collab-runs/<workspace>/SYNTHESIS.md` | roster + all answers |
-| `data/agent-collab-runs/<workspace>/orchestrator.log` | full ctl transcript |
-
-The script also opens file panes (`task-doc`, `synthesis`, optional roadmap)
-in the workspace so a human can watch live.
-
-## What workers are asked
-
-1. Review README, `docs/ORCHESTRATION.md`, `docs/CONTROL.md`, core `src/`
-2. Answer design questions (gaps, next ship, refuse forever)
-3. Debrief worker ergonomics (A+ / pain / one ask)
-4. Complete via `seance ctl finish --stdin` (or `--file`)
-
-## Manual one-liner equivalent
-
-```bash
-WS=my-run
-seance ctl new --name w-claude --workspace $WS --cwd ~/work/seance --agent claude --wait-ready
-seance ctl send w-claude --file /path/to/task.md
-seance ctl wait w-claude --status done --timeout 600
-seance ctl pad w-claude --cat
-seance ctl roster --scope $WS   # note: --scope is a global flag → seance ctl --scope $WS roster
-```
-
-## Interpreting results
-
-- **Happy path:** zero `read` on the orchestrator; all three `status=done`;
-  pads have attributed `finish` stamps and `pad_rev` ≥ 1.
-- **Grok paste stall:** multi-line inject sometimes sits on “Enter:send” —
-  script nudges with `send-raw $'\r'`.
-- **Partial timeout:** pads under the run dir still hold partial answers.
+| `…/orchestrator-brief.md` | master brief |
+| `…/worker-product-task.md` | product-only worker task |
+| `…/RUN.md` | roster + orch pad + pane list |
+| `…/handoff.json` | workspace + orch slug for interview phase |
+| `…/<slug>.md` | each terminal pad dump |
+| `…/bootstrap.log` | bootstrap transcript |
 
 ## Related
 
 - `seance ctl skill` — agent contract
 - `docs/ORCHESTRATION.md` — A+ playbook
-- `CLAUDE.md` — points here for coding agents working on seance
+- `CLAUDE.md` — pointer for coding agents

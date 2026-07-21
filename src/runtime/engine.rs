@@ -76,6 +76,11 @@ pub struct Engine {
     pub pad_revs: HashMap<String, u64>,
     /// At last inject: (pad_rev, pad_bytes) — evidence for wait --since-inject.
     pub inject_baselines: HashMap<String, (u64, u64)>,
+    /// task_id → record (dispatch envelope + durable inbox body).
+    pub tasks: HashMap<String, TaskRecord>,
+    /// pane slug → active open task_id.
+    pub active_tasks: HashMap<String, String>,
+    pub task_counter: u64,
     pub proposals: HashMap<String, (String, Option<String>)>,
     pub proposal_counter: u64,
     pub ask_counter: u64,
@@ -121,6 +126,9 @@ impl Engine {
             statuses: HashMap::new(),
             pad_revs: HashMap::new(),
             inject_baselines: HashMap::new(),
+            tasks: HashMap::new(),
+            active_tasks: HashMap::new(),
+            task_counter: state.task_counter,
             proposals: HashMap::new(),
             proposal_counter: 0,
             ask_counter: 0,
@@ -132,6 +140,13 @@ impl Engine {
             last_grid_cells: HashMap::new(),
         };
 
+        for t in state.tasks {
+            eng.tasks.insert(t.id.clone(), t);
+        }
+        for (slug, tid) in state.active_tasks {
+            eng.active_tasks.insert(slug, tid);
+        }
+
         for p in &state.panes {
             let slug = p.slug.clone();
             if let Some(st) = &p.status {
@@ -140,6 +155,9 @@ impl Engine {
             }
             if p.pad_rev > 0 {
                 eng.pad_revs.insert(slug.clone(), p.pad_rev);
+            }
+            if let (Some(r), Some(b)) = (p.inject_pad_rev, p.inject_pad_bytes) {
+                eng.inject_baselines.insert(slug.clone(), (r, b));
             }
             let _ = eng.spawn_from_persisted(p);
             // Restore agency onto the pane we just spawned.
@@ -219,6 +237,13 @@ impl Engine {
                 .into_iter()
                 .map(|b| (b.slug, (b.pad_rev, b.pad_bytes)))
                 .collect(),
+            tasks: bundle
+                .tasks
+                .into_iter()
+                .map(|t| (t.id.clone(), t))
+                .collect(),
+            active_tasks: bundle.active_tasks.into_iter().collect(),
+            task_counter: bundle.task_counter,
             proposals: HashMap::new(),
             proposal_counter: bundle.proposal_counter,
             ask_counter: bundle.ask_counter,
@@ -482,6 +507,31 @@ impl Engine {
                     }
                     p.agency.mark_exited(code);
                 }
+                // Turn-end signal: working/blocked → idle on process death so
+                // waiters don't hang until timeout on a dead worker.
+                let was = self
+                    .statuses
+                    .get(slug)
+                    .map(|(s, _)| s.clone())
+                    .unwrap_or_default();
+                if was == "working" || was == "planning" || was == "blocked" || was.is_empty() {
+                    let note = format!("exited ({code:?})");
+                    self.statuses
+                        .insert(slug.clone(), ("idle".into(), Some(note.clone())));
+                    self.broadcast(GuiEvent::Status {
+                        slug: slug.clone(),
+                        state: "idle".into(),
+                        note: Some(note),
+                    });
+                }
+                if let Some(tid) = self.active_tasks.remove(slug) {
+                    if let Some(t) = self.tasks.get_mut(&tid) {
+                        if t.status == "open" {
+                            t.status = "orphaned".into();
+                            t.finished_ms = Some(now_ms());
+                        }
+                    }
+                }
                 events::log(
                     "daemon",
                     None,
@@ -583,6 +633,18 @@ impl Engine {
             .iter()
             .filter(|a| a.answer.is_none() && a.from == p.slug)
             .count();
+        // Active open task, else most recent task for this pane (so wait --task
+        // still sees done after complete_active_task clears the active map).
+        let task_id = self.active_tasks.get(&p.slug).cloned().or_else(|| {
+            self.tasks
+                .values()
+                .filter(|t| t.pane == p.slug)
+                .max_by_key(|t| t.created_ms)
+                .map(|t| t.id.clone())
+        });
+        let task_status = task_id
+            .as_ref()
+            .and_then(|id| self.tasks.get(id).map(|t| t.status.clone()));
         json!({
             "kind": p.kind,
             "name": p.name,
@@ -606,6 +668,8 @@ impl Engine {
             "inject_pad_rev": inject_pad_rev,
             "inject_pad_bytes": inject_pad_bytes,
             "open_asks": open_asks,
+            "task_id": task_id,
+            "task_status": task_status,
         })
     }
 
@@ -1377,6 +1441,8 @@ impl Engine {
                         drive_mode: Some(snap.drive_mode),
                         exited: snap.exited,
                         exit_code: snap.exit_code,
+                        inject_pad_rev: self.inject_baselines.get(&p.slug).map(|(r, _)| *r),
+                        inject_pad_bytes: self.inject_baselines.get(&p.slug).map(|(_, b)| *b),
                     }
                 })
                 .collect(),
@@ -1388,6 +1454,14 @@ impl Engine {
             extra_workspaces: self.extra_workspaces.clone(),
             workspace_order: self.workspace_order.clone(),
             window_size: None,
+            // Keep open + recently finished tasks (cap body size already at create).
+            tasks: self.tasks.values().cloned().collect(),
+            task_counter: self.task_counter,
+            active_tasks: self
+                .active_tasks
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         };
         let _ = state.save();
     }
@@ -1545,19 +1619,18 @@ impl Engine {
                             ..Default::default()
                         },
                     );
+                    // Dispatch envelope + working badge + pad baseline (before inject consumes text).
+                    let task_id = self.begin_task(&slug, &text);
                     if let Some(session) = self.panes[idx].session.as_ref() {
                         session.set_input_origin(&act);
                         session.scroll_to_bottom();
                         session.inject(text, submit);
                     }
-                    // Early signal for orchestrators: inject received → working.
-                    // Capture pad baseline so wait --scratchpad is since-inject, not absolute.
-                    let pad_bytes = std::fs::metadata(&self.panes[idx].scratch_path)
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    let pad_rev = self.pad_revs.get(&slug).copied().unwrap_or(0);
-                    self.inject_baselines
-                        .insert(slug.clone(), (pad_rev, pad_bytes));
+                    let (pad_rev, pad_bytes) = self
+                        .inject_baselines
+                        .get(&slug)
+                        .copied()
+                        .unwrap_or((0, 0));
                     self.statuses
                         .insert(slug.clone(), ("working".into(), Some(format!("inject from {act}"))));
                     self.broadcast(GuiEvent::Status {
@@ -1570,7 +1643,14 @@ impl Engine {
                         Some(&ws),
                         Some(&slug),
                         "status_set",
-                        format!("working: inject from {act}"),
+                        format!("working: inject from {act} task={task_id}"),
+                    );
+                    events::log(
+                        &act,
+                        Some(&ws),
+                        Some(&slug),
+                        "task_open",
+                        task_id.clone(),
                     );
                     self.broadcast_agency(&slug);
                     self.broadcast(GuiEvent::InputOrigin {
@@ -1582,7 +1662,14 @@ impl Engine {
                         verb: "⚡ driven".into(),
                         actor: act,
                     });
-                    ok(serde_json::Value::Null)
+                    self.persist();
+                    ok(json!({
+                        "slug": slug,
+                        "task_id": task_id,
+                        "inject_pad_rev": pad_rev,
+                        "inject_pad_bytes": pad_bytes,
+                        "status": "working",
+                    }))
                 }
                 Err(e) => err(e),
             },
@@ -1762,8 +1849,19 @@ impl Engine {
                         if let Err(e) = assert_self_or_cross(&slug, &from, &act) {
                             return err(e);
                         }
+                        // Evidence gate: bare status-set done cannot lie without pad growth.
+                        if state == "done" {
+                            if let Err(e) = self.require_since_inject_evidence(&slug) {
+                                return err(format!(
+                                    "{e} — use `finish` with a body, or grow the pad first"
+                                ));
+                            }
+                        }
                         self.statuses
                             .insert(slug.clone(), (state.clone(), note.clone()));
+                        if state == "done" {
+                            self.complete_active_task(&slug, None);
+                        }
                         let detail = match &note {
                             Some(n) => format!("{state}: {n}"),
                             None => state.clone(),
@@ -1779,6 +1877,7 @@ impl Engine {
                             "slug": slug,
                             "status": state,
                             "pad_rev": self.pad_revs.get(&slug).copied().unwrap_or(0),
+                            "task_id": self.active_tasks.get(&slug),
                         }))
                     }
                     Err(e) => err(e),
@@ -2265,6 +2364,7 @@ impl Engine {
                 status,
                 status_note,
                 empty_ok,
+                task,
                 scope,
                 from,
             } => {
@@ -2313,6 +2413,11 @@ impl Engine {
                         let note = status_note.clone();
                         self.statuses
                             .insert(slug.clone(), (status.clone(), note.clone()));
+                        let finished_task = if status == "done" {
+                            self.complete_active_task(&slug, task.as_deref())
+                        } else {
+                            None
+                        };
                         self.broadcast(GuiEvent::Status {
                             slug: slug.clone(),
                             state: status.clone(),
@@ -2333,7 +2438,10 @@ impl Engine {
                             Some(&ws),
                             Some(&slug),
                             "finish",
-                            format!("status={status} rev={rev}"),
+                            format!(
+                                "status={status} rev={rev} task={}",
+                                finished_task.as_deref().unwrap_or("-")
+                            ),
                         );
                         self.persist();
                         let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -2343,9 +2451,56 @@ impl Engine {
                             "scratchpad": path.to_string_lossy(),
                             "scratchpad_bytes": bytes,
                             "pad_rev": rev,
+                            "task_id": finished_task,
                         }))
                     }
                     Err(e) => err(e),
+                }
+            }
+            Task {
+                pane,
+                id,
+                scope,
+                from,
+            } => {
+                // Lookup by id, else active task for pane / $SEANCE_SESSION.
+                if let Some(tid) = id {
+                    match self.tasks.get(&tid) {
+                        Some(t) => ok(task_json(t)),
+                        None => err(format!("no task '{tid}'")),
+                    }
+                } else {
+                    let target = pane.or_else(|| from.clone());
+                    let Some(target) = target else {
+                        return err(
+                            "task: need pane, --id, or $SEANCE_SESSION (your inject inbox)"
+                                .into(),
+                        );
+                    };
+                    match find(self, &target, &scope) {
+                        Ok(idx) => {
+                            let slug = self.panes[idx].slug.clone();
+                            if let Some(tid) = self.active_tasks.get(&slug) {
+                                match self.tasks.get(tid) {
+                                    Some(t) => ok(task_json(t)),
+                                    None => err(format!("active task '{tid}' missing")),
+                                }
+                            } else {
+                                // Fall back to most recent task for this pane.
+                                let mut candidates: Vec<_> = self
+                                    .tasks
+                                    .values()
+                                    .filter(|t| t.pane == slug)
+                                    .collect();
+                                candidates.sort_by_key(|t| std::cmp::Reverse(t.created_ms));
+                                match candidates.first() {
+                                    Some(t) => ok(task_json(t)),
+                                    None => err(format!("no task for pane '{slug}'")),
+                                }
+                            }
+                        }
+                        Err(e) => err(e),
+                    }
                 }
             }
             Roster { scope, .. } => {
@@ -2390,6 +2545,93 @@ impl Engine {
         let e = self.pad_revs.entry(slug.to_string()).or_insert(0);
         *e = e.saturating_add(1);
         *e
+    }
+
+    /// Open a dispatch task on inject: baseline + durable inbox body.
+    fn begin_task(&mut self, slug: &str, body: &str) -> String {
+        let pad_bytes = self
+            .panes
+            .iter()
+            .find(|p| p.slug == slug)
+            .and_then(|p| std::fs::metadata(&p.scratch_path).ok())
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let pad_rev = self.pad_revs.get(slug).copied().unwrap_or(0);
+        self.inject_baselines
+            .insert(slug.to_string(), (pad_rev, pad_bytes));
+        // Supersede prior open task on this pane.
+        if let Some(old) = self.active_tasks.remove(slug) {
+            if let Some(t) = self.tasks.get_mut(&old) {
+                if t.status == "open" {
+                    t.status = "cancelled".into();
+                    t.finished_ms = Some(now_ms());
+                }
+            }
+        }
+        self.task_counter = self.task_counter.saturating_add(1);
+        let id = format!("task-{}", self.task_counter);
+        // Cap stored body so state.json stays sane (full inject usually fits).
+        let body = if body.len() > 64_000 {
+            format!("{}…\n<!-- truncated {} chars -->\n", &body[..64_000], body.len())
+        } else {
+            body.to_string()
+        };
+        let rec = TaskRecord {
+            id: id.clone(),
+            pane: slug.to_string(),
+            inject_pad_rev: pad_rev,
+            inject_pad_bytes: pad_bytes,
+            body,
+            status: "open".into(),
+            created_ms: now_ms(),
+            finished_ms: None,
+        };
+        self.tasks.insert(id.clone(), rec);
+        self.active_tasks.insert(slug.to_string(), id.clone());
+        id
+    }
+
+    /// Mark active (or named) task done; returns task_id if any.
+    fn complete_active_task(&mut self, slug: &str, want: Option<&str>) -> Option<String> {
+        let tid = want
+            .map(|s| s.to_string())
+            .or_else(|| self.active_tasks.get(slug).cloned());
+        let Some(tid) = tid else {
+            return None;
+        };
+        if let Some(t) = self.tasks.get_mut(&tid) {
+            if t.pane != slug && want.is_some() {
+                // Explicit task id for wrong pane — ignore quietly.
+                return None;
+            }
+            t.status = "done".into();
+            t.finished_ms = Some(now_ms());
+        }
+        self.active_tasks.remove(slug);
+        Some(tid)
+    }
+
+    /// Pad grew since last inject (rev or bytes).
+    fn require_since_inject_evidence(&self, slug: &str) -> Result<(), String> {
+        let Some((inj_rev, inj_bytes)) = self.inject_baselines.get(slug).copied() else {
+            // No inject baseline → allow (manual status or shell pane).
+            return Ok(());
+        };
+        let pad_rev = self.pad_revs.get(slug).copied().unwrap_or(0);
+        let pad_bytes = self
+            .panes
+            .iter()
+            .find(|p| p.slug == slug)
+            .and_then(|p| std::fs::metadata(&p.scratch_path).ok())
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if pad_rev > inj_rev || pad_bytes > inj_bytes {
+            Ok(())
+        } else {
+            Err(format!(
+                "no pad evidence since inject (rev {pad_rev}≤{inj_rev}, bytes {pad_bytes}≤{inj_bytes})"
+            ))
+        }
     }
 
     /// Build handoff bundle + list of (fd_index, raw fd) for SCM_RIGHTS.
@@ -2471,6 +2713,12 @@ impl Engine {
                 pad_bytes: *bytes,
             })
             .collect();
+        let tasks: Vec<TaskRecord> = self.tasks.values().cloned().collect();
+        let active_tasks: Vec<(String, String)> = self
+            .active_tasks
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let bundle = HandoffBundle {
             panes,
             selected_workspace: self.selected_workspace.clone(),
@@ -2483,9 +2731,33 @@ impl Engine {
             asks,
             pad_revs,
             inject_baselines,
+            tasks,
+            task_counter: self.task_counter,
+            active_tasks,
         };
         Ok((bundle, fds))
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn task_json(t: &TaskRecord) -> serde_json::Value {
+    json!({
+        "id": t.id,
+        "pane": t.pane,
+        "status": t.status,
+        "inject_pad_rev": t.inject_pad_rev,
+        "inject_pad_bytes": t.inject_pad_bytes,
+        "created_ms": t.created_ms,
+        "finished_ms": t.finished_ms,
+        "body": t.body,
+        "body_chars": t.body.len(),
+    })
 }
 
 const VALID_STATUSES: &[&str] = &[

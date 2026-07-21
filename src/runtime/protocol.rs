@@ -264,6 +264,29 @@ pub struct InjectBaseline {
     pub pad_bytes: u64,
 }
 
+/// Dispatch envelope for one inject→finish cycle (0.9.6).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskRecord {
+    pub id: String,
+    pub pane: String,
+    pub inject_pad_rev: u64,
+    pub inject_pad_bytes: u64,
+    /// Full inject text (durable inbox for workers / orchestrators).
+    #[serde(default)]
+    pub body: String,
+    /// open | done | cancelled | orphaned
+    #[serde(default = "default_task_open")]
+    pub status: String,
+    #[serde(default)]
+    pub created_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<u64>,
+}
+
+fn default_task_open() -> String {
+    "open".into()
+}
+
 /// Handoff message (old daemon → new) — FDs travel out-of-band via SCM_RIGHTS.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HandoffPane {
@@ -310,6 +333,14 @@ pub struct HandoffBundle {
     /// Inject baselines for evidence-bound wait.
     #[serde(default)]
     pub inject_baselines: Vec<InjectBaseline>,
+    /// Open/recent tasks (0.9.6).
+    #[serde(default)]
+    pub tasks: Vec<TaskRecord>,
+    #[serde(default)]
+    pub task_counter: u64,
+    /// pane slug → active task id
+    #[serde(default)]
+    pub active_tasks: Vec<(String, String)>,
 }
 
 /// Re-export control types for daemon routing.

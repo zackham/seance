@@ -64,6 +64,11 @@ pub struct PersistedPane {
     pub exited: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// Inject baseline (0.9.6 — cold-restart evidence for wait).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inject_pad_rev: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inject_pad_bytes: Option<u64>,
 }
 
 fn default_kind() -> String {
@@ -100,6 +105,14 @@ pub struct AppState {
     pub workspace_order: Vec<String>,
     /// Last known window size `(width, height)` in pixels.
     pub window_size: Option<(f32, f32)>,
+    /// Dispatch tasks (inject inbox + completion envelope).
+    #[serde(default)]
+    pub tasks: Vec<crate::runtime::protocol::TaskRecord>,
+    #[serde(default)]
+    pub task_counter: u64,
+    /// pane slug → active task id
+    #[serde(default)]
+    pub active_tasks: Vec<(String, String)>,
 }
 
 impl AppState {
@@ -398,6 +411,8 @@ mod tests {
                     drive_mode: Some("pair".into()),
                     exited: false,
                     exit_code: None,
+                    inject_pad_rev: None,
+                    inject_pad_bytes: None,
                 },
                 PersistedPane {
                     kind: "terminal".to_string(),
@@ -415,6 +430,8 @@ mod tests {
                     drive_mode: None,
                     exited: false,
                     exit_code: None,
+                    inject_pad_rev: None,
+                    inject_pad_bytes: None,
                 },
             ],
             sidebar_width: Some(280.0),
@@ -425,6 +442,9 @@ mod tests {
             extra_workspaces: vec![],
             workspace_order: vec![],
             window_size: Some((1280.0, 800.0)),
+            tasks: vec![],
+            task_counter: 0,
+            active_tasks: vec![],
         };
 
         state.save().expect("save should succeed");

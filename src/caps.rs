@@ -74,6 +74,7 @@ const ALWAYS_ALLOW: &[&str] = &[
     "doctor",
     "brief",
     "roster",
+    "task",
     "note",
     "finish",
 ];
@@ -304,6 +305,7 @@ pub fn op_name(req: &crate::control::ControlRequest) -> &'static str {
         Note { .. } => "note",
         Finish { .. } => "finish",
         Roster { .. } => "roster",
+        Task { .. } => "task",
     }
 }
 

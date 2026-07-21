@@ -39,17 +39,25 @@ seance restart-gui                          # UI only
 
 ### Multi-agent collab test (find this)
 
-Live exercise: spawn claude + grok + codex, inject a docs/source review task,
-wait for `finish`, collect pads.
+**In-seance orchestrator**, not an external worker driver:
+
+1. Script bootstraps one **orchestrator pane** + product task files
+2. Orchestrator (live in seance) spawns claude/grok/codex, product task only
+3. **After** product finish, outer agent interviews panes about ergonomics
+   (workers must not know the interview is coming during product work)
 
 | what | where |
 |------|--------|
 | **how to run** | `./scripts/agent-collab-test.sh` |
 | **docs** | `docs/AGENT_COLLAB_TEST.md` |
-| **outputs** | `data/agent-collab-runs/<workspace>/` |
+| **outputs** | `data/agent-collab-runs/<workspace>/` (+ `handoff.json`) |
 
-After changing orchestration ergonomics, re-run this test and read the worker
-pads before claiming A+. Prefer their evidence over vibes.
+After orchestration changes, re-run this and read orch + worker pads before
+claiming A+. Prefer their evidence over vibes.
+
+**0.9.6 contract:** `send` returns `task_id`; `wait --status done` requires pad
+growth since inject (`--badge-only` to skip); `seance ctl task` re-reads the
+durable inject body; exit flips working→idle.
 
 ## Product rules (don’t regress these)
 
