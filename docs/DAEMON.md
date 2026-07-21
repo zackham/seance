@@ -61,7 +61,7 @@ Client → daemon:
 Daemon → client (push):
 - `state` — full pane list + workspace chrome
 - `grid { pane, rev, cols, rows, cells…, cursor, title, ghost? }`
-- `pane_exited` / `pane_spawned`
+- `pane_spawned` / `pane_killed` (process exit auto-kills the pane)
 - `ask` / `status` / `touch` events
 
 ## Layout on disk

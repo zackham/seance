@@ -69,9 +69,9 @@ seance ctl harvest w-claude-4 w-grok-4 w-codex-4 --timeout 900
 | `ctl drive PANE locked_human` | agents cannot inject even after idle |
 | `ctl human` | lists owner / drive_mode / exited per pane |
 | `ctl wait PANE --owner none` | poll until free for inject |
-| process exit | **tombstone** retained until `kill` |
+| process exit | **auto-close** — pane removed from workspace |
 
-Chrome: pane border / strip shows `⌨ you` / `⚡ agent` / `☠ exit N`.
+Chrome: pane border / strip shows `⌨ you` / `⚡ agent`. Exited processes auto-close.
 
 ---
 
@@ -211,7 +211,7 @@ See the seance roadmap working doc. High-signal choices:
 
 1. **Agent profiles** — `ctl new --agent claude` expands to path+flags?
 2. **`ctl wait`** — first-class stable-screen / contains-after-seq helper?
-3. **Keep pane on process exit** (tombstone) vs auto-close (current)?
+3. ~~Keep pane on process exit (tombstone) vs auto-close~~ → **auto-close** (2026-07-21)
 4. **Claude SessionStart/Stop hooks** for true turn boundaries (decap-style)?
 5. Default **permission posture** for swarm vs solo?
 

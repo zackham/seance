@@ -148,6 +148,10 @@ impl Engine {
         }
 
         for p in &state.panes {
+            // Drop legacy tombstones — exited panes are auto-closed now.
+            if p.exited {
+                continue;
+            }
             let slug = p.slug.clone();
             if let Some(st) = &p.status {
                 eng.statuses
@@ -165,8 +169,8 @@ impl Engine {
                 let snap = crate::agency::AgencySnap {
                     owner: p.owner.clone().unwrap_or_else(|| "none".into()),
                     drive_mode: p.drive_mode.clone().unwrap_or_else(|| "pair".into()),
-                    exited: p.exited,
-                    exit_code: p.exit_code,
+                    exited: false,
+                    exit_code: None,
                 };
                 pane.agency = crate::agency::Agency::from_snap(&snap);
             }
@@ -259,12 +263,16 @@ impl Engine {
             adopted.into_iter().map(|(i, o)| (i, o.fd)).collect();
 
         for hp in bundle.panes {
-            let scratch_path = eng.store.path_for(&hp.slug);
             let agency = hp
                 .agency
                 .as_ref()
                 .map(crate::agency::Agency::from_snap)
                 .unwrap_or_default();
+            // Drop legacy tombstones — process exit auto-closes panes now.
+            if agency.exited {
+                continue;
+            }
+            let scratch_path = eng.store.path_for(&hp.slug);
             if hp.kind == "file" {
                 eng.panes.push(EnginePane {
                     kind: "file".into(),
@@ -461,6 +469,23 @@ impl Engine {
         }
     }
 
+    /// Force a FULL frame (never damage). Used after workspace switch / attach
+    /// so the GUI never applies damage against a base it never received while
+    /// the circle was hidden.
+    fn push_grid_full(&mut self, slug: &str) {
+        self.grid_flush_pending.remove(slug);
+        self.last_grid_push
+            .insert(slug.to_string(), Instant::now());
+        self.last_grid_cells.remove(slug);
+        if let Some(s) = self.session_mut(slug) {
+            s.bump_rev();
+        }
+        if let Some(snap) = self.snapshot_pane(slug) {
+            // last_grid_cells empty → broadcast_grid encodes FULL.
+            self.broadcast_grid(snap);
+        }
+    }
+
     fn flush_workspace_grids(&mut self, workspace: &str) {
         let slugs: Vec<String> = self
             .panes
@@ -469,7 +494,10 @@ impl Engine {
             .map(|p| p.slug.clone())
             .collect();
         for slug in slugs {
-            self.push_grid_now(&slug);
+            // FULL only — panes may have redrawn heavily while this workspace
+            // was off-screen (Claude TUIs especially). Damage against the
+            // last-pushed base leaves blank or corrupt grids until resize.
+            self.push_grid_full(&slug);
         }
     }
 
@@ -497,34 +525,11 @@ impl Engine {
                 }
             }
             SessionEvent::Exited { slug, code } => {
-                // Tombstone: keep the pane so the human can read the corpse and
-                // decide; do not auto-remove. Explicit `kill` clears it.
+                // Process died → auto-close. Dead shells/agents leave clutter;
+                // re-summon if needed. No tombstone chrome.
                 let code = *code;
-                if let Some(p) = self.panes.iter_mut().find(|p| p.slug == *slug) {
-                    if let Some(s) = p.session.take() {
-                        // Process already dead; drop without re-killing if possible.
-                        drop(s);
-                    }
-                    p.agency.mark_exited(code);
-                }
-                // Turn-end signal: working/blocked → idle on process death so
-                // waiters don't hang until timeout on a dead worker.
-                let was = self
-                    .statuses
-                    .get(slug)
-                    .map(|(s, _)| s.clone())
-                    .unwrap_or_default();
-                if was == "working" || was == "planning" || was == "blocked" || was.is_empty() {
-                    let note = format!("exited ({code:?})");
-                    self.statuses
-                        .insert(slug.clone(), ("idle".into(), Some(note.clone())));
-                    self.broadcast(GuiEvent::Status {
-                        slug: slug.clone(),
-                        state: "idle".into(),
-                        note: Some(note),
-                    });
-                }
-                if let Some(tid) = self.active_tasks.remove(slug) {
+                let slug = slug.clone();
+                if let Some(tid) = self.active_tasks.remove(&slug) {
                     if let Some(t) = self.tasks.get_mut(&tid) {
                         if t.status == "open" {
                             t.status = "orphaned".into();
@@ -535,25 +540,14 @@ impl Engine {
                 events::log(
                     "daemon",
                     None,
-                    Some(slug),
+                    Some(&slug),
                     "pane_exited",
-                    format!("process exited ({code:?}) — tombstone retained"),
+                    format!("process exited ({code:?}) — auto-closed"),
                 );
-                self.broadcast(GuiEvent::PaneExited {
+                self.kill_pane(&slug);
+                self.broadcast(GuiEvent::PaneKilled {
                     slug: slug.clone(),
-                    exit_code: code,
                 });
-                if let Some(p) = self.panes.iter().find(|p| p.slug == *slug) {
-                    let w = p.agency.to_wire();
-                    self.broadcast(GuiEvent::Agency {
-                        pane: slug.clone(),
-                        owner: w.owner,
-                        drive_mode: w.drive_mode,
-                        human_idle: w.human_idle,
-                        exited: w.exited,
-                        exit_code: w.exit_code,
-                    });
-                }
                 self.broadcast(self.full_state_event());
                 self.persist();
             }
@@ -761,16 +755,19 @@ impl Engine {
                 // never send DAMAGE against a stale/missing GUI snapshot
                 // (post-upgrade "damage size mismatch" spam).
                 self.last_grid_cells.clear();
-                // Push full state + all grids
+                // Push full state + all grids. Bump rev so a GUI that blanked
+                // for resync (rev kept high → dropped same-rev frames) still
+                // accepts the repair.
                 let state = self.full_state_event();
                 self.broadcast(state.clone());
-                let snaps: Vec<_> = self
+                let slugs: Vec<String> = self
                     .panes
                     .iter()
-                    .filter_map(|p| p.session.as_ref().map(|s| s.snapshot()))
+                    .filter(|p| p.session.is_some())
+                    .map(|p| p.slug.clone())
                     .collect();
-                for s in snaps {
-                    self.broadcast_grid(s);
+                for slug in slugs {
+                    self.push_grid_full(&slug);
                 }
                 Some(state)
             }
@@ -810,6 +807,16 @@ impl Engine {
                 if let Some(s) = self.session_mut(&pane) {
                     s.resize(cols, rows);
                     s.bump_rev();
+                }
+                // Immediate FULL grid after resize — don't wait for PTY wakeup.
+                // Size changes invalidate damage bases; without this, a
+                // workspace switch that also reflows tiles can leave a blank
+                // pane until the human resizes the window.
+                self.last_grid_cells.remove(&pane);
+                self.last_grid_push
+                    .insert(pane.clone(), Instant::now());
+                if let Some(snap) = self.snapshot_pane(&pane) {
+                    self.broadcast_grid(snap);
                 }
                 None
             }
@@ -1010,6 +1017,10 @@ impl Engine {
                 {
                     self.extra_workspaces.push(name.clone());
                 }
+                // New circles go to the bottom of the sidebar, not alpha-top.
+                if !self.workspace_order.iter().any(|w| w == &name) {
+                    self.workspace_order.push(name.clone());
+                }
                 self.selected_workspace = Some(name);
                 self.persist();
                 Some(self.full_state_event())
@@ -1123,25 +1134,42 @@ impl Engine {
                     .clone()
                     .unwrap_or_else(|| DEFAULT_WORKSPACE.into())
             });
+        // New / unlisted workspace names land at the bottom of the sidebar,
+        // never alphabetically at the top.
+        if !self.workspace_order.iter().any(|w| w == &workspace) {
+            self.workspace_order.push(workspace.clone());
+        }
         let cwd_raw = spec.cwd.unwrap_or_else(|| "~".into());
         let scratch_path = self.store.path_for(&slug);
 
+        // Insert after the last pane of this workspace so the sidebar/tiles
+        // show newest at the bottom of the group (not global-list quirks).
+        let insert_at = self
+            .panes
+            .iter()
+            .rposition(|p| p.workspace == workspace)
+            .map(|i| i + 1)
+            .unwrap_or(self.panes.len());
+
         if let Some(file) = spec.file {
             let path = PathBuf::from(shellexpand::tilde(&file).into_owned());
-            self.panes.push(EnginePane {
-                kind: "file".into(),
-                name,
-                slug: slug.clone(),
-                workspace,
-                cwd: cwd_raw,
-                command: path.to_string_lossy().to_string(),
-                tiled: spec.tiled,
-                resume_on_restore: false,
-                scratch_path,
-                file: Some(path.to_string_lossy().to_string()),
-                session: None,
-                agency: crate::agency::Agency::default(),
-            });
+            self.panes.insert(
+                insert_at,
+                EnginePane {
+                    kind: "file".into(),
+                    name,
+                    slug: slug.clone(),
+                    workspace,
+                    cwd: cwd_raw,
+                    command: path.to_string_lossy().to_string(),
+                    tiled: spec.tiled,
+                    resume_on_restore: false,
+                    scratch_path,
+                    file: Some(path.to_string_lossy().to_string()),
+                    session: None,
+                    agency: crate::agency::Agency::default(),
+                },
+            );
             events::log("daemon", None, Some(&slug), "pane_spawned", "file pane".into());
             return Ok(slug);
         }
@@ -1165,20 +1193,23 @@ impl Engine {
         let session =
             self.spawn_terminal_session(&slug, &command, &cwd_raw, &workspace, false)?;
 
-        self.panes.push(EnginePane {
-            kind: "terminal".into(),
-            name,
-            slug: slug.clone(),
-            workspace: workspace.clone(),
-            cwd: cwd_raw,
-            command: explicit.unwrap_or_else(|| DEFAULT_COMMAND.into()),
-            tiled: spec.tiled,
-            resume_on_restore: spec.resume,
-            scratch_path,
-            file: None,
-            session: Some(session),
-            agency: crate::agency::Agency::default(),
-        });
+        self.panes.insert(
+            insert_at,
+            EnginePane {
+                kind: "terminal".into(),
+                name,
+                slug: slug.clone(),
+                workspace: workspace.clone(),
+                cwd: cwd_raw,
+                command: explicit.unwrap_or_else(|| DEFAULT_COMMAND.into()),
+                tiled: spec.tiled,
+                resume_on_restore: spec.resume,
+                scratch_path,
+                file: None,
+                session: Some(session),
+                agency: crate::agency::Agency::default(),
+            },
+        );
         events::log(
             "daemon",
             Some(&workspace),
@@ -1333,6 +1364,9 @@ impl Engine {
             n += 1;
         }
         self.extra_workspaces.push(new_ws.clone());
+        if !self.workspace_order.iter().any(|w| w == &new_ws) {
+            self.workspace_order.push(new_ws.clone());
+        }
         for (name, cwd, command, kind, file, tiled, old_scratch) in sources {
             let slug = self.spawn(SpawnSpec {
                 name,
@@ -1389,19 +1423,16 @@ impl Engine {
             return;
         }
         // Full ordered list: preferred order first, then any workspaces not
-        // yet listed (from panes + extras), alphabetically.
+        // yet listed (extras then pane order — not alphabetical).
         let mut order = self.workspace_order.clone();
-        let mut known: Vec<String> = self
-            .panes
+        let mut seen: std::collections::HashSet<String> = order.iter().cloned().collect();
+        for w in self
+            .extra_workspaces
             .iter()
-            .map(|p| p.workspace.clone())
-            .chain(self.extra_workspaces.iter().cloned())
-            .collect();
-        known.sort();
-        known.dedup();
-        for w in known {
-            if !order.contains(&w) {
-                order.push(w);
+            .chain(self.panes.iter().map(|p| &p.workspace))
+        {
+            if seen.insert(w.clone()) {
+                order.push(w.clone());
             }
         }
         order.retain(|w| w != moved);
@@ -2702,6 +2733,10 @@ impl Engine {
         let mut fds = Vec::new();
         let mut panes = Vec::new();
         for p in &self.panes {
+            // Don't hand off exited tombstones — they auto-close now.
+            if p.agency.exited {
+                continue;
+            }
             let mut hp = HandoffPane {
                 name: p.name.clone(),
                 slug: p.slug.clone(),

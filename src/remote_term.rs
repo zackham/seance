@@ -55,6 +55,33 @@ impl RemoteTerminal {
         cx.notify();
     }
 
+    /// Accept the next frame at any rev without blanking the last paint.
+    /// Workspace switch: daemon will FULL-flush; without this, a same-rev
+    /// frame is dropped and the pane can stick on a stale/empty grid.
+    pub fn open_rev_gate(&mut self) {
+        self.rev = 0;
+    }
+
+    /// Clear the painted grid and accept the next frame at any rev.
+    /// Used when a damage decode fails — without resetting `rev`, a full
+    /// reattach frame at the same rev is dropped as "stale" and the pane
+    /// stays blank until something bumps rev (e.g. window resize).
+    pub fn clear_for_resync(&mut self, cx: &mut Context<Self>) {
+        let pane = self.slug.clone();
+        self.rev = 0;
+        self.snapshot = Arc::new(GridSnapshot::empty(&pane));
+        self.ghost = None;
+        {
+            let mut g = self.resize.lock().unwrap();
+            // Force the next layout pass to re-send size (hysteresis was
+            // "stable" on the old geometry).
+            g.sent = (0, 0);
+            g.seen = (0, 0);
+            g.stable = 0;
+        }
+        cx.notify();
+    }
+
     pub fn apply_snapshot(&mut self, snap: GridSnapshot, cx: &mut Context<Self>) {
         // Drop stale/duplicate frames (throttle + out-of-order socket).
         if snap.rev != 0 && snap.rev <= self.rev {
@@ -120,6 +147,15 @@ impl RemoteTerminal {
 
     pub fn write_bytes(&self, bytes: Vec<u8>) {
         let _ = self.client.input(&self.slug, &bytes);
+    }
+
+    /// Paste clipboard text into the PTY. Daemon-side inject uses bracketed
+    /// paste when the app requested it (same path as `ctl send --no-submit`).
+    pub fn paste(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let _ = self.client.inject(&self.slug, text, false);
     }
 
     /// Optimistic local echo for a printable ASCII key so typing feels instant

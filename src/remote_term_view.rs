@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use gpui::{
     canvas, div, fill, point, prelude::*, px, App, Bounds, Context, FocusHandle, Focusable, Hsla,
-    KeyDownEvent, Pixels, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window,
+    KeyDownEvent, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window,
 };
+use gpui_component::{notification::Notification, WindowExt as _};
 
 use crate::remote_term::RemoteTerminal;
-use crate::runtime::snapshot::CellSnap;
+use crate::runtime::snapshot::{CellSnap, GridSnapshot};
 use crate::term_font::{self, term_font, term_font_bold, FONT_SIZE, LINE_HEIGHT_FACTOR};
 use crate::terminal::keystroke_bytes;
 use crate::theme::SeancePalette;
@@ -22,10 +23,106 @@ use alacritty_terminal::term::TermMode;
 
 pub use crate::term_font::FONT_FAMILY;
 
+/// Visible-grid cell coordinate (0-based).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CellPos {
+    row: u16,
+    col: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectKind {
+    Simple,
+    Word,
+    Lines,
+}
+
+/// Linear selection over the visible snapshot grid (ghostty-style).
+#[derive(Clone, Debug)]
+struct TermSelection {
+    /// Click anchor (unexpanded).
+    anchor: CellPos,
+    /// Drag end (unexpanded).
+    cursor: CellPos,
+    kind: SelectKind,
+}
+
+impl TermSelection {
+    fn range(&self, cols: u16, rows: u16) -> (CellPos, CellPos) {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let mut a = self.anchor;
+        let mut b = self.cursor;
+        a.row = a.row.min(rows - 1);
+        b.row = b.row.min(rows - 1);
+        a.col = a.col.min(cols - 1);
+        b.col = b.col.min(cols - 1);
+        match self.kind {
+            SelectKind::Simple => {
+                let ia = a.row as u32 * cols as u32 + a.col as u32;
+                let ib = b.row as u32 * cols as u32 + b.col as u32;
+                if ia <= ib {
+                    (a, b)
+                } else {
+                    (b, a)
+                }
+            }
+            SelectKind::Lines => {
+                let (r0, r1) = if a.row <= b.row {
+                    (a.row, b.row)
+                } else {
+                    (b.row, a.row)
+                };
+                (
+                    CellPos { row: r0, col: 0 },
+                    CellPos {
+                        row: r1,
+                        col: cols - 1,
+                    },
+                )
+            }
+            SelectKind::Word => {
+                // Word expansion happens at start/update against the grid.
+                let ia = a.row as u32 * cols as u32 + a.col as u32;
+                let ib = b.row as u32 * cols as u32 + b.col as u32;
+                if ia <= ib {
+                    (a, b)
+                } else {
+                    (b, a)
+                }
+            }
+        }
+    }
+
+    fn contains(&self, row: usize, col: usize, cols: u16, rows: u16) -> bool {
+        if cols == 0 || rows == 0 {
+            return false;
+        }
+        let (lo, hi) = self.range(cols, rows);
+        let i = row as u32 * cols as u32 + col as u32;
+        let a = lo.row as u32 * cols as u32 + lo.col as u32;
+        let b = hi.row as u32 * cols as u32 + hi.col as u32;
+        i >= a && i <= b
+    }
+}
+
+/// Layout metrics from last canvas prepaint — mouse → cell mapping.
+#[derive(Clone, Copy, Default)]
+struct ViewMetrics {
+    origin: Point<Pixels>,
+    cell_w: f32,
+    line_h: f32,
+    cols: u16,
+    rows: u16,
+}
+
 pub struct RemoteTerminalView {
     pub terminal: gpui::Entity<RemoteTerminal>,
     focus_handle: FocusHandle,
     scroll_accum: f32,
+    /// Drag-select in progress.
+    selecting: bool,
+    selection: Option<TermSelection>,
 }
 
 impl RemoteTerminalView {
@@ -35,6 +132,8 @@ impl RemoteTerminalView {
             terminal,
             focus_handle: cx.focus_handle(),
             scroll_accum: 0.,
+            selecting: false,
+            selection: None,
         }
     }
 
@@ -42,7 +141,189 @@ impl RemoteTerminalView {
         self.focus_handle.clone()
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn metrics(&self, cx: &App) -> Option<ViewMetrics> {
+        let slug = &self.terminal.read(cx).slug;
+        load_metrics(slug)
+    }
+
+    fn cell_at(&self, pos: Point<Pixels>, cx: &App) -> Option<CellPos> {
+        let m = self.metrics(cx)?;
+        if m.cell_w <= 0. || m.line_h <= 0. || m.cols == 0 || m.rows == 0 {
+            return None;
+        }
+        let rel_x = f32::from(pos.x - m.origin.x);
+        let rel_y = f32::from(pos.y - m.origin.y);
+        let col = (rel_x / m.cell_w).floor() as i32;
+        let row = (rel_y / m.line_h).floor() as i32;
+        let col = col.clamp(0, m.cols as i32 - 1) as u16;
+        let row = row.clamp(0, m.rows as i32 - 1) as u16;
+        Some(CellPos { row, col })
+    }
+
+    fn clear_selection(&mut self) {
+        if self.selection.take().is_some() {
+            // caller notifies
+        }
+        self.selecting = false;
+    }
+
+    fn selection_text(&self, cx: &App) -> Option<String> {
+        let sel = self.selection.as_ref()?;
+        let snap = &self.terminal.read(cx).snapshot;
+        let cols = snap.cols;
+        let rows = snap.rows;
+        if cols == 0 || rows == 0 || snap.cells.is_empty() {
+            return None;
+        }
+        let (lo, hi) = sel.range(cols, rows);
+        let mut out = String::new();
+        for row in lo.row..=hi.row {
+            let start_col = if row == lo.row { lo.col } else { 0 };
+            let end_col = if row == hi.row {
+                hi.col
+            } else {
+                cols.saturating_sub(1)
+            };
+            let mut line = String::new();
+            for col in start_col..=end_col {
+                let idx = row as usize * cols as usize + col as usize;
+                if idx < snap.cells.len() {
+                    let c = snap.cells[idx].c;
+                    line.push(if c == '\0' { ' ' } else { c });
+                }
+            }
+            // Trim trailing spaces per line (ghostty / xterm convention).
+            let trimmed = line.trim_end();
+            if row > lo.row {
+                out.push('\n');
+            }
+            out.push_str(trimmed);
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    fn copy_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.selection_text(cx) {
+            if !text.is_empty() {
+                let n = text.chars().count();
+                let lines = text.lines().count().max(1);
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                let msg = if lines > 1 {
+                    format!("copied · {n} chars · {lines} lines")
+                } else {
+                    format!("copied · {n} chars")
+                };
+                window.push_notification(Notification::success(msg), cx);
+            }
+        }
+    }
+
+    fn expand_word(snap: &GridSnapshot, pos: CellPos) -> (CellPos, CellPos) {
+        let cols = snap.cols as usize;
+        let rows = snap.rows as usize;
+        if cols == 0 || rows == 0 || snap.cells.is_empty() {
+            return (pos, pos);
+        }
+        let row = pos.row as usize;
+        if row >= rows {
+            return (pos, pos);
+        }
+        let cell = |c: usize| -> char {
+            let idx = row * cols + c;
+            if idx < snap.cells.len() {
+                let ch = snap.cells[idx].c;
+                if ch == '\0' {
+                    ' '
+                } else {
+                    ch
+                }
+            } else {
+                ' '
+            }
+        };
+        let is_word = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':');
+        let col = (pos.col as usize).min(cols.saturating_sub(1));
+        let ch0 = cell(col);
+        if !is_word(ch0) {
+            return (pos, pos);
+        }
+        let mut left = col;
+        while left > 0 && is_word(cell(left - 1)) {
+            left -= 1;
+        }
+        let mut right = col;
+        while right + 1 < cols && is_word(cell(right + 1)) {
+            right += 1;
+        }
+        (
+            CellPos {
+                row: pos.row,
+                col: left as u16,
+            },
+            CellPos {
+                row: pos.row,
+                col: right as u16,
+            },
+        )
+    }
+
+    fn start_selection_at(&mut self, pos: CellPos, kind: SelectKind, cx: &App) {
+        let snap = &self.terminal.read(cx).snapshot;
+        let (anchor, cursor, kind) = match kind {
+            SelectKind::Simple => (pos, pos, SelectKind::Simple),
+            // Expand to word immediately and store as Simple so range() is correct.
+            SelectKind::Word => {
+                let (a, b) = Self::expand_word(snap, pos);
+                (a, b, SelectKind::Simple)
+            }
+            SelectKind::Lines => (
+                CellPos {
+                    row: pos.row,
+                    col: 0,
+                },
+                CellPos {
+                    row: pos.row,
+                    col: snap.cols.saturating_sub(1),
+                },
+                SelectKind::Lines,
+            ),
+        };
+        self.selection = Some(TermSelection {
+            anchor,
+            cursor,
+            kind,
+        });
+        self.selecting = true;
+    }
+
+    fn update_selection_at(&mut self, pos: CellPos, cx: &App) {
+        let Some(sel) = self.selection.as_mut() else {
+            return;
+        };
+        match sel.kind {
+            SelectKind::Simple | SelectKind::Word => {
+                sel.cursor = pos;
+            }
+            SelectKind::Lines => {
+                let cols = self
+                    .terminal
+                    .read(cx)
+                    .snapshot
+                    .cols
+                    .saturating_sub(1);
+                sel.cursor = CellPos {
+                    row: pos.row,
+                    col: cols,
+                };
+            }
+        }
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &event.keystroke;
         let term = self.terminal.read(cx);
 
@@ -63,6 +344,31 @@ impl RemoteTerminalView {
                         term.ghost_reject();
                     }
                 }
+            }
+        }
+
+        // Terminal paste/copy before other ctrl+shift app chords.
+        if ks.modifiers.control && ks.modifiers.shift {
+            match ks.key.as_str() {
+                "v" => {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                        self.clear_selection();
+                        self.terminal.update(cx, |t, _| {
+                            t.scroll_to_bottom();
+                            t.paste(&text);
+                        });
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                "c" => {
+                    self.copy_selection(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                // Other chords bubble to seance chrome.
+                _ => return,
             }
         }
 
@@ -91,16 +397,15 @@ impl RemoteTerminalView {
             return;
         }
 
-        // Ctrl+Shift chords belong to the app (summon, notes, popout, …).
-        if ks.modifiers.control && ks.modifiers.shift {
-            return;
-        }
-
         let mut mode = TermMode::empty();
         if term.snapshot.app_cursor {
             mode.insert(TermMode::APP_CURSOR);
         }
         if let Some(bytes) = keystroke_bytes(&event.keystroke, mode) {
+            // Typing clears selection (ghostty convention).
+            if self.selection.is_some() {
+                self.clear_selection();
+            }
             // Local echo printable singles before the round-trip grid returns.
             let echo = ks
                 .key_char
@@ -241,6 +546,7 @@ impl Render for RemoteTerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let term = self.terminal.clone();
         let focus = self.focus_handle.clone();
+        let selection = self.selection.clone();
 
         div()
             .id("remote-term-view")
@@ -251,14 +557,56 @@ impl Render for RemoteTerminalView {
             .track_focus(&focus)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
-            // OSC-8 / bare-URL open: ctrl+click (or middle-click) opens link under cursor.
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, ev: &gpui::MouseDownEvent, window, cx| {
-                    if !ev.modifiers.control {
+                    let handle = this.focus_handle.clone();
+                    window.focus(&handle, cx);
+
+                    // Ctrl+click: open hyperlink (not selection).
+                    if ev.modifiers.control {
+                        this.open_link_at(ev.position, window, cx);
                         return;
                     }
-                    this.open_link_at(ev.position, window, cx);
+
+                    // Always allow drag-select. We don't forward mouse button
+                    // events to the PTY yet (only wheel when mouse_mode), so
+                    // blocking selection for mouse-mode apps (Claude, vim,
+                    // etc.) just made drag a no-op. When click reporting lands,
+                    // restore: mouse_mode && !shift → forward, else select.
+                    let Some(cell) = this.cell_at(ev.position, cx) else {
+                        return;
+                    };
+                    let kind = match ev.click_count {
+                        2 => SelectKind::Word,
+                        n if n >= 3 => SelectKind::Lines,
+                        _ => SelectKind::Simple,
+                    };
+                    if kind == SelectKind::Simple {
+                        this.clear_selection();
+                    }
+                    this.start_selection_at(cell, kind, cx);
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, _window, cx| {
+                if !this.selecting || !ev.dragging() {
+                    return;
+                }
+                if let Some(cell) = this.cell_at(ev.position, cx) {
+                    this.update_selection_at(cell, cx);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, window, cx| {
+                    if this.selecting {
+                        this.selecting = false;
+                        // Ghostty / primary-selection: copy on release.
+                        this.copy_selection(window, cx);
+                        cx.notify();
+                    }
                 }),
             )
             .on_mouse_down(
@@ -269,33 +617,51 @@ impl Render for RemoteTerminalView {
             )
             .child(
                 canvas(
-                    move |bounds, window, cx| {
-                        // Cache cell metrics — shaping █ every frame was pure waste.
-                        let (cell_w, line_h) = cell_metrics(window);
+                    {
+                        let term = term.clone();
+                        let selection = selection.clone();
+                        move |bounds, window, cx| {
+                            // Cache cell metrics — shaping █ every frame was pure waste.
+                            let (cell_w, line_h) = cell_metrics(window);
 
-                        let cols =
-                            ((f32::from(bounds.size.width) / f32::from(cell_w)) as u16).max(2);
-                        let rows =
-                            ((f32::from(bounds.size.height) / f32::from(line_h)) as u16).max(2);
-                        // Debounced — single-frame col jitter must not thrash.
-                        term.update(cx, |t, _| t.resize_cells(cols, rows));
+                            let cols =
+                                ((f32::from(bounds.size.width) / f32::from(cell_w)) as u16).max(2);
+                            let rows =
+                                ((f32::from(bounds.size.height) / f32::from(line_h)) as u16).max(2);
+                            // Debounced — single-frame col jitter must not thrash.
+                            term.update(cx, |t, _| t.resize_cells(cols, rows));
 
-                        // Arc clone — not a deep copy of every cell.
-                        let snap = Arc::clone(&term.read(cx).snapshot);
-                        let ghost = term.read(cx).ghost.clone();
-                        let slug = term.read(cx).slug.clone();
-                        let input_origin = term.read(cx).last_input_origin.clone();
-                        Layout {
-                            slug,
-                            bounds,
-                            cell_w,
-                            line_h,
-                            snap,
-                            ghost_text: ghost.map(|g| g.text),
-                            input_origin,
+                            // Arc clone — not a deep copy of every cell.
+                            let snap = Arc::clone(&term.read(cx).snapshot);
+                            let ghost = term.read(cx).ghost.clone();
+                            let slug = term.read(cx).slug.clone();
+                            let input_origin = term.read(cx).last_input_origin.clone();
+                            Layout {
+                                slug,
+                                bounds,
+                                cell_w,
+                                line_h,
+                                snap,
+                                ghost_text: ghost.map(|g| g.text),
+                                input_origin,
+                                selection,
+                            }
                         }
                     },
                     |_bounds, layout: Layout, window, cx| {
+                        // Persist metrics so mouse handlers can map coords.
+                        // Stored via a side channel keyed by slug (view state
+                        // isn't reachable from paint closure without Entity).
+                        store_metrics(
+                            &layout.slug,
+                            ViewMetrics {
+                                origin: layout.bounds.origin,
+                                cell_w: f32::from(layout.cell_w),
+                                line_h: f32::from(layout.line_h),
+                                cols: layout.snap.cols,
+                                rows: layout.snap.rows,
+                            },
+                        );
                         paint_grid(&layout, window, cx);
                     },
                 )
@@ -313,6 +679,27 @@ struct Layout {
     ghost_text: Option<String>,
     /// Causal tint: who last wrote stdin.
     input_origin: Option<String>,
+    selection: Option<TermSelection>,
+}
+
+/// Metrics side-channel: paint runs outside Entity update, so mouse handlers
+/// read last geometry from here. Keyed by pane slug.
+fn view_metrics_map() -> &'static Mutex<HashMap<String, ViewMetrics>> {
+    static M: OnceLock<Mutex<HashMap<String, ViewMetrics>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn store_metrics(slug: &str, m: ViewMetrics) {
+    if let Ok(mut g) = view_metrics_map().lock() {
+        g.insert(slug.to_string(), m);
+    }
+}
+
+fn load_metrics(slug: &str) -> Option<ViewMetrics> {
+    view_metrics_map()
+        .lock()
+        .ok()
+        .and_then(|g| g.get(slug).copied())
 }
 
 /// Shaped paint replay for a terminal whose grid hasn't changed.
@@ -332,10 +719,18 @@ struct ShapedPaintCache {
     line_h: f32,
     ghost: Option<String>,
     input_origin: Option<String>,
+    /// (start_row, start_col, end_row, end_col) or None.
+    selection_key: Option<(u16, u16, u16, u16)>,
     rects: Vec<(f32, f32, f32, f32, Hsla)>,
     texts: Vec<(f32, f32, ShapedLine)>,
     cursor: (f32, f32, f32, f32),
     ghost_shaped: Option<(f32, f32, ShapedLine)>,
+}
+
+fn selection_key(sel: &Option<TermSelection>, cols: u16, rows: u16) -> Option<(u16, u16, u16, u16)> {
+    let sel = sel.as_ref()?;
+    let (lo, hi) = sel.range(cols, rows);
+    Some((lo.row, lo.col, hi.row, hi.col))
 }
 
 fn open_uri(uri: &str) {
@@ -408,6 +803,8 @@ fn cache_matches(c: &ShapedPaintCache, layout: &Layout) -> bool {
         && c.line_h == f32::from(layout.line_h)
         && c.ghost == layout.ghost_text
         && c.input_origin == layout.input_origin
+        && c.selection_key
+            == selection_key(&layout.selection, layout.snap.cols, layout.snap.rows)
 }
 
 fn replay_shaped_paint(c: &ShapedPaintCache, window: &mut Window, cx: &mut App) {
@@ -556,11 +953,23 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
     };
 
     let cursor_row = layout.snap.cursor_row as usize;
+    let sel = layout.selection.as_ref();
+    let sel_cols = layout.snap.cols;
+    let sel_rows = layout.snap.rows;
+    let in_sel = |row: usize, col: usize| {
+        sel.is_some_and(|s| s.contains(row, col, sel_cols, sel_rows))
+    };
+    let sel_bg = SeancePalette::violet_dim().opacity(0.55);
+
     for row in 0..rows {
         flush(&mut open, &mut batches);
         // Skip fully blank rows (common empty space below prompt) unless the
-        // cursor lives there — still need the caret paint path.
-        if row != cursor_row {
+        // cursor lives there or selection covers the row.
+        let row_selected = sel.is_some_and(|s| {
+            let (lo, hi) = s.range(sel_cols, sel_rows);
+            row as u16 >= lo.row && row as u16 <= hi.row
+        });
+        if row != cursor_row && !row_selected {
             let base = row * cols;
             let end = (base + cols).min(layout.snap.cells.len());
             if base < end
@@ -577,7 +986,13 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
                 break;
             }
             let cell = &layout.snap.cells[idx];
-            let style = cell_style(cell);
+            let mut style = cell_style(cell);
+            let selected = in_sel(row, col);
+            if selected {
+                style.bg = Some(sel_bg);
+                // Keep text readable over selection tint.
+                style.fg = term_default_fg();
+            }
 
             if let Some(bgc) = style.bg {
                 match rects.last_mut() {
@@ -721,6 +1136,11 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
                 line_h: f32::from(layout.line_h),
                 ghost: layout.ghost_text.clone(),
                 input_origin: layout.input_origin.clone(),
+                selection_key: selection_key(
+                    &layout.selection,
+                    layout.snap.cols,
+                    layout.snap.rows,
+                ),
                 rects: cache_rects,
                 texts: cache_texts,
                 cursor: (

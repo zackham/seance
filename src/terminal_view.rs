@@ -11,6 +11,7 @@ use gpui::{
 
 use crate::terminal::{self, convert_color, Terminal};
 use crate::theme::SeancePalette;
+use gpui_component::{notification::Notification, WindowExt as _};
 
 // Match ghostty (monospace → JetBrainsMono Nerd Font). See term_font.rs.
 pub use crate::term_font::{FONT_FAMILY, FONT_SIZE, LINE_HEIGHT_FACTOR};
@@ -177,10 +178,18 @@ impl TerminalView {
         }
     }
 
-    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+    fn copy_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = self.terminal.read(cx).selection_text() {
             if !text.is_empty() {
+                let n = text.chars().count();
+                let lines = text.lines().count().max(1);
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                let msg = if lines > 1 {
+                    format!("copied · {n} chars · {lines} lines")
+                } else {
+                    format!("copied · {n} chars")
+                };
+                window.push_notification(Notification::success(msg), cx);
             }
         }
     }
@@ -221,7 +230,7 @@ impl Render for TerminalView {
                             return;
                         }
                         "c" => {
-                            this.copy_selection(cx);
+                            this.copy_selection(window, cx);
                             cx.stop_propagation();
                             return;
                         }
@@ -263,10 +272,10 @@ impl Render for TerminalView {
             }))
             .on_mouse_up(
                 gpui::MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| {
+                cx.listener(|this, _event, window, cx| {
                     this.selecting = false;
                     // Primary-selection convention: copy on select-end.
-                    this.copy_selection(cx);
+                    this.copy_selection(window, cx);
                     cx.notify();
                 }),
             )

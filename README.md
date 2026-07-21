@@ -13,7 +13,7 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) · **Status:** 0.9.12
+**License:** MIT · **Platform:** Linux (Wayland / X11) · **Status:** 0.9.13
 
 ## Why it exists
 
@@ -83,6 +83,7 @@ Upgrade load test: `./scripts/upgrade-load-test.sh` (upgrades live daemon)
 | key | action |
 |-----|--------|
 | ctrl+shift+n | new pane (shell by default) |
+| ctrl+shift+w | banish (kill) active pane |
 | ctrl+shift+s | flip notes ↔ face |
 | ctrl+shift+p | pop pane to its own window |
 | ctrl+shift+k | precanned prompt palette |
@@ -90,6 +91,7 @@ Upgrade load test: `./scripts/upgrade-load-test.sh` (upgrades live daemon)
 | ctrl+shift+z | focus-zoom active pane |
 | ctrl+shift+f | last failed shell command |
 | ctrl+pageup / pagedown | cycle workspaces |
+| ctrl+shift+pageup / pagedown | cycle panes in this workspace |
 | ctrl+shift+v | paste |
 | ctrl+click / middle-click | open OSC-8 / URL |
 | stage chip click | focus + pad drawer |

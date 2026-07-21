@@ -729,7 +729,7 @@ fn with_identity(
 
 // ---------------------------------------------------------------------------
 
-/// `new --name NAME [--cwd DIR] [--command CMD] [--workspace WS]`
+/// `new --name NAME [--cwd DIR] [--command CMD|--agent A|--file PATH] [--workspace WS]`
 fn parse_new(args: Vec<String>) -> Result<ControlRequest, String> {
     let mut name: Option<String> = None;
     let mut cwd: Option<String> = None;
@@ -752,6 +752,13 @@ fn parse_new(args: Vec<String>) -> Result<ControlRequest, String> {
     }
 
     let name = name.ok_or("new: --name is required")?;
+    if file.is_some() && (agent.is_some() || command.is_some()) {
+        return Err(
+            "new: --file is a file pane (viewer); do not combine with --agent/--command. \
+             Example: seance ctl new --name notes --file path/to/doc.md"
+                .into(),
+        );
+    }
     if let Some(a) = agent {
         if command.is_some() {
             return Err("new: use either --agent or --command, not both".into());
@@ -2701,9 +2708,37 @@ seance ctl wait w-claude-4 w-grok-4 w-codex-4 --status done --cat
 - `--cat` / `--harvest` prints each pad body after success (one round-trip fan-in).
 - `send` returns `task_id`; roster shows `task=task-N`.
 
+### File / markdown panes (show a document live — NOT a shell)
+
+When the human should **see a file render on the stage** (meeting notes, design
+doc, task md), open a **file pane**. This is a first-class pane kind: native
+markdown render, 1s mtime refresh, history ◀/▶. **Do not** fake it with bat,
+less, watch, or a looping clear+cat in a terminal.
+
+```bash
+# RIGHT — native file viewer (markdown if .md)
+seance ctl new --name l10-notes --file data/scratch/l10-2026-07-21-notes.md
+# or absolute path
+seance ctl new --name notes --file "$PWD/docs/PLAN.md"
+
+# WRONG — terminal pane pretending to be a viewer
+seance ctl new --name notes --command "bat -p --paging=never file.md"
+seance ctl new --name notes --command "bash -c 'while true; do clear; bat f; sleep 1; done'"
+```
+
+After the file pane exists:
+- **Edit the file on disk** with your normal tools (Write/Edit). The pane updates itself.
+- Do **not** `ctl send` into a file pane — there is **no PTY**.
+- `ctl read notes` shows a text extract for debugging; the human already sees the render.
+- Pad/scratchpad is separate (`$SEANCE_SCRATCHPAD`); file panes are for **named docs**.
+
+`new --file` and `new --agent`/`--command` are mutually exclusive shapes: file
+viewer vs process. Roster `kind` is `file` vs `terminal`.
+
 ### Commands (rest)
 
 - `new --agent claude|grok|codex|shell`  (+ `--wait-ready`)
+- `new --file PATH` — **file pane** (live markdown/text viewer; no shell)
 - `send --file|--stdin` · `send-raw` · `read` (debug)
 - `pad [PANE] --cat` · `note` · `finish` · `status-set` · `task`/`inbox`
 - `roster`/`stage` · `brief` · `human` · `wait` · `watch` · `doctor`
@@ -2725,6 +2760,7 @@ Exit → tombstone + status idle until `kill`.
 - Decisions via `ask`; durable text via pad/`finish`; screens are ephemeral.
 - Prefer `propose` for risky shell. Don't kill panes you didn't create.
 - Prefer `send --file` whenever the text has `$` or multi-line body.
+- Live docs for the human → **`new --file`**, never bat/watch loops.
 "#;
 
 fn print_help() {
@@ -2738,7 +2774,8 @@ USAGE:
 COMMANDS:
     list                          list panes (name, state, workspace, command)
     new  --name NAME [opts]       spawn a pane
-         --cwd DIR  --agent NAME  --command CMD  --workspace WS  --file PATH
+         --cwd DIR  --agent NAME  --command CMD  --workspace WS
+         --file PATH              file pane (live md/text viewer; no PTY)
          --wait-ready             block until agent TUI accepts inject
     send PANE TEXT...             paste + submit
          --file PATH | --stdin    verbatim body (avoids shell $ expansion)

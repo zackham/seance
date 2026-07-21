@@ -11,6 +11,7 @@ mod events;
 mod cmdlog;
 mod fileview;
 mod gui_client;
+mod host;
 mod pane;
 mod popout;
 mod prompts;
