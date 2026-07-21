@@ -1,0 +1,55 @@
+[package]
+name = "seance"
+version = "0.9.0"
+edition = "2021"
+description = "Shared live workspace for humans and agents — multi-pane terminals, notes, file panes, and a control plane for co-working in the open."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/zackham/seance"
+homepage = "https://github.com/zackham/seance"
+keywords = ["terminal", "agents", "human-ai", "collaboration", "gpui"]
+categories = ["command-line-utilities", "gui"]
+authors = ["Zack Ham"]
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "b5eef62336f88bb6c1ee45bf32f73c9895d49f8d" }
+
+# Terminal core: zed's alacritty fork, same rev zed pins (Apache-2.0)
+alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
+
+anyhow = "1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "8"
+shellexpand = "3"
+smol = "2"
+libc = "0.2"
+base64 = "0.22"
+
+# gpui-component declares its zed deps rev-less (tracks HEAD) and cargo ignores
+# transitive git lockfiles, so zed HEAD drift breaks the build. Cargo forbids
+# same-source [patch] pins, so we patch to a local checkout held at the rev
+# gpui-component b5eef623's own Cargo.lock was built against: 1a246efd7e1b.
+#
+# Bootstrap once:
+#   ./scripts/bootstrap-deps.sh
+#   # or: ln -s /path/to/zed-at-1a246efd deps/zed
+[patch."https://github.com/zed-industries/zed"]
+gpui = { path = "deps/zed/crates/gpui" }
+gpui_platform = { path = "deps/zed/crates/gpui_platform" }
+gpui_macros = { path = "deps/zed/crates/gpui_macros" }
+
+[profile.dev]
+debug = "limited"
+
+# gpui is unusably slow without optimization, even in dev
+[profile.dev.package]
+gpui = { opt-level = 3 }
+gpui_platform = { opt-level = 3 }
+taffy = { opt-level = 3 }
+
+[profile.release]
+lto = "thin"

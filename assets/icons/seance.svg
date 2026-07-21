@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="seance">
+  <title>seance</title>
+  <defs>
+    <!-- Warm charcoal room, subtly lit toward the flame. -->
+    <radialGradient id="room" cx="50%" cy="42%" r="62%">
+      <stop offset="0%" stop-color="#241C1E"/>
+      <stop offset="60%" stop-color="#171314"/>
+      <stop offset="100%" stop-color="#100D0E"/>
+    </radialGradient>
+    <!-- Candle flame: violet-blue base into amber body into a bright core. -->
+    <linearGradient id="flame" x1="50%" y1="100%" x2="50%" y2="0%">
+      <stop offset="0%" stop-color="#6E5C93"/>
+      <stop offset="26%" stop-color="#A86E28"/>
+      <stop offset="62%" stop-color="#E8A33D"/>
+      <stop offset="100%" stop-color="#F6D48A"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="46%" r="50%">
+      <stop offset="0%" stop-color="#E8A33D" stop-opacity="0.55"/>
+      <stop offset="55%" stop-color="#E8A33D" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#E8A33D" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Rounded charcoal tile -->
+  <rect x="0" y="0" width="256" height="256" rx="56" fill="url(#room)"/>
+  <rect x="1.5" y="1.5" width="253" height="253" rx="54.5" fill="none" stroke="#342B2E" stroke-width="3"/>
+
+  <!-- Candle glow halo -->
+  <circle cx="128" cy="120" r="96" fill="url(#glow)"/>
+
+  <!-- The flame: an abstract, elegant candle flame. -->
+  <path d="M128 44
+           C 150 82, 168 104, 168 138
+           C 168 172, 150 196, 128 196
+           C 106 196, 88 172, 88 138
+           C 88 104, 106 82, 128 44 Z"
+        fill="url(#flame)"/>
+  <!-- Inner (cool) heart of the flame -->
+  <path d="M128 96
+           C 140 116, 148 130, 148 150
+           C 148 170, 139 184, 128 184
+           C 117 184, 108 170, 108 150
+           C 108 130, 116 116, 128 96 Z"
+        fill="#2A2036" opacity="0.55"/>
+  <!-- Bright core -->
+  <ellipse cx="128" cy="150" rx="10" ry="20" fill="#F6D48A"/>
+
+  <!-- ✦ séance mark, small, upper-right, marking the summon. -->
+  <g fill="#A98FD6" opacity="0.9">
+    <path d="M200 58 l4.6 12.4 12.4 4.6 -12.4 4.6 -4.6 12.4 -4.6 -12.4 -12.4 -4.6 12.4 -4.6 Z"/>
+  </g>
+</svg>

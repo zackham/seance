@@ -1,0 +1,9 @@
+/target
+/deps/zed
+**/*.rs.bk
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+*.log

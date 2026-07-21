@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Seance
+GenericName=Human–agent shared workspace
+Comment=Live multi-pane space where humans and agents work together
+# Install: put `seance` on PATH, then install this desktop entry.
+Exec=seance
+Icon=seance
+Terminal=false
+Categories=Development;TerminalEmulator;System;
+Keywords=agent;terminal;human;ai;collaboration;seance;
+StartupNotify=true
+StartupWMClass=seance
