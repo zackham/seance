@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Thorough e2e smoke for seance 0.9.11+ — exercises upgrade, export, cmdlog, layout files.
+# Thorough e2e smoke for seance 0.9.12+ — exercises upgrade, cmdlog, roster.
 # NEVER pkill seance. Safe against live meta-demo workspaces (uses its own WS).
 set -euo pipefail
 
@@ -49,29 +49,11 @@ else
   pass "last-command soft (hooks may be absent on inject)"
 fi
 
-# --- export v1 ---
-OUT=$(seance ctl export-session --workspace "$WS" --title "e2e $WS" --json 2>/dev/null || true)
-if [[ -z "$OUT" ]]; then
-  seance ctl export-session --workspace "$WS" --title "e2e $WS" 2>&1 | tee /tmp/seance-e2e-export.txt
-  PATH_HTML=$(rg -o '/[^ ]+\.html' /tmp/seance-e2e-export.txt | head -1)
+# --- phone help exists (no network required for --help) ---
+if seance ctl phone --help 2>&1 | rg -q 'no participant|stage|roster'; then
+  pass "phone help (stage card, no claim)"
 else
-  PATH_HTML=$(echo "$OUT" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("path",""))' 2>/dev/null || true)
-fi
-if [[ -n "${PATH_HTML:-}" && -f "$PATH_HTML" ]]; then
-  BYTES=$(wc -c <"$PATH_HTML")
-  if rg -q 'application/json' "$PATH_HTML" && rg -q 'scrub' "$PATH_HTML"; then
-    pass "export HTML v1 ($BYTES bytes) $PATH_HTML"
-  else
-    fail "export missing v1 markers"
-  fi
-  # size budget soft check
-  if [[ "$BYTES" -lt 2500000 ]]; then
-    pass "export under 2.5MB budget"
-  else
-    fail "export too large: $BYTES"
-  fi
-else
-  fail "export path missing"
+  fail "phone help text"
 fi
 
 # --- upgrade once (sessions must survive) ---

@@ -226,9 +226,6 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
         "phone" | "telegram-topic" | "tg" => {
             return run_phone(sub_args, scope, from, json_out);
         }
-        "export-session" | "export" => {
-            return run_export_session(sub_args, scope, json_out);
-        }
         "prompts" => {
             return run_prompts(sub_args, json_out);
         }
@@ -2326,8 +2323,14 @@ fn boot_clear_pane(
     std::thread::sleep(Duration::from_millis(400));
 }
 
-/// `seance ctl phone [PANE] [--label L] [--ttl HOURS]`
-/// Opens a vita telegram topic and registers a participant that can drive the pane.
+/// `seance ctl phone [PANE] [--label L] [--workspace WS]`
+///
+/// Opens a vita telegram topic and **seeds it with stage context** so a human
+/// (or the resident telegram agent) can drive panes with normal `seance ctl`.
+///
+/// Does **not** call `register_participant` — that claim/await pattern is for
+/// non-seance processes that must own the topic inbox. Here the topic is just
+/// a phone surface + orientation dump.
 fn run_phone(
     args: Vec<String>,
     scope: Option<String>,
@@ -2336,23 +2339,18 @@ fn run_phone(
 ) -> i32 {
     let mut pane: Option<String> = None;
     let mut label: Option<String> = None;
-    let mut ttl_hours: f64 = 4.0;
+    let mut workspace = scope.clone();
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--label" | "--name" => label = it.next(),
-            "--ttl" => {
-                ttl_hours = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(4.0);
-            }
+            "--workspace" | "--ws" => workspace = it.next(),
             "--help" | "-h" => {
                 println!(
-                    "phone [PANE] [--label L] [--ttl HOURS]\n  \
-                     Open a vita telegram topic bound to a seance pane.\n  \
-                     Requires `./run capabilities` / vita on PATH from ~/work/vita.\n  \
-                     Default pane: $SEANCE_SESSION."
+                    "phone [PANE] [--label L] [--workspace WS]\n  \
+                     Open a vita telegram topic and seed it with seance stage context\n  \
+                     (workspace, roster, ctl how-to). No participant claim.\n  \
+                     Default pane: $SEANCE_SESSION. Default workspace: pane's ws / $SEANCE_WORKSPACE."
                 );
                 return 0;
             }
@@ -2372,38 +2370,70 @@ fn run_phone(
         return 1;
     };
 
-    // Resolve display name via brief if possible.
+    // Live stage snapshot for the seed card.
     let brief_req = with_identity(
         ControlRequest::Brief {
             scope: None,
             from: None,
         },
-        scope.clone(),
+        workspace.clone().or_else(|| scope.clone()),
         from.clone(),
     );
-    let name = send_request(&brief_req)
-        .ok()
-        .and_then(|r| r.data)
-        .and_then(|d| {
-            d.get("panes")
-                .and_then(|p| p.as_array())
-                .and_then(|arr| {
-                    arr.iter()
-                        .find(|p| {
-                            p.get("slug").and_then(|s| s.as_str()) == Some(pane.as_str())
-                                || p.get("name").and_then(|s| s.as_str()) == Some(pane.as_str())
-                        })
-                        .and_then(|p| p.get("name").and_then(|s| s.as_str()).map(|s| s.to_string()))
-                })
+    let brief_data = send_request(&brief_req).ok().and_then(|r| r.data);
+    let panes_arr = brief_data
+        .as_ref()
+        .and_then(|d| d.get("panes"))
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let focus_row = panes_arr.iter().find(|p| {
+        p.get("slug").and_then(|s| s.as_str()) == Some(pane.as_str())
+            || p.get("name").and_then(|s| s.as_str()) == Some(pane.as_str())
+    });
+    let name = focus_row
+        .and_then(|p| p.get("name").and_then(|s| s.as_str()))
+        .unwrap_or(pane.as_str())
+        .to_string();
+    let ws = workspace
+        .or_else(|| {
+            focus_row
+                .and_then(|p| p.get("workspace").and_then(|s| s.as_str()))
+                .map(|s| s.to_string())
         })
-        .unwrap_or_else(|| pane.clone());
+        .or_else(|| std::env::var("SEANCE_WORKSPACE").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "main".into());
 
-    let topic_label = label.unwrap_or_else(|| format!("seance · {name}"));
+    // Roster lines for the seed (workspace-scoped when we can filter).
+    let mut roster_lines = String::new();
+    for p in &panes_arr {
+        let pws = p.get("workspace").and_then(|s| s.as_str()).unwrap_or("");
+        if !ws.is_empty() && pws != ws.as_str() && pws != "" {
+            continue;
+        }
+        let slug = p.get("slug").and_then(|s| s.as_str()).unwrap_or("?");
+        let nm = p.get("name").and_then(|s| s.as_str()).unwrap_or(slug);
+        let st = p.get("status").and_then(|s| s.as_str()).unwrap_or("-");
+        let owner = p.get("owner").and_then(|s| s.as_str()).unwrap_or("none");
+        let pad_rev = p.get("pad_rev").and_then(|v| v.as_u64()).unwrap_or(0);
+        let task = p
+            .get("task_id")
+            .and_then(|s| s.as_str())
+            .unwrap_or("-");
+        roster_lines.push_str(&format!(
+            "· `{slug}` ({nm}) status={st} owner={owner} pad@r{pad_rev} task={task}\n"
+        ));
+    }
+    if roster_lines.is_empty() {
+        roster_lines = format!("· `{pane}` ({name}) — (brief empty; still reachable via ctl)\n");
+    }
 
-    // Prefer vita capabilities CLI from the monorepo; fall back to bare `vita`.
+    let topic_label = label.unwrap_or_else(|| format!("seance · {ws} · {name}"));
+
+    // Bare topic only — no register_participant.
     let open_body = serde_json::json!({
-        "title": topic_label,
-        "note": format!("seance pane {pane} — replies inject via participant bridge"),
+        "name": topic_label,
+        "note": format!("seance workspace {ws} · focus pane {pane}"),
     });
     let open_out = run_vita_capability("vita.telegram.open_topic", &open_body);
     let open_json: serde_json::Value = match open_out {
@@ -2414,24 +2444,17 @@ fn run_phone(
             return 1;
         }
     };
-    let topic_id = open_json
-        .pointer("/topic_id")
-        .or_else(|| open_json.pointer("/id"))
-        .or_else(|| open_json.pointer("/data/topic_id"))
+    // open_topic returns data nested under meta sometimes; unwrap data.
+    let data = open_json
+        .get("data")
+        .cloned()
+        .unwrap_or_else(|| open_json.clone());
+    let topic_id = data
+        .get("topic_id")
+        .or_else(|| data.get("id"))
         .or_else(|| open_json.get("topic_id"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            open_json
-                .get("raw")
-                .and_then(|v| v.as_str())
-                .and_then(|s| {
-                    // last-resort: find a uuid-ish token
-                    s.split_whitespace()
-                        .find(|t| t.len() >= 8 && t.contains('-'))
-                        .map(|s| s.to_string())
-                })
-        });
+        .map(|s| s.to_string());
     let Some(topic_id) = topic_id else {
         eprintln!(
             "seance ctl phone: could not parse topic_id from: {}",
@@ -2440,38 +2463,25 @@ fn run_phone(
         return 1;
     };
 
-    let reg_body = serde_json::json!({
-        "topic_id": topic_id,
-        "label": format!("seance:{pane}"),
-        "mode": "mailbox",
-        "ttl_hours": ttl_hours,
-        "note": format!("EXCLUSIVE claim: messages inject into seance pane {pane} via `seance ctl send {pane}`"),
-    });
-    let reg_out = run_vita_capability("vita.telegram.register_participant", &reg_body);
-    if let Err(e) = &reg_out {
-        eprintln!("seance ctl phone: register_participant warning: {e}");
-    }
+    let link = data
+        .get("link")
+        .or_else(|| open_json.pointer("/data/link"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("topic_id={topic_id}"));
 
-    // Persist binding next to scratchpad for bridge scripts / future GUI.
     let bind_path = PathBuf::from(
         shellexpand::tilde(&format!(
             "~/.local/share/seance/scratch/{pane}.telegram.json"
         ))
         .into_owned(),
     );
-    let link = open_json
-        .pointer("/link")
-        .or_else(|| open_json.pointer("/data/link"))
-        .or_else(|| open_json.get("link"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("https://t.me/c/3864532297/{topic_id}"));
     let bind = serde_json::json!({
         "pane": pane,
+        "workspace": ws,
         "topic_id": topic_id,
         "link": link,
         "label": topic_label,
-        "ttl_hours": ttl_hours,
         "created_ms": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -2481,14 +2491,39 @@ fn run_phone(
         let _ = std::fs::write(&bind_path, s);
     }
 
-    // Best-effort status line into the topic.
+    // Stage card — orientation only. Reader uses seance ctl on this host.
+    let seed = format!(
+        "✦ seance phone — stage card\n\
+         \n\
+         **workspace:** `{ws}`\n\
+         **focus pane:** `{pane}` ({name})\n\
+         \n\
+         **roster (this circle)**\n\
+         {roster}\
+         \n\
+         **drive from this host with seance ctl** (no special telegram bridge):\n\
+         ```\n\
+         seance ctl --scope {ws} roster\n\
+         seance ctl --scope {ws} brief\n\
+         seance ctl send {pane} --file /tmp/task.md\n\
+         seance ctl wait {pane} --status done --timeout 600 --cat\n\
+         seance ctl pad {pane} --cat\n\
+         seance ctl read {pane} --lines 40   # debug only\n\
+         seance ctl seize {pane} / release {pane}\n\
+         seance ctl skill                   # full agent contract\n\
+         ```\n\
+         \n\
+         Host has the seance daemon. Scope keeps you in this workspace unless `--all`.\n\
+         Optional: status one-liners may post here when a pane goes needs-human.\n\
+         This topic is **not** an exclusive participant claim — just a phone surface."
+        ,
+        roster = roster_lines,
+    );
     let _ = run_vita_capability(
         "vita.telegram.send",
         &serde_json::json!({
             "topic_id": topic_id,
-            "text": format!(
-                "✦ seance pane `{pane}` linked.\nReplies here inject as tasks. Status updates land here when the agent needs you."
-            ),
+            "text": seed,
         }),
     );
 
@@ -2498,15 +2533,20 @@ fn run_phone(
             serde_json::json!({
                 "ok": true,
                 "pane": pane,
+                "workspace": ws,
                 "topic_id": topic_id,
+                "link": link,
                 "label": topic_label,
                 "bind": bind_path.to_string_lossy(),
             })
         );
     } else {
-        println!("phone {pane} topic={topic_id}");
+        println!("phone {pane} workspace={ws} topic={topic_id}");
         println!("bind {}", bind_path.display());
-        eprintln!("tip: await replies with vita participant await; inject via `seance ctl send {pane} --file …`");
+        if link.starts_with("http") {
+            println!("link {link}");
+        }
+        eprintln!("seeded stage card (no participant claim) — use seance ctl on this host");
     }
     0
 }
@@ -2546,78 +2586,6 @@ fn run_vita_capability(name: &str, input: &serde_json::Value) -> Result<String, 
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-/// `seance ctl export-session [--workspace WS] [--out PATH] [--title T] [--share] [--pin N] [--open] [--redact]`
-fn run_export_session(args: Vec<String>, scope: Option<String>, json_out: bool) -> i32 {
-    let mut opts = crate::export_html::ExportOpts {
-        workspace: scope.clone(),
-        ..Default::default()
-    };
-    let mut it = args.into_iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--workspace" | "--ws" => opts.workspace = it.next(),
-            "--out" | "-o" => opts.out = it.next().map(PathBuf::from),
-            "--title" => opts.title = it.next().unwrap_or(opts.title),
-            "--share" => opts.share = true,
-            "--pin" => opts.pin = it.next(),
-            "--open" => opts.open = true,
-            "--redact" | "--redact-paths" => opts.redact_paths = true,
-            "--help" | "-h" => {
-                println!(
-                    "export-session [opts]\n  \
-                     --workspace WS   limit to workspace (default: $SEANCE_WORKSPACE)\n  \
-                     --out PATH       output HTML (default: ~/.local/share/seance/exports/)\n  \
-                     --title T        document title\n  \
-                     --redact         scrub /home/$USER paths for teaching shares\n  \
-                     --share          publish via vita-reports (~/work/vita)\n  \
-                     --pin N          PIN-gate the share (with --share)\n  \
-                     --open           xdg-open the HTML after write\n  \
-                     Offline scrubber v1: events JSON + virtual timeline + pads/tasks/cmdlog."
-                );
-                return 0;
-            }
-            other => {
-                eprintln!("seance ctl export-session: unexpected '{other}'");
-                return 1;
-            }
-        }
-    }
-    match crate::export_html::export_with_opts(opts) {
-        Ok(r) => {
-            if json_out {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "ok": true,
-                        "path": r.path.to_string_lossy(),
-                        "html_bytes": r.meta.html_bytes,
-                        "gen_ms": r.meta.gen_ms,
-                        "event_count": r.meta.event_count,
-                        "events_sampled": r.meta.events_sampled,
-                        "share_url": r.share_url,
-                    })
-                );
-            } else {
-                println!(
-                    "exported {} ({} events, {} bytes, {}ms)",
-                    r.path.display(),
-                    r.meta.event_count,
-                    r.meta.html_bytes,
-                    r.meta.gen_ms
-                );
-                if let Some(url) = r.share_url {
-                    println!("share {url}");
-                }
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("seance ctl export-session: {e}");
-            1
-        }
-    }
 }
 
 /// `seance ctl prompts [query]` — list / filter precanned prompts.
@@ -2741,8 +2709,7 @@ seance ctl wait w-claude-4 w-grok-4 w-codex-4 --status done --cat
 - `roster`/`stage` · `brief` · `human` · `wait` · `watch` · `doctor`
 - `propose` (ghost cmd) · `ask` · `seize`/`release`/`drive`
 - `whoami` · `caps` · `policy` · `grant`/`revoke`
-- `phone` / `telegram-topic` — open vita telegram topic for a pane (seance↔vita)
-- `export-session` — scrubable HTML (timeline + pads)
+- `phone` / `telegram-topic` — open vita telegram topic + seed stage card (no participant claim)
 - `prompts [q]` — precanned prompt library
 
 Exit: 0 ok · 1 failed · 2 not reachable. Scope: `$SEANCE_WORKSPACE`; `--all` only if asked.
@@ -2801,8 +2768,7 @@ COMMANDS:
          --artifact PATH  --owner none  --ready  --any  --timeout S
     task|inbox [--id ID] [PANE]   durable inject body (default: self)
     doctor                        agent profiles + binary health
-    phone [PANE]                  vita telegram topic for pane (seance↔vita seam)
-    export-session [--workspace W] [--out PATH]   scrubable HTML report
+    phone [PANE]                  open telegram topic + seed roster/ctl how-to
     prompts [query]               precanned prompt library
     skill                         full agent contract (paste into workers)
     help

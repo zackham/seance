@@ -13,7 +13,7 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) · **Status:** 0.9.11
+**License:** MIT · **Platform:** Linux (Wayland / X11) · **Status:** 0.9.12
 
 ## Why it exists
 
@@ -45,8 +45,7 @@ the keyboard). Point `--command` at whatever agent CLI you use.
 - **Control plane** — `seance ctl` so any pane (or external script) can spawn, send, wait, harvest
 - **Orchestrator A+** — `--agent` profiles, evidence-bound `wait --status done`, `send --file`, task envelopes, `harvest`, event-driven wait, boot-clear
 - **Human-in-the-loop** — `ask`, `propose`, seize/release/drive
-- **Phone a pane** — ☎ / `ctl phone` opens a vita telegram topic (status bridge when needs-human)
-- **Export session** — scrubable HTML v1 (events JSON + pads + tasks + cmdlog); optional `--share` via vita-reports
+- **Phone a pane** — ☎ / `ctl phone` opens a telegram topic and seeds a **stage card** (workspace, roster, ctl how-to). No participant claim — you drive panes with normal `seance ctl` on this host. Optional needs-human one-liners post to the topic when linked.
 - **Daemon architecture** — upgrade binary without killing the circle (concurrent-upgrade gate)
 - **Event bus** — sequenced, attributable events + `seance ctl watch`
 - **Capabilities** — `policy open|propose_required|locked` + per-principal grants
@@ -72,8 +71,7 @@ seance ctl new --name w --agent claude --wait-ready
 seance ctl send w --file /tmp/task.md
 seance ctl wait w --status done --timeout 600 --cat
 seance ctl harvest w1 w2 w3 --timeout 900
-seance ctl export-session --workspace main --open
-seance ctl export-session --workspace main --share --redact   # vita-reports
+seance ctl phone w               # telegram topic + stage card (no claim)
 ```
 
 Multi-agent live test: `./scripts/agent-collab-test.sh`  
@@ -97,7 +95,7 @@ Upgrade load test: `./scripts/upgrade-load-test.sh` (upgrades live daemon)
 | stage chip click | focus + pad drawer |
 | stage chip double-click | zoom |
 | ⚡ | arm agent (`ctl skill` orientation) |
-| ☎ | phone pane (vita telegram topic) |
+| ☎ | phone pane (telegram stage card) |
 | ▤ | pad drawer |
 | 💬 | whisper — compose a steer into the pane |
 | sash drag | resize 2-pane ratio or multi-pane weights |
@@ -118,30 +116,12 @@ Upgrade load test: `./scripts/upgrade-load-test.sh` (upgrades live daemon)
 | state | `~/.local/share/seance/state.json` |
 | scratchpads | `~/.local/share/seance/scratch/<slug>.md` |
 | layout weights | `~/.local/share/seance/layout.json` |
-| exports | `~/.local/share/seance/exports/` |
 | events | `~/.local/share/seance/events.jsonl` |
 | socket | `$XDG_RUNTIME_DIR/seance.sock` |
 
 Injected into every pane: `SEANCE_SESSION`, `SEANCE_WORKSPACE`,
 `SEANCE_SCRATCHPAD`, `SEANCE_SOCKET`. Workspace scoping is automatic inside a
 pane — agents only see their circle unless you pass `--all`.
-
-## Export & share
-
-Export is a **decision-timeline** (not 60fps TUI replay):
-
-- roster, tasks (inject bodies), pads, shell cmdlog, attributed events
-- HTML embeds JSON once; timeline is virtualized / filterable / scrubbable
-- caps + high-signal sampling keep shares under ~2.5 MB soft budget
-
-```bash
-seance ctl export-session --workspace orchestrate --title "meta demo" --open
-seance ctl export-session --workspace orchestrate --share --redact --pin 4716
-```
-
-`--share` copies into `~/work/vita/data/reports/` and runs vita’s verified
-`reports.publish` path → `https://vita-reports.ham.xyz/s/…` when the tunnel is up.
-Always prefer `--redact` for teaching shares (scrubs `/home/$USER` paths).
 
 ## Docs
 
@@ -171,10 +151,9 @@ Pin discipline: `gpui-component` rev-pinned; zed patched to `deps/zed` at
 ## Not yet
 
 - OSC-133 shell-agnostic markers (bash hooks + cmdlog work today; OSC-8 open shipped)
-- Full 60fps session grid replay (export is decision-timeline by design)
+- **Full continuous session replay** (grid recorder + browser player) — filed in vita
+  working doc; not the retired timeline HTML export
 - GPU glyph atlas (CPU path is multi-pane smooth — explicit non-goal for now)
-- Automatic telegram→`ctl send` bridge (phone opens topic + bind; await is separate)
-- Pad time-travel snapshots at every scrub position (export badges end-state pads)
 - worktree-backed agent rooms, best-of-N
 
 ## License

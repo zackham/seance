@@ -5,7 +5,7 @@ How a master agent (or human at a shell) runs Claude / Codex / Grok as
 human can watch and jump into any session without restarting it.
 
 Validated live 2026-07-20 on seance **0.9.7+** (in-seance orchestrator + ⚡ arm);
-export/share hardened through **0.9.11**:
+through **0.9.12**:
 
 | Agent | Profile (`--agent`) | Result |
 |-------|---------------------|--------|

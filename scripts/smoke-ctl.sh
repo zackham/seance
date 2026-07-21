@@ -30,8 +30,6 @@ EOF
 
 seance ctl roster --scope "$WS" || seance ctl --scope "$WS" roster
 seance ctl prompts arm | head -5
-seance ctl export-session --workspace "$WS" --title "smoke $WS" || true
-
 echo "ok smoke complete (workspace $WS) — kill when ready:"
 echo "  seance ctl kill $slug"
 echo "  # or banish workspace via GUI"

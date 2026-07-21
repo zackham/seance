@@ -56,14 +56,15 @@ seance restart-gui                          # UI only
 After orchestration changes, re-run this and read orch + worker pads before
 claiming A+. Prefer their evidence over vibes.
 
-**0.9.11 contract:** `send` → `task_id` + sidecar; `wait --status done` is
+**0.9.12 contract:** `send` → `task_id` + sidecar; `wait --status done` is
 evidence-bound (`--badge-only` to skip) with **event-driven wake**; `wait … --cat`
 / `harvest` fan-in harvests pads; `ctl task` / `whoami` re-read inject; exit →
 idle; roster shows **slug**; `--wait-ready` runs profile **boot-clear**;
-`phone` / `export-session` / `prompts` are human-spine ctl surfaces.
-Cmdlog **survives upgrade** (handoff + cold state). Export v1 embeds
-events/tasks/pads/cmdlog as JSON (scrubber, not 60fps TUI). `export-session
---share` uses vita-reports publish when `~/work/vita` is present.
+`phone` / `prompts` are human-spine ctl surfaces. Cmdlog **survives upgrade**.
+`ctl phone` opens a vita telegram topic and **seeds a stage card** (workspace,
+roster, ctl how-to) — **no** `register_participant` claim. Optional
+needs-human status one-liners may post to a bound topic. Full continuous grid
+session replay is **not** shipped (filed in vita working doc for later).
 
 ## Product rules (don’t regress these)
 

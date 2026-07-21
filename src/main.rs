@@ -8,7 +8,6 @@ mod daemon;
 mod desktop_notify;
 mod scratchpad;
 mod events;
-mod export_html;
 mod cmdlog;
 mod fileview;
 mod gui_client;

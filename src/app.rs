@@ -3526,7 +3526,7 @@ fn render_pane(
                                 }
                             }))
                             .tooltip(tip(
-                                "phone — open a vita telegram topic for this pane (status when needs-human)",
+                                "phone — open a telegram topic seeded with workspace roster + seance ctl how-to",
                             ))
                             .child("☎"),
                     )
@@ -3787,7 +3787,7 @@ fn render_help() -> gpui::AnyElement {
         // ── pane chrome ────────────────────────────────────────────────────
         .child(h1("pane chrome (title strip)"))
         .child(row("⚡", "arm — one-click inject seance orientation into this agent"))
-        .child(row("☎", "phone — vita telegram topic for this pane (status when needs-human)"))
+        .child(row("☎", "phone — telegram topic + stage card (roster/ctl how-to; no participant claim)"))
         .child(row("▤", "pad drawer — task inject body + scratchpad tail"))
         .child(row("💬", "whisper — open a compose bar; Enter injects into the agent"))
         .child(row("stage chip click", "focus pane + open pad drawer (double-click zooms)"))
