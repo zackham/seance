@@ -5,13 +5,16 @@ mod caps;
 mod control;
 mod ctl;
 mod daemon;
+mod desktop_notify;
 mod scratchpad;
 mod events;
+mod export_html;
 mod cmdlog;
 mod fileview;
 mod gui_client;
 mod pane;
 mod popout;
+mod prompts;
 mod remote_term;
 mod remote_term_view;
 mod runtime;
@@ -28,6 +31,15 @@ use crate::app::SeanceApp;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // `seance --version` / `-V` / `version` — never open the GUI.
+    if matches!(
+        args.get(1).map(String::as_str),
+        Some("--version") | Some("-V") | Some("version")
+    ) {
+        println!("seance {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
 
     // `seance ctl ...` — control-plane CLI client, no GUI.
     if args.get(1).map(String::as_str) == Some("ctl") {

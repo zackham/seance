@@ -113,6 +113,13 @@ pub struct AppState {
     /// pane slug → active task id
     #[serde(default)]
     pub active_tasks: Vec<(String, String)>,
+    /// 2-pane horizontal split ratio (0.2–0.8). Default 0.5.
+    #[serde(default = "default_split_ratio")]
+    pub split_ratio: f32,
+}
+
+fn default_split_ratio() -> f32 {
+    0.5
 }
 
 impl AppState {
@@ -445,6 +452,7 @@ mod tests {
             tasks: vec![],
             task_counter: 0,
             active_tasks: vec![],
+            split_ratio: 0.5,
         };
 
         state.save().expect("save should succeed");

@@ -7,12 +7,13 @@
 //! again (or the ↻ chip) to flip back. The agent sees the same file via
 //! `$SEANCE_SCRATCHPAD`.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::StreamExt;
 use gpui::{
-    div, prelude::*, px, Action, Animation, AnimationExt as _, Context, Entity, FocusHandle,
-    Focusable as _, SharedString, Window, ease_in_out,
+    div, prelude::*, px, relative, Action, Animation, AnimationExt as _, Context, Entity,
+    FocusHandle, Focusable as _, SharedString, Window, ease_in_out,
 };
 use gpui_component::{
     input::{Input, InputEvent, InputState},
@@ -198,6 +199,13 @@ enum Drawer {
     Activity,
 }
 
+/// Overlay palette (precanned prompts or fuzzy jump).
+enum PaletteMode {
+    Closed,
+    Prompts { query: String, selected: usize },
+    Jump { query: String, selected: usize },
+}
+
 /// The grimoire in its own window.
 pub struct HelpWindow;
 
@@ -237,6 +245,47 @@ fn status_color(state: &str) -> gpui::Hsla {
         "idle" => SeancePalette::text_faint(),
         _ => SeancePalette::flame(), // planning/working
     }
+}
+
+/// If `~/.local/share/seance/scratch/<slug>.telegram.json` exists, post status
+/// to that topic via vita (best-effort, never blocks the GUI).
+fn telegram_status_bridge(slug: &str, state: &str, note: Option<&str>) {
+    let path = PathBuf::from(shellexpand::tilde(&format!(
+        "~/.local/share/seance/scratch/{slug}.telegram.json"
+    )).into_owned());
+    let Ok(bytes) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes) else {
+        return;
+    };
+    let Some(topic_id) = v.get("topic_id").and_then(|t| t.as_str()).map(|s| s.to_string()) else {
+        return;
+    };
+    let text = match note {
+        Some(n) if !n.is_empty() => format!("seance `{slug}` → *{state}*: {n}"),
+        _ => format!("seance `{slug}` → *{state}*"),
+    };
+    std::thread::spawn(move || {
+        let input = serde_json::json!({"topic_id": topic_id, "text": text});
+        let input_s = input.to_string();
+        let vita = PathBuf::from(shellexpand::tilde("~/work/vita").into_owned());
+        let run = vita.join("run");
+        let mut cmd = if run.exists() {
+            let mut c = std::process::Command::new(&run);
+            c.current_dir(&vita);
+            c.args(["capabilities", "call", "vita.telegram.send", "--input", &input_s]);
+            c
+        } else {
+            let mut c = std::process::Command::new("vita");
+            c.args(["capabilities", "call", "vita.telegram.send", "--input", &input_s]);
+            c
+        };
+        let _ = cmd
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
 }
 
 /// Co-presence chrome for a pane (mirrors daemon agency).
@@ -283,6 +332,14 @@ pub struct SeanceApp {
     pending_rename: Option<RenameTarget>,
     /// Next `PaneSpawned` from our summon should open rename (not external ctl).
     rename_next_spawn: bool,
+    /// Focus-zoom: only this pane fills the tile region (None = normal grid).
+    zoomed_slug: Option<String>,
+    /// Overlay palette (ctrl+shift+k prompts / ctrl+shift+j jump).
+    palette: PaletteMode,
+    /// Horizontal split ratio for 2-pane layout (0.2–0.8). Used when n==2.
+    split_ratio: f32,
+    /// Dragging the 2-pane sash.
+    sash_drag: Option<f32>,
 }
 
 impl SeanceApp {
@@ -317,7 +374,12 @@ impl SeanceApp {
             pending_focus: None,
             pending_rename: None,
             rename_next_spawn: false,
+            zoomed_slug: None,
+            palette: PaletteMode::Closed,
+            split_ratio: 0.5,
+            sash_drag: None,
         };
+        let _ = crate::prompts::ensure_user_file();
 
         // Bridge: std thread blocks on daemon events → unbounded mpsc → gpui task.
         let (async_tx, mut async_rx) = futures::channel::mpsc::unbounded::<GuiEvent>();
@@ -482,6 +544,7 @@ impl SeanceApp {
                 cx.notify();
             }
             GuiEvent::Ask { ask } => {
+                crate::desktop_notify::ask(&ask.from, &ask.question);
                 self.asks.push(PendingAsk {
                     id: ask.id,
                     from: ask.from,
@@ -497,6 +560,11 @@ impl SeanceApp {
                 cx.notify();
             }
             GuiEvent::Status { slug, state, note } => {
+                if state == "needs-human" || state == "blocked" {
+                    crate::desktop_notify::needs_human(&slug, note.as_deref());
+                    // If this pane is phoned to telegram, post a one-liner.
+                    telegram_status_bridge(&slug, &state, note.as_deref());
+                }
                 self.statuses.insert(slug, PaneStatus { state, note });
                 cx.notify();
             }
@@ -1800,9 +1868,400 @@ impl SeanceApp {
             )
     }
 
+    /// Stage strip — live projection of roster for the selected workspace.
+    /// Sorted needs-human / blocked first. Click focuses the pane.
+    fn render_stage_strip(&self, cx: &Context<Self>) -> impl IntoElement {
+        let ws = self.selected_workspace.clone();
+        let mut rows: Vec<(&Pane, Option<&PaneStatus>)> = self
+            .panes
+            .iter()
+            .filter(|p| ws.as_ref().is_none_or(|w| p.workspace == *w))
+            .map(|p| (p, self.statuses.get(&p.slug)))
+            .collect();
+        rows.sort_by_key(|(p, st)| {
+            let urgency = match st.map(|s| s.state.as_str()) {
+                Some("needs-human") => 0,
+                Some("blocked") | Some("risky") => 1,
+                Some("working") | Some("planning") => 2,
+                Some("done") => 4,
+                Some("idle") => 5,
+                _ => 3,
+            };
+            (urgency, p.name.clone())
+        });
+        if rows.is_empty() {
+            return div().flex_none().into_any_element();
+        }
+        let active = self.active_slug.clone();
+        div()
+            .id("stage-strip")
+            .flex_none()
+            .w_full()
+            .px_1()
+            .pt_1()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_1()
+            .children(rows.into_iter().map(|(pane, st)| {
+                let slug = pane.slug.clone();
+                let is_active = active.as_deref() == Some(slug.as_str());
+                let state = st.map(|s| s.state.as_str()).unwrap_or("-");
+                let note = st.and_then(|s| s.note.as_deref()).unwrap_or("");
+                let color = status_color(state);
+                let label = if note.is_empty() {
+                    format!("{} · {state}", pane.name)
+                } else {
+                    let n = if note.len() > 28 {
+                        format!("{}…", &note[..28])
+                    } else {
+                        note.to_string()
+                    };
+                    format!("{} · {state} · {n}", pane.name)
+                };
+                div()
+                    .id(SharedString::from(format!("stage-{slug}")))
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if is_active {
+                        SeancePalette::flame()
+                    } else {
+                        SeancePalette::border()
+                    })
+                    .bg(SeancePalette::surface())
+                    .text_xs()
+                    .text_color(color)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(SeancePalette::border()))
+                    .tooltip(tip("click focus · double-click zoom"))
+                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        if event.click_count() >= 2 {
+                            this.toggle_zoom(&slug, cx);
+                        } else {
+                            this.focus_pane_slug(&slug, window, cx);
+                        }
+                    }))
+                    .child(label)
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+
+    fn focus_pane_slug(&mut self, slug: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_slug = Some(slug.to_string());
+        if let Some(p) = self.panes.iter().find(|p| p.slug == slug) {
+            let ws = p.workspace.clone();
+            if self.selected_workspace.as_deref() != Some(ws.as_str()) {
+                self.selected_workspace = Some(ws.clone());
+            }
+            let _ = self.client.set_focus(Some(slug.to_string()), Some(ws));
+        }
+        self.focus_pane_if_possible(slug, cx);
+        let _ = window;
+        cx.notify();
+    }
+
+    fn toggle_zoom(&mut self, slug: &str, cx: &mut Context<Self>) {
+        if self.zoomed_slug.as_deref() == Some(slug) {
+            self.zoomed_slug = None;
+        } else {
+            self.zoomed_slug = Some(slug.to_string());
+            self.active_slug = Some(slug.to_string());
+        }
+        cx.notify();
+    }
+
+    fn inject_prompt_into_active(&mut self, body: &str, cx: &mut Context<Self>) {
+        let Some(slug) = self.active_slug.clone() else {
+            return;
+        };
+        let (cwd, _cmd) = self
+            .panes
+            .iter()
+            .find(|p| p.slug == slug)
+            .map(|p| (p.cwd.clone(), p.command.clone()))
+            .unwrap_or_else(|| (".".into(), String::new()));
+        let text = crate::prompts::expand(body, &slug, &cwd, "");
+        let _ = self.client.inject(&slug, &text, true);
+        self.palette = PaletteMode::Closed;
+        cx.notify();
+    }
+
+    fn palette_move(&mut self, delta: i32) {
+        let n = match &self.palette {
+            PaletteMode::Prompts { query, .. } => {
+                crate::prompts::filter(&crate::prompts::load_all(), query).len()
+            }
+            PaletteMode::Jump { query, .. } => {
+                let q = query.trim().to_ascii_lowercase();
+                let pane_n = self
+                    .panes
+                    .iter()
+                    .filter(|p| {
+                        if q.is_empty() {
+                            return true;
+                        }
+                        let hay = format!("{} {} {} {}", p.name, p.slug, p.command, p.workspace)
+                            .to_ascii_lowercase();
+                        q.split_whitespace().all(|t| hay.contains(t))
+                    })
+                    .count();
+                pane_n + self.workspaces().len()
+            }
+            PaletteMode::Closed => 0,
+        };
+        match &mut self.palette {
+            PaletteMode::Prompts { selected, .. } | PaletteMode::Jump { selected, .. } => {
+                if n == 0 {
+                    *selected = 0;
+                    return;
+                }
+                let cur = *selected as i32;
+                *selected = ((cur + delta).rem_euclid(n as i32)) as usize;
+            }
+            PaletteMode::Closed => {}
+        }
+    }
+
+    /// Query daemon command log for last failed command; flash as a status note
+    /// and open activity drawer so the human can see context.
+    fn show_last_failed(&mut self, slug: &str, cx: &mut Context<Self>) {
+        let slug = slug.to_string();
+        let out = std::process::Command::new("seance")
+            .args(["ctl", "last-command", &slug, "--failed", "--json"])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                let s = String::from_utf8_lossy(&o.stdout);
+                let cmd = serde_json::from_str::<serde_json::Value>(&s)
+                    .ok()
+                    .and_then(|v| {
+                        v.pointer("/data/command")
+                            .or_else(|| v.get("command"))
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| s.trim().to_string());
+                let exit = serde_json::from_str::<serde_json::Value>(&s)
+                    .ok()
+                    .and_then(|v| {
+                        v.pointer("/data/exit")
+                            .or_else(|| v.get("exit"))
+                            .and_then(|e| e.as_i64())
+                    });
+                let note = match exit {
+                    Some(e) => format!("last failed (exit {e}): {cmd}"),
+                    None => format!("last failed: {cmd}"),
+                };
+                self.statuses.insert(
+                    slug.clone(),
+                    PaneStatus {
+                        state: "needs-human".into(),
+                        note: Some(note.clone()),
+                    },
+                );
+                crate::desktop_notify::notify("seance · last failed", &note);
+                self.drawer = Drawer::Activity;
+                cx.notify();
+            }
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                crate::desktop_notify::notify(
+                    "seance · last failed",
+                    if err.trim().is_empty() {
+                        "no failed command on this pane"
+                    } else {
+                        err.trim()
+                    },
+                );
+            }
+            Err(e) => {
+                crate::desktop_notify::notify("seance · last failed", &format!("ctl error: {e}"));
+            }
+        }
+    }
+
+    fn activate_palette_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.palette {
+            PaletteMode::Closed => {}
+            PaletteMode::Prompts { query, selected } => {
+                let hits = crate::prompts::filter(&crate::prompts::load_all(), query);
+                if let Some(p) = hits.get(*selected) {
+                    let body = p.body.clone();
+                    self.inject_prompt_into_active(&body, cx);
+                }
+            }
+            PaletteMode::Jump { query, selected } => {
+                let q = query.trim().to_ascii_lowercase();
+                let mut items: Vec<String> = self
+                    .panes
+                    .iter()
+                    .filter(|p| {
+                        if q.is_empty() {
+                            return true;
+                        }
+                        let hay = format!("{} {} {} {}", p.name, p.slug, p.command, p.workspace)
+                            .to_ascii_lowercase();
+                        q.split_whitespace().all(|t| hay.contains(t))
+                    })
+                    .map(|p| p.slug.clone())
+                    .collect();
+                for ws in self.workspaces() {
+                    if q.is_empty() || ws.to_ascii_lowercase().contains(&q) {
+                        items.push(format!("ws:{ws}"));
+                    }
+                }
+                if let Some(id) = items.get(*selected).cloned() {
+                    if let Some(ws) = id.strip_prefix("ws:") {
+                        self.select_workspace(ws, cx);
+                        self.palette = PaletteMode::Closed;
+                        cx.notify();
+                    } else {
+                        self.focus_pane_slug(&id, window, cx);
+                        self.palette = PaletteMode::Closed;
+                        cx.notify();
+                    }
+                }
+            }
+        }
+    }
+
+    fn render_palette(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let (title, query, selected, items): (String, String, usize, Vec<(String, String)>) =
+            match &self.palette {
+                PaletteMode::Closed => return None,
+                PaletteMode::Prompts { query, selected } => {
+                    let all = crate::prompts::load_all();
+                    let hits = crate::prompts::filter(&all, query);
+                    let items: Vec<_> = hits
+                        .into_iter()
+                        .map(|p| (p.id, format!("{} — {}", p.title, p.body.chars().take(60).collect::<String>())))
+                        .collect();
+                    ("precanned prompts · ctrl+shift+k".into(), query.clone(), *selected, items)
+                }
+                PaletteMode::Jump { query, selected } => {
+                    let q = query.trim().to_ascii_lowercase();
+                    let mut items: Vec<(String, String)> = self
+                        .panes
+                        .iter()
+                        .filter(|p| {
+                            if q.is_empty() {
+                                return true;
+                            }
+                            let hay = format!("{} {} {} {}", p.name, p.slug, p.command, p.workspace)
+                                .to_ascii_lowercase();
+                            q.split_whitespace().all(|t| hay.contains(t))
+                        })
+                        .map(|p| {
+                            let st = self
+                                .statuses
+                                .get(&p.slug)
+                                .map(|s| s.state.as_str())
+                                .unwrap_or("-");
+                            (
+                                p.slug.clone(),
+                                format!("{} · {st} · {}", p.name, p.workspace),
+                            )
+                        })
+                        .collect();
+                    // Also offer workspaces as jump targets with ws: prefix
+                    for ws in self.workspaces() {
+                        if q.is_empty()
+                            || ws.to_ascii_lowercase().contains(&q)
+                        {
+                            items.push((format!("ws:{ws}"), format!("workspace · {ws}")));
+                        }
+                    }
+                    ("jump · ctrl+shift+j".into(), query.clone(), *selected, items)
+                }
+            };
+        let n = items.len();
+        let sel = if n == 0 { 0 } else { selected.min(n - 1) };
+        Some(
+            div()
+                .id("palette-overlay")
+                .absolute()
+                .top(px(48.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(520.))
+                        .max_h(px(360.))
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(SeancePalette::flame_dim())
+                        .bg(SeancePalette::bg_elevated())
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(SeancePalette::border())
+                                .text_xs()
+                                .text_color(SeancePalette::text_faint())
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(SeancePalette::border())
+                                .text_sm()
+                                .text_color(SeancePalette::flame())
+                                .child(format!("› {query}█")),
+                        )
+                        .child(
+                            div()
+                                .id("palette-list")
+                                .flex_1()
+                                .overflow_y_scroll()
+                                .py_1()
+                                .children(items.into_iter().enumerate().map(|(i, (id, label))| {
+                                    let active = i == sel;
+                                    div()
+                                        .id(SharedString::from(format!("pal-{i}-{id}")))
+                                        .px_3()
+                                        .py_1()
+                                        .text_sm()
+                                        .bg(if active {
+                                            SeancePalette::surface()
+                                        } else {
+                                            gpui::transparent_black()
+                                        })
+                                        .text_color(if active {
+                                            SeancePalette::flame()
+                                        } else {
+                                            SeancePalette::text()
+                                        })
+                                        .child(label)
+                                        .into_any_element()
+                                })),
+                        )
+                        .child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .text_xs()
+                                .text_color(SeancePalette::text_faint())
+                                .child("enter select · esc close · type to filter"),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_tiles(&self, cx: &Context<Self>) -> impl IntoElement {
         // The tiling region shows only the SELECTED workspace's tiled panes.
-        let tiled: Vec<&Pane> = self
+        let mut tiled: Vec<&Pane> = self
             .panes
             .iter()
             .filter(|s| {
@@ -1814,6 +2273,12 @@ impl SeanceApp {
                         .is_none_or(|ws| s.workspace == ws)
             })
             .collect();
+        // Focus-zoom: single pane fills the region.
+        if let Some(z) = &self.zoomed_slug {
+            if let Some(p) = tiled.iter().find(|p| p.slug == *z).copied() {
+                tiled = vec![p];
+            }
+        }
         let n = tiled.len();
         let active = self.active_slug.clone();
 
@@ -1846,6 +2311,102 @@ impl SeanceApp {
                                 .text_sm()
                                 .child(format!("{ws} is empty — summon a spirit (ctrl+shift+n)")),
                         ),
+                )
+                .into_any_element();
+        }
+
+        // 2-pane resizable split (horizontal sash).
+        if n == 2 && self.zoomed_slug.is_none() {
+            let left = tiled[0];
+            let right = tiled[1];
+            let ratio = self.split_ratio.clamp(0.2, 0.8);
+            let left_pct = (ratio * 100.0) as u32;
+            let right_pct = 100 - left_pct;
+            let whisper_l = self
+                .whisper
+                .as_ref()
+                .filter(|(ws, _)| *ws == left.slug)
+                .map(|(_, i)| i);
+            let flipped_l = self
+                .flipped
+                .as_ref()
+                .filter(|(ws, _)| *ws == left.slug)
+                .map(|(_, d)| d);
+            let whisper_r = self
+                .whisper
+                .as_ref()
+                .filter(|(ws, _)| *ws == right.slug)
+                .map(|(_, i)| i);
+            let flipped_r = self
+                .flipped
+                .as_ref()
+                .filter(|(ws, _)| *ws == right.slug)
+                .map(|(_, d)| d);
+            return div()
+                .flex_1()
+                .h_full()
+                .w_full()
+                .min_h_0()
+                .min_w_0()
+                .overflow_hidden()
+                .flex()
+                .flex_row()
+                .p_1()
+                .gap_0()
+                .child(
+                    div()
+                        .h_full()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .flex()
+                        .w(relative(left_pct as f32 / 100.0))
+                        .child(render_pane(
+                            left,
+                            active.as_deref(),
+                            self.statuses.get(&left.slug),
+                            self.owners.get(&left.slug),
+                            self.touches.get(&left.slug),
+                            whisper_l,
+                            flipped_l,
+                            cx,
+                        )),
+                )
+                .child(
+                    div()
+                        .id("sash")
+                        .flex_none()
+                        .w(px(5.))
+                        .h_full()
+                        .cursor_col_resize()
+                        .bg(SeancePalette::border())
+                        .hover(|s| s.bg(SeancePalette::flame_dim()))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| {
+                                this.sash_drag = Some(ev.position.x.into());
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .h_full()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .flex()
+                        .w(relative(right_pct as f32 / 100.0))
+                        .child(render_pane(
+                            right,
+                            active.as_deref(),
+                            self.statuses.get(&right.slug),
+                            self.owners.get(&right.slug),
+                            self.touches.get(&right.slug),
+                            whisper_r,
+                            flipped_r,
+                            cx,
+                        )),
                 )
                 .into_any_element();
         }
@@ -2741,13 +3302,19 @@ fn render_help() -> gpui::AnyElement {
         .child(row("ctrl+shift+n", "summon a new shell pane in the current workspace"))
         .child(row("ctrl+shift+s", "flip notes on the active pane / flip back"))
         .child(row("ctrl+shift+p", "pop active pane out / return to the circle"))
+        .child(row("ctrl+shift+k", "precanned prompt palette"))
+        .child(row("ctrl+shift+j", "fuzzy jump to pane / workspace"))
+        .child(row("ctrl+shift+z", "focus-zoom active pane (esc unzoom)"))
+        .child(row("ctrl+shift+f", "jump to last failed shell command"))
         .child(row("ctrl+pgup / pgdn", "previous / next workspace (sidebar order, wraps)"))
-        .child(row("escape", "dismiss an open whisper compose bar"))
+        .child(row("escape", "dismiss whisper / palette / unzoom"))
         .child(section("terminal focus"))
         .child(row("ctrl+shift+c / v", "copy selection / paste"))
         .child(row("shift+pgup/pgdn", "scrollback"))
+        .child(row("ctrl+click / middle-click", "open OSC-8 / URL under cursor"))
         .child(row("mouse drag", "select text (copies on release)"))
         .child(row("wheel", "scroll scrollback"))
+        .child(row("2-pane sash", "drag the vertical divider to resize"))
         .child(section("ghost command (agent proposed)"))
         .child(row("enter / tab", "accept + run the dimmed ghost command"))
         .child(row("escape", "dismiss the proposal"))
@@ -2897,9 +3464,96 @@ impl Render for SeanceApp {
                     cx,
                 );
             }))
+            .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
+                if this.sash_drag.is_some() {
+                    // Rough: map x within main column to split ratio.
+                    let bounds = window.bounds();
+                    let x: f32 = ev.position.x.into();
+                    let w: f32 = bounds.size.width.into();
+                    // Sidebar ~232px; clamp ratio of remaining width.
+                    let main_left = 232.0;
+                    let main_w = (w - main_left).max(100.0);
+                    let ratio = ((x - main_left) / main_w).clamp(0.2, 0.8);
+                    this.split_ratio = ratio;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.sash_drag.is_some() {
+                        this.sash_drag = None;
+                        cx.notify();
+                    }
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let ks = &event.keystroke;
-                // Escape dismisses whisper compose or cancels inline rename.
+                // Palette capture first.
+                if !matches!(this.palette, PaletteMode::Closed) {
+                    if ks.key.as_str() == "escape" {
+                        this.palette = PaletteMode::Closed;
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if ks.key.as_str() == "enter" {
+                        this.activate_palette_selection(window, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if ks.key.as_str() == "up" || ks.key.as_str() == "arrowup" {
+                        this.palette_move(-1);
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if ks.key.as_str() == "down" || ks.key.as_str() == "arrowdown" {
+                        this.palette_move(1);
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if ks.key.as_str() == "backspace" {
+                        match &mut this.palette {
+                            PaletteMode::Prompts { query, selected }
+                            | PaletteMode::Jump { query, selected } => {
+                                query.pop();
+                                *selected = 0;
+                            }
+                            PaletteMode::Closed => {}
+                        }
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                    // printable
+                    if let Some(ch) = ks.key.chars().next() {
+                        if ch.len_utf8() == 1 && !ks.modifiers.control && !ks.modifiers.alt {
+                            let add = if ks.key.len() == 1 {
+                                ks.key.clone()
+                            } else if ks.key == "space" {
+                                " ".to_string()
+                            } else {
+                                String::new()
+                            };
+                            if !add.is_empty() {
+                                match &mut this.palette {
+                                    PaletteMode::Prompts { query, selected }
+                                    | PaletteMode::Jump { query, selected } => {
+                                        query.push_str(&add);
+                                        *selected = 0;
+                                    }
+                                    PaletteMode::Closed => {}
+                                }
+                                cx.notify();
+                                cx.stop_propagation();
+                                return;
+                            }
+                        }
+                    }
+                }
+                // Escape dismisses whisper compose, zoom, or cancels inline rename.
                 if ks.key.as_str() == "escape" {
                     if this.renaming.is_some() {
                         this.renaming = None;
@@ -2910,6 +3564,12 @@ impl Render for SeanceApp {
                     }
                     if this.whisper.is_some() {
                         this.cancel_whisper(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if this.zoomed_slug.is_some() {
+                        this.zoomed_slug = None;
+                        cx.notify();
                         cx.stop_propagation();
                         return;
                     }
@@ -2942,6 +3602,35 @@ impl Render for SeanceApp {
                                 cx.stop_propagation();
                             }
                         }
+                        "k" => {
+                            this.palette = PaletteMode::Prompts {
+                                query: String::new(),
+                                selected: 0,
+                            };
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                        "j" => {
+                            this.palette = PaletteMode::Jump {
+                                query: String::new(),
+                                selected: 0,
+                            };
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                        "z" | "m" => {
+                            if let Some(slug) = this.active_slug.clone() {
+                                this.toggle_zoom(&slug, cx);
+                                cx.stop_propagation();
+                            }
+                        }
+                        "f" => {
+                            // Jump-to-last-failed: show last non-zero command on active pane.
+                            if let Some(slug) = this.active_slug.clone() {
+                                this.show_last_failed(&slug, cx);
+                                cx.stop_propagation();
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -2960,8 +3649,10 @@ impl Render for SeanceApp {
                     .flex()
                     .flex_col()
                     .children(self.render_asks(cx))
+                    .child(self.render_stage_strip(cx))
                     .child(self.render_tiles(cx)),
             )
+            .children(self.render_palette(cx))
             .children(match &self.drawer {
                 Drawer::Closed => None,
                 Drawer::Activity => Some(

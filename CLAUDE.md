@@ -56,10 +56,11 @@ seance restart-gui                          # UI only
 After orchestration changes, re-run this and read orch + worker pads before
 claiming A+. Prefer their evidence over vibes.
 
-**0.9.7 contract:** `send` → `task_id` + sidecar; `wait --status done` is
-evidence-bound (`--badge-only` to skip); `wait … --cat` / `harvest` fan-in
-harvests pads; `ctl task` / `whoami` re-read inject; exit → idle; roster shows
-**slug** (ctl id) when name differs.
+**0.9.8 contract:** `send` → `task_id` + sidecar; `wait --status done` is
+evidence-bound (`--badge-only` to skip) with **event-driven wake**; `wait … --cat`
+/ `harvest` fan-in harvests pads; `ctl task` / `whoami` re-read inject; exit →
+idle; roster shows **slug**; `--wait-ready` runs profile **boot-clear**;
+`phone` / `export-session` / `prompts` are human-spine ctl surfaces.
 
 ## Product rules (don’t regress these)
 

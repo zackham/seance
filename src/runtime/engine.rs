@@ -1462,6 +1462,8 @@ impl Engine {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            // GUI-local for now; default keeps layout sane on cold restore.
+            split_ratio: 0.5,
         };
         let _ = state.save();
     }

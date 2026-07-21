@@ -13,7 +13,7 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) · **Status:** 0.9.7
+**License:** MIT · **Platform:** Linux (Wayland / X11) · **Status:** 0.9.8
 
 ## Why it exists
 
@@ -41,14 +41,18 @@ the keyboard). Point `--command` at whatever agent CLI you use.
 - **Notes on the back of every pane** — shared markdown (`$SEANCE_SCRATCHPAD`); human and agent both read/write
 - **File panes** — live markdown/text + history/diff when you’re co-editing a document
 - **Control plane** — `seance ctl` so any pane (or external script) can spawn, send, wait, harvest
-- **Orchestrator A+** — `--agent` profiles, `wait --status done` (evidence-bound), `send --file`, task envelopes, `harvest`
+- **Orchestrator A+** — `--agent` profiles, `wait --status done` (evidence-bound, event-driven wake), `send --file`, task envelopes, `harvest`, boot-clear on `--wait-ready`
 - **Human-in-the-loop** — `ask` (blocking choices), `propose` (ghost command until you accept), `human` (where is focus?)
-- **Status + timeline** — agent self-report badges; attributed event log
+- **Stage strip** — live roster on the stage (urgency-sorted; click focus / double-click zoom)
+- **Palettes** — precanned prompts (`ctrl+shift+k`), fuzzy jump (`ctrl+shift+j`)
+- **Status + timeline** — agent self-report badges; attributed event log; desktop notify on needs-human
 - **Co-presence** — human keystrokes steal keys; seize / release / drive
 - **Daemon architecture** — upgrade the binary without killing the circle
 - **Event bus** — sequenced, attributable events + `seance ctl watch` subscriptions
 - **Causal tint** — left gutter shows who last wrote stdin (human / agent / propose)
 - **Capabilities** — `policy open|propose_required|locked` + per-principal grants
+- **Phone a pane** — `seance ctl phone` opens a vita telegram topic (seance↔vita seam)
+- **Export session** — `seance ctl export-session` → scrubable offline HTML
 
 ## Quick start
 
@@ -87,8 +91,13 @@ Multi-agent live test (in-seance orchestrator): `./scripts/agent-collab-test.sh`
 | ctrl+shift+n | new pane (shell by default) |
 | ctrl+shift+s | flip notes ↔ face |
 | ctrl+shift+p | pop pane to its own window |
+| ctrl+shift+k | precanned prompt palette |
+| ctrl+shift+j | fuzzy jump (pane / workspace) |
+| ctrl+shift+z | focus-zoom active pane |
+| ctrl+shift+f | last failed shell command |
 | ctrl+pageup / pagedown | cycle workspaces |
 | ctrl+shift+v | paste |
+| ctrl+click / middle-click | open OSC-8 / URL |
 | ⚡ | arm agent (`ctl skill` orientation) |
 | 💬 | whisper — compose a steer into the pane |
 
@@ -144,10 +153,10 @@ Pin discipline: `gpui-component` rev-pinned; zed patched to `deps/zed` at
 
 ## Not yet
 
-- OSC 8 hyperlinks / OSC-133 shell markers (bash hooks work today)
-- manually resizable splits (grid is auto-balanced)
+- OSC-133 shell-agnostic markers (bash hooks + cmdlog work today; OSC-8 open shipped)
+- free-form multi-pane resize for n>2 (2-pane sash shipped)
 - GPU glyph atlas (CPU path is already multi-pane smooth)
-- new pane kinds (roster / timeline / review — see vita roadmap)
+- full 60fps session replay (HTML export v0 is timeline + pads)
 - worktree-backed agent rooms, best-of-N
 
 ## License

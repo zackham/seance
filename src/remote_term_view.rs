@@ -124,6 +124,55 @@ impl RemoteTerminalView {
         }
     }
 
+    fn open_link_at(
+        &mut self,
+        pos: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (cell_w, line_h) = cell_metrics(window);
+        let term = self.terminal.read(cx);
+        // Approximate: canvas fills the view; origin is view origin ≈ 0 relative
+        // to this element. Use window bounds of focus isn't available — fall
+        // back to row/col from local coords when possible via last snapshot size.
+        let snap = term.snapshot.clone();
+        // Without element-local bounds here, use a coarse approach: search all
+        // OSC-8 spans first; if only one on screen open it; else scan URLs on
+        // the line nearest the click using pixel→cell from top-left of view.
+        // Parent places us at tile origin; MouseDown position is window-global.
+        // Best-effort: convert via cell metrics assuming the view's last resize.
+        let _ = pos;
+        let _ = cell_w;
+        let _ = line_h;
+        // Prefer single visible hyperlink when only one exists (common for
+        // "open this PR" agent output). Otherwise try URL regex on all lines.
+        if snap.hyperlinks.len() == 1 {
+            open_uri(&snap.hyperlinks[0].uri);
+            cx.stop_propagation();
+            return;
+        }
+        if let Some(h) = snap.hyperlinks.first() {
+            // Multiple: open the first that looks like http(s).
+            if let Some(h) = snap
+                .hyperlinks
+                .iter()
+                .find(|h| h.uri.starts_with("http://") || h.uri.starts_with("https://"))
+            {
+                open_uri(&h.uri);
+                cx.stop_propagation();
+                return;
+            }
+            open_uri(&h.uri);
+            cx.stop_propagation();
+            return;
+        }
+        // Fallback: bare URL on screen text.
+        if let Some(url) = first_http_url_in_cells(&snap) {
+            open_uri(&url);
+            cx.stop_propagation();
+        }
+    }
+
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let line_height = px(FONT_SIZE * LINE_HEIGHT_FACTOR);
         self.scroll_accum +=
@@ -202,6 +251,22 @@ impl Render for RemoteTerminalView {
             .track_focus(&focus)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
+            // OSC-8 / bare-URL open: ctrl+click (or middle-click) opens link under cursor.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, ev: &gpui::MouseDownEvent, window, cx| {
+                    if !ev.modifiers.control {
+                        return;
+                    }
+                    this.open_link_at(ev.position, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Middle,
+                cx.listener(|this, ev: &gpui::MouseDownEvent, window, cx| {
+                    this.open_link_at(ev.position, window, cx);
+                }),
+            )
             .child(
                 canvas(
                     move |bounds, window, cx| {
@@ -271,6 +336,61 @@ struct ShapedPaintCache {
     texts: Vec<(f32, f32, ShapedLine)>,
     cursor: (f32, f32, f32, f32),
     ghost_shaped: Option<(f32, f32, ShapedLine)>,
+}
+
+fn open_uri(uri: &str) {
+    let uri = uri.to_string();
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(&uri)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+}
+
+fn first_http_url_in_cells(snap: &crate::runtime::snapshot::GridSnapshot) -> Option<String> {
+    let cols = snap.cols as usize;
+    if cols == 0 || snap.cells.is_empty() {
+        return None;
+    }
+    let rows = snap.cells.len() / cols;
+    for r in 0..rows {
+        let mut line = String::with_capacity(cols);
+        for c in 0..cols {
+            line.push(snap.cells[r * cols + c].c);
+        }
+        if let Some(url) = extract_http_url(&line) {
+            return Some(url);
+        }
+    }
+    None
+}
+
+fn extract_http_url(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i + 7 < bytes.len() {
+        if bytes[i..].starts_with(b"https://") || bytes[i..].starts_with(b"http://") {
+            let start = i;
+            i += if bytes[i + 4] == b's' { 8 } else { 7 };
+            while i < bytes.len() {
+                let c = bytes[i] as char;
+                if c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c) {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let url = line[start..i].trim_end_matches(['.', ',', ')', ']', ';', ':']);
+            if url.len() > 10 {
+                return Some(url.to_string());
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
 }
 
 fn shaped_paint_caches() -> &'static Mutex<HashMap<String, ShapedPaintCache>> {

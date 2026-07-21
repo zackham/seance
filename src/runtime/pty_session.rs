@@ -395,9 +395,16 @@ impl PtySession {
         self.paste(&text);
         if submit {
             let tx = self.io_tx.clone();
+            // Multi-line paste (esp. grok) sometimes needs a second Enter;
+            // agents tolerate an extra CR at an empty prompt.
+            let extra_enter = text.contains('\n');
             thread::spawn(move || {
-                thread::sleep(Duration::from_millis(150));
+                thread::sleep(Duration::from_millis(180));
                 let _ = tx.send(IoMsg::Write(b"\r".to_vec()));
+                if extra_enter {
+                    thread::sleep(Duration::from_millis(80));
+                    let _ = tx.send(IoMsg::Write(b"\r".to_vec()));
+                }
             });
         }
     }
@@ -470,12 +477,47 @@ impl PtySession {
         let colors = term.colors();
 
         let mut cells = Vec::with_capacity((cols as usize) * (rows as usize));
+        let mut hyperlinks: Vec<super::snapshot::HyperlinkSpan> = Vec::new();
+        let mut open_link: Option<(u16, u16, String)> = None; // row, col_start, uri
         for line_idx in 0..rows as i32 {
             let line = Line(line_idx - display_offset);
+            let row_u = line_idx as u16;
+            // close any open link at end of previous row
+            if let Some((r, cs, uri)) = open_link.take() {
+                hyperlinks.push(super::snapshot::HyperlinkSpan {
+                    row: r,
+                    col_start: cs,
+                    col_end: cols,
+                    uri,
+                });
+            }
             for col in 0..cols as usize {
                 let cell = &grid[line][Column(col)];
                 let fg = resolve_color(colors, &cell.fg, cell.flags, false);
                 let bg = resolve_color(colors, &cell.bg, Flags::empty(), true);
+                let has_link = cell.hyperlink().map(|h| h.uri().to_string());
+                match (&mut open_link, has_link) {
+                    (Some((r, cs, uri)), Some(u)) if *r == row_u && *uri == u => {
+                        // continue open span
+                    }
+                    (Some((r, cs, uri)), other) => {
+                        hyperlinks.push(super::snapshot::HyperlinkSpan {
+                            row: *r,
+                            col_start: *cs,
+                            col_end: col as u16,
+                            uri: uri.clone(),
+                        });
+                        open_link = other.map(|u| (row_u, col as u16, u));
+                    }
+                    (None, Some(u)) => {
+                        open_link = Some((row_u, col as u16, u));
+                    }
+                    (None, None) => {}
+                }
+                let mut underline = cell.flags.contains(Flags::UNDERLINE);
+                if cell.hyperlink().is_some() {
+                    underline = true;
+                }
                 cells.push(CellSnap {
                     c: if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                         ' '
@@ -487,10 +529,18 @@ impl PtySession {
                     bold: cell.flags.contains(Flags::BOLD),
                     dim: cell.flags.contains(Flags::DIM),
                     italic: cell.flags.contains(Flags::ITALIC),
-                    underline: cell.flags.contains(Flags::UNDERLINE),
+                    underline,
                     inverse: cell.flags.contains(Flags::INVERSE),
                 });
             }
+        }
+        if let Some((r, cs, uri)) = open_link.take() {
+            hyperlinks.push(super::snapshot::HyperlinkSpan {
+                row: r,
+                col_start: cs,
+                col_end: cols,
+                uri,
+            });
         }
 
         // cursor relative to visible screen
@@ -520,6 +570,7 @@ impl PtySession {
             mouse_mode,
             sgr_mouse,
             last_input_origin: self.input_origin(),
+            hyperlinks,
         }
     }
 

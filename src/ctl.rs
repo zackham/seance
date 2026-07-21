@@ -26,6 +26,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::control::{socket_path, ControlRequest, ControlResponse};
@@ -219,6 +220,17 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
                 args.push("--cat".into());
             }
             return run_wait(args, scope, from, json_out);
+        }
+        // seance ↔ vita seam: open a telegram topic for a pane (zero telegram
+        // protocol inside seance — shells out to vita capabilities).
+        "phone" | "telegram-topic" | "tg" => {
+            return run_phone(sub_args, scope, from, json_out);
+        }
+        "export-session" | "export" => {
+            return run_export_session(sub_args, scope, json_out);
+        }
+        "prompts" => {
+            return run_prompts(sub_args, json_out);
         }
         other => Err(format!("unknown subcommand '{other}' (try `seance ctl help`)")),
     };
@@ -416,13 +428,19 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
                         .or_else(|| d.as_str().map(|s| s.to_string()))
                 })
                 .unwrap_or_default();
+            let command = response
+                .data
+                .as_ref()
+                .and_then(|d| d.get("command").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string();
             if !slug.is_empty() {
                 if !json_out {
                     eprintln!("waiting until '{slug}' is boot-ready…");
                 }
                 let code = run_wait(
                     vec![
-                        slug,
+                        slug.clone(),
                         "--ready".into(),
                         "--timeout".into(),
                         "120".into(),
@@ -434,6 +452,8 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
                 if code != 0 {
                     return code;
                 }
+                // Profile boot-clear (trust dialog / update skip).
+                boot_clear_pane(&slug, &command, scope.clone(), from.clone(), json_out);
             }
         }
         0
@@ -1199,18 +1219,45 @@ fn run_wait(
     let mut stable_since: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
 
+    // Event-driven wake: background watch thread pokes a channel so we re-check
+    // brief immediately on status/finish/pad activity (still fall back to poll).
+    let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
+    {
+        let panes_for_watch = panes.clone();
+        std::thread::spawn(move || {
+            watch_wake_loop(panes_for_watch, wake_tx);
+        });
+    }
+    let mut last_rows: Vec<serde_json::Value> = Vec::new();
+
     loop {
         if started.elapsed().as_secs() > timeout_secs {
+            // Timeout diagnostics: last roster rows + pad_rev deltas.
             if json_out {
                 println!(
-                    "{{\"ok\":false,\"error\":\"timeout\",\"timeout_secs\":{timeout_secs},\"panes\":{}}}",
-                    serde_json::to_string(&panes).unwrap_or_else(|_| "[]".into())
+                    "{{\"ok\":false,\"error\":\"timeout\",\"timeout_secs\":{timeout_secs},\"panes\":{},\"last\":{}}}",
+                    serde_json::to_string(&panes).unwrap_or_else(|_| "[]".into()),
+                    serde_json::to_string(&last_rows).unwrap_or_else(|_| "[]".into())
                 );
             } else {
                 eprintln!(
                     "seance ctl wait: timeout after {timeout_secs}s on {}",
                     panes.join(",")
                 );
+                for row in &last_rows {
+                    let slug = row.get("slug").and_then(|v| v.as_str()).unwrap_or("?");
+                    let st = row.get("status").and_then(|v| v.as_str()).unwrap_or("-");
+                    let rev = row.get("pad_rev").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let inj = row.get("inject_pad_rev").and_then(|v| v.as_u64());
+                    let bytes = row
+                        .get("scratchpad_bytes")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let tid = row.get("task_id").and_then(|v| v.as_str()).unwrap_or("-");
+                    eprintln!(
+                        "  {slug}: status={st} pad={bytes}B@r{rev} inj={inj:?} task={tid}"
+                    );
+                }
             }
             return 1;
         }
@@ -1242,6 +1289,16 @@ fn run_wait(
             .and_then(|p| p.as_array())
             .cloned()
             .unwrap_or_default();
+        // Keep a filtered diagnostic snapshot of panes we care about.
+        last_rows = rows
+            .iter()
+            .filter(|p| {
+                let slug = p.get("slug").and_then(|s| s.as_str()).unwrap_or("");
+                let name = p.get("name").and_then(|s| s.as_str()).unwrap_or("");
+                panes.iter().any(|want| want == slug || want == name)
+            })
+            .cloned()
+            .collect();
 
         let mut satisfied: Vec<String> = Vec::new();
 
@@ -1499,7 +1556,18 @@ fn run_wait(
             return 0;
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Event-driven: wake on bus activity, with a short poll ceiling so we
+        // still make progress if watch is unavailable.
+        match wake_rx.recv_timeout(std::time::Duration::from_millis(400)) {
+            Ok(()) => {
+                // Drain extra wakes so we don't thrash.
+                while wake_rx.try_recv().is_ok() {}
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        }
     }
 }
 
@@ -2142,6 +2210,407 @@ fn ensure_trailing_newline(s: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// Event-driven wait wake + boot clear + phone/export/prompts
+// ---------------------------------------------------------------------------
+
+/// Background: subscribe to the event bus and poke `tx` when something changes
+/// on the panes we're waiting on. Best-effort — disconnect = poll-only wait.
+fn watch_wake_loop(panes: Vec<String>, tx: std::sync::mpsc::Sender<()>) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let path = socket_path();
+    let Ok(stream) = UnixStream::connect(&path) else {
+        return;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let Ok(mut writer) = stream.try_clone() else {
+        return;
+    };
+    if writer.write_all(b"{\"role\":\"ctl\"}\n").is_err() {
+        return;
+    }
+    // Catch status, finish, note, send, pane lifecycle — anything that can
+    // change wait conditions.
+    let req = ControlRequest::Watch {
+        since_seq: None,
+        kinds: Some(vec![
+            "status_set".into(),
+            "finish".into(),
+            "note".into(),
+            "send".into(),
+            "pane_exited".into(),
+            "pane_spawned".into(),
+            "agency".into(),
+            "ask".into(),
+        ]),
+        pane: None,
+        actor: None,
+        catch_up: false,
+        scope: None,
+        from: None,
+    };
+    let Ok(mut line) = serde_json::to_string(&req) else {
+        return;
+    };
+    line.push('\n');
+    if writer.write_all(line.as_bytes()).is_err() || writer.flush().is_err() {
+        return;
+    }
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut resp_line = String::new();
+        match reader.read_line(&mut resp_line) {
+            Ok(0) => return,
+            Ok(_) => {
+                // Any event wakes wait; filter lightly by pane name in JSON text.
+                let interesting = panes.is_empty()
+                    || panes.iter().any(|p| resp_line.contains(p.as_str()))
+                    || resp_line.contains("\"ok\"");
+                if interesting {
+                    if tx.send(()).is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(_) => {
+                // timeout on read — keep watching
+                continue;
+            }
+        }
+    }
+}
+
+/// After `--wait-ready`, clear known agent boot dialogs.
+fn boot_clear_pane(
+    slug: &str,
+    command: &str,
+    scope: Option<String>,
+    from: Option<String>,
+    json_out: bool,
+) {
+    let profile = crate::agents::guess_profile_from_command(command)
+        .or_else(|| {
+            // also try agent field if new returns it
+            None
+        })
+        .unwrap_or("");
+    if profile.is_empty() {
+        return;
+    }
+    let seq = crate::agents::boot_clear_sequence(profile);
+    if seq.is_empty() {
+        return;
+    }
+    if !json_out {
+        eprintln!("boot-clear '{slug}' ({profile})…");
+    }
+    for bytes in seq {
+        // settle so the TUI paints the dialog before we answer
+        std::thread::sleep(Duration::from_millis(350));
+        let b64 = base64_encode(&bytes);
+        let req = with_identity(
+            ControlRequest::SendRaw {
+                pane: slug.to_string(),
+                bytes_b64: b64,
+                force: true,
+                scope: None,
+                from: None,
+            },
+            scope.clone(),
+            from.clone(),
+        );
+        let _ = send_request(&req);
+    }
+    // re-check ready briefly after clear
+    std::thread::sleep(Duration::from_millis(400));
+}
+
+/// `seance ctl phone [PANE] [--label L] [--ttl HOURS]`
+/// Opens a vita telegram topic and registers a participant that can drive the pane.
+fn run_phone(
+    args: Vec<String>,
+    scope: Option<String>,
+    from: Option<String>,
+    json_out: bool,
+) -> i32 {
+    let mut pane: Option<String> = None;
+    let mut label: Option<String> = None;
+    let mut ttl_hours: f64 = 4.0;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--label" | "--name" => label = it.next(),
+            "--ttl" => {
+                ttl_hours = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(4.0);
+            }
+            "--help" | "-h" => {
+                println!(
+                    "phone [PANE] [--label L] [--ttl HOURS]\n  \
+                     Open a vita telegram topic bound to a seance pane.\n  \
+                     Requires `./run capabilities` / vita on PATH from ~/work/vita.\n  \
+                     Default pane: $SEANCE_SESSION."
+                );
+                return 0;
+            }
+            other if !other.starts_with('-') => pane = Some(other.to_string()),
+            other => {
+                eprintln!("seance ctl phone: unexpected '{other}'");
+                return 1;
+            }
+        }
+    }
+    let pane = pane
+        .or_else(|| from.clone())
+        .or_else(|| std::env::var("SEANCE_SESSION").ok())
+        .filter(|s| !s.is_empty());
+    let Some(pane) = pane else {
+        eprintln!("seance ctl phone: need PANE or $SEANCE_SESSION");
+        return 1;
+    };
+
+    // Resolve display name via brief if possible.
+    let brief_req = with_identity(
+        ControlRequest::Brief {
+            scope: None,
+            from: None,
+        },
+        scope.clone(),
+        from.clone(),
+    );
+    let name = send_request(&brief_req)
+        .ok()
+        .and_then(|r| r.data)
+        .and_then(|d| {
+            d.get("panes")
+                .and_then(|p| p.as_array())
+                .and_then(|arr| {
+                    arr.iter()
+                        .find(|p| {
+                            p.get("slug").and_then(|s| s.as_str()) == Some(pane.as_str())
+                                || p.get("name").and_then(|s| s.as_str()) == Some(pane.as_str())
+                        })
+                        .and_then(|p| p.get("name").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                })
+        })
+        .unwrap_or_else(|| pane.clone());
+
+    let topic_label = label.unwrap_or_else(|| format!("seance · {name}"));
+
+    // Prefer vita capabilities CLI from the monorepo; fall back to bare `vita`.
+    let open_body = serde_json::json!({
+        "title": topic_label,
+        "note": format!("seance pane {pane} — replies inject via participant bridge"),
+    });
+    let open_out = run_vita_capability("vita.telegram.open_topic", &open_body);
+    let open_json: serde_json::Value = match open_out {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({"raw": s})),
+        Err(e) => {
+            eprintln!("seance ctl phone: open_topic failed: {e}");
+            eprintln!("hint: run from a host with vita (`~/work/vita ./run capabilities …`)");
+            return 1;
+        }
+    };
+    let topic_id = open_json
+        .pointer("/topic_id")
+        .or_else(|| open_json.pointer("/id"))
+        .or_else(|| open_json.pointer("/data/topic_id"))
+        .or_else(|| open_json.get("topic_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            open_json
+                .get("raw")
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    // last-resort: find a uuid-ish token
+                    s.split_whitespace()
+                        .find(|t| t.len() >= 8 && t.contains('-'))
+                        .map(|s| s.to_string())
+                })
+        });
+    let Some(topic_id) = topic_id else {
+        eprintln!(
+            "seance ctl phone: could not parse topic_id from: {}",
+            open_json
+        );
+        return 1;
+    };
+
+    let reg_body = serde_json::json!({
+        "topic_id": topic_id,
+        "label": format!("seance:{pane}"),
+        "mode": "mailbox",
+        "ttl_hours": ttl_hours,
+        "note": format!("EXCLUSIVE claim: messages inject into seance pane {pane} via `seance ctl send {pane}`"),
+    });
+    let reg_out = run_vita_capability("vita.telegram.register_participant", &reg_body);
+    if let Err(e) = &reg_out {
+        eprintln!("seance ctl phone: register_participant warning: {e}");
+    }
+
+    // Persist binding next to scratchpad for bridge scripts / future GUI.
+    let bind_path = PathBuf::from(
+        shellexpand::tilde(&format!(
+            "~/.local/share/seance/scratch/{pane}.telegram.json"
+        ))
+        .into_owned(),
+    );
+    let bind = serde_json::json!({
+        "pane": pane,
+        "topic_id": topic_id,
+        "label": topic_label,
+        "ttl_hours": ttl_hours,
+        "created_ms": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    });
+    if let Ok(s) = serde_json::to_string_pretty(&bind) {
+        let _ = std::fs::write(&bind_path, s);
+    }
+
+    // Best-effort status line into the topic.
+    let _ = run_vita_capability(
+        "vita.telegram.send",
+        &serde_json::json!({
+            "topic_id": topic_id,
+            "text": format!(
+                "✦ seance pane `{pane}` linked.\nReplies here inject as tasks. Status updates land here when the agent needs you."
+            ),
+        }),
+    );
+
+    if json_out {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "pane": pane,
+                "topic_id": topic_id,
+                "label": topic_label,
+                "bind": bind_path.to_string_lossy(),
+            })
+        );
+    } else {
+        println!("phone {pane} topic={topic_id}");
+        println!("bind {}", bind_path.display());
+        eprintln!("tip: await replies with vita participant await; inject via `seance ctl send {pane} --file …`");
+    }
+    0
+}
+
+fn run_vita_capability(name: &str, input: &serde_json::Value) -> Result<String, String> {
+    let input_s = serde_json::to_string(input).map_err(|e| e.to_string())?;
+    // Prefer vita monorepo runner when present.
+    let vita_root = PathBuf::from(shellexpand::tilde("~/work/vita").into_owned());
+    let run_script = vita_root.join("run");
+    let mut cmd = if run_script.exists() {
+        let mut c = std::process::Command::new(&run_script);
+        c.current_dir(&vita_root);
+        c.args([
+            "capabilities",
+            "call",
+            name,
+            "--input",
+            &input_s,
+        ]);
+        c
+    } else {
+        let mut c = std::process::Command::new("vita");
+        c.args(["capabilities", "call", name, "--input", &input_s]);
+        c
+    };
+    let out = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("spawn: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        return Err(format!(
+            "exit {} — {err}{stdout}",
+            out.status.code().unwrap_or(-1)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `seance ctl export-session [--workspace WS] [--out PATH] [--title T]`
+fn run_export_session(args: Vec<String>, scope: Option<String>, json_out: bool) -> i32 {
+    let mut workspace = scope.clone();
+    let mut out: Option<PathBuf> = None;
+    let mut title = "seance session".to_string();
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--workspace" | "--ws" => workspace = it.next(),
+            "--out" | "-o" => out = it.next().map(PathBuf::from),
+            "--title" => title = it.next().unwrap_or(title),
+            "--help" | "-h" => {
+                println!(
+                    "export-session [--workspace WS] [--out PATH] [--title T]\n  \
+                     Write a scrubable offline HTML report (timeline + pads + roster)."
+                );
+                return 0;
+            }
+            other => {
+                eprintln!("seance ctl export-session: unexpected '{other}'");
+                return 1;
+            }
+        }
+    }
+    let path = out.unwrap_or_else(|| crate::export_html::default_out_path(workspace.as_deref()));
+    match crate::export_html::export_session(workspace.as_deref(), &path, &title) {
+        Ok(p) => {
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": true, "path": p.to_string_lossy()})
+                );
+            } else {
+                println!("exported {}", p.display());
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("seance ctl export-session: {e}");
+            1
+        }
+    }
+}
+
+/// `seance ctl prompts [query]` — list / filter precanned prompts.
+fn run_prompts(args: Vec<String>, json_out: bool) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "prompts [query]\n  List precanned prompts (builtins + ~/.config/seance/prompts.json).\n  \
+             GUI: ctrl+shift+k opens the palette."
+        );
+        return 0;
+    }
+    let _ = crate::prompts::ensure_user_file();
+    let q = args.join(" ");
+    let all = crate::prompts::load_all();
+    let hits = crate::prompts::filter(&all, &q);
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&hits).unwrap_or_else(|_| "[]".into()));
+    } else {
+        for p in &hits {
+            println!("{:<18} {}", p.id, p.title);
+        }
+        if hits.is_empty() {
+            println!("(no prompts match)");
+        }
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Minimal base64 (encode-only) — avoids adding a dependency for send-raw.
 // ---------------------------------------------------------------------------
 
@@ -2236,6 +2705,9 @@ seance ctl wait w-claude-4 w-grok-4 w-codex-4 --status done --cat
 - `roster`/`stage` · `brief` · `human` · `wait` · `watch` · `doctor`
 - `propose` (ghost cmd) · `ask` · `seize`/`release`/`drive`
 - `whoami` · `caps` · `policy` · `grant`/`revoke`
+- `phone` / `telegram-topic` — open vita telegram topic for a pane (seance↔vita)
+- `export-session` — scrubable HTML (timeline + pads)
+- `prompts [q]` — precanned prompt library
 
 Exit: 0 ok · 1 failed · 2 not reachable. Scope: `$SEANCE_WORKSPACE`; `--all` only if asked.
 
@@ -2293,6 +2765,9 @@ COMMANDS:
          --artifact PATH  --owner none  --ready  --any  --timeout S
     task|inbox [--id ID] [PANE]   durable inject body (default: self)
     doctor                        agent profiles + binary health
+    phone [PANE]                  vita telegram topic for pane (seance↔vita seam)
+    export-session [--workspace W] [--out PATH]   scrubable HTML report
+    prompts [query]               precanned prompt library
     skill                         full agent contract (paste into workers)
     help
 

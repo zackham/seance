@@ -234,6 +234,37 @@ pub fn command_line(profile: &AgentProfile) -> String {
     parts.join(" ")
 }
 
+/// Boot-dialog clear sequences after `--wait-ready` (raw PTY bytes).
+///
+/// Agents often present a first-run trust/update modal. Masters should not have
+/// to remember `send-raw $'\r'`. Each entry is raw bytes to inject with a short
+/// settle delay between them.
+pub fn boot_clear_sequence(profile_name: &str) -> Vec<Vec<u8>> {
+    match profile_name.to_ascii_lowercase().as_str() {
+        // Claude Code: "trust this folder?" → Enter accepts.
+        "claude" => vec![b"\r".to_vec()],
+        // Codex: update menu — option 2 is typically Skip.
+        "codex" => vec![b"2\r".to_vec()],
+        // Grok: usually no modal; trailing Enter can help multi-line inject later.
+        "grok" => vec![],
+        _ => vec![],
+    }
+}
+
+/// Guess profile name from a command line (for post-spawn boot clear).
+pub fn guess_profile_from_command(command: &str) -> Option<&'static str> {
+    let c = command.to_ascii_lowercase();
+    if c.contains("claude") {
+        Some("claude")
+    } else if c.contains("codex") {
+        Some("codex")
+    } else if c.contains("grok") {
+        Some("grok")
+    } else {
+        None
+    }
+}
+
 /// Doctor report for known agents.
 pub fn doctor() -> Vec<DoctorRow> {
     let names = ["claude", "grok", "codex", "shell"];

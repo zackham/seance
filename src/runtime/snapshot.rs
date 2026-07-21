@@ -161,6 +161,18 @@ pub struct GridSnapshot {
     /// Carried on JSON grid path; binary path also embeds it (SCG3 v2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_input_origin: Option<String>,
+    /// OSC-8 hyperlink spans on the visible screen (row/col are 0-based cell coords).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hyperlinks: Vec<HyperlinkSpan>,
+}
+
+/// One OSC-8 hyperlink region on the visible grid.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HyperlinkSpan {
+    pub row: u16,
+    pub col_start: u16,
+    pub col_end: u16,
+    pub uri: String,
 }
 
 impl GridSnapshot {
@@ -184,7 +196,16 @@ impl GridSnapshot {
             mouse_mode: false,
             sgr_mouse: false,
             last_input_origin: None,
+            hyperlinks: Vec::new(),
         }
+    }
+
+    /// URI under cell (row, col), if any.
+    pub fn hyperlink_at(&self, row: u16, col: u16) -> Option<&str> {
+        self.hyperlinks
+            .iter()
+            .find(|h| h.row == row && col >= h.col_start && col < h.col_end)
+            .map(|h| h.uri.as_str())
     }
 }
 
@@ -348,6 +369,20 @@ pub fn encode_grid_bin_ex(
         }
     }
 
+    // Trailing hyperlink table (optional; older GUIs ignore leftover bytes).
+    // Marker 0x48 'H' + u16 count + spans.
+    if !snap.hyperlinks.is_empty() {
+        out.push(b'H');
+        let n = (snap.hyperlinks.len().min(u16::MAX as usize)) as u16;
+        out.extend_from_slice(&n.to_le_bytes());
+        for h in snap.hyperlinks.iter().take(n as usize) {
+            out.extend_from_slice(&h.row.to_le_bytes());
+            out.extend_from_slice(&h.col_start.to_le_bytes());
+            out.extend_from_slice(&h.col_end.to_le_bytes());
+            write_str(&mut out, &h.uri)?;
+        }
+    }
+
     Ok(out)
 }
 
@@ -456,6 +491,42 @@ pub fn decode_grid_bin_onto(
         mouse_mode: flags & 8 != 0,
         sgr_mouse: flags & 16 != 0,
         last_input_origin: None,
+        hyperlinks: {
+            // Optional trailing 'H' + spans (new); fall back to base on damage
+            // frames that omit the table.
+            if !r.is_empty() && r.peek_u8() == Some(b'H') {
+                let _ = r.read_u8();
+                let n = r.read_u16().unwrap_or(0) as usize;
+                let mut links = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let row = match r.read_u16() {
+                        Ok(v) => v,
+                        Err(_) => break,
+                    };
+                    let col_start = match r.read_u16() {
+                        Ok(v) => v,
+                        Err(_) => break,
+                    };
+                    let col_end = match r.read_u16() {
+                        Ok(v) => v,
+                        Err(_) => break,
+                    };
+                    let uri = match r.read_string() {
+                        Ok(s) => s,
+                        Err(_) => break,
+                    };
+                    links.push(HyperlinkSpan {
+                        row,
+                        col_start,
+                        col_end,
+                        uri,
+                    });
+                }
+                links
+            } else {
+                base.map(|b| b.hyperlinks.clone()).unwrap_or_default()
+            }
+        },
     })
 }
 
@@ -569,6 +640,9 @@ impl<'a> Reader<'a> {
     fn is_empty(&self) -> bool {
         self.pos >= self.data.len()
     }
+    fn peek_u8(&self) -> Option<u8> {
+        self.data.get(self.pos).copied()
+    }
     fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], String> {
         if self.pos + n > self.data.len() {
             return Err("truncated".into());
@@ -648,6 +722,7 @@ mod bin_tests {
             mouse_mode: false,
             sgr_mouse: false,
             last_input_origin: None,
+            hyperlinks: vec![],
         }
     }
 
