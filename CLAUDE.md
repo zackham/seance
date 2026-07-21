@@ -89,3 +89,26 @@ session replay is **not** shipped (filed in vita working doc for later).
 - Atomic writes for state/scratch
 - Control plane: JSON lines; `from` / `scope` stamped by ctl
 - Theme: `SeancePalette` + `docs/THEME.md`
+
+## Changelog — keep it current
+
+Canonical user-facing history: **`CHANGELOG.md`** (repo root).
+
+**When to update:** every versioned ship (`Cargo.toml` bump + commit subject
+like `seance 0.9.N — …`). Same commit must:
+
+1. Bump `Cargo.toml` / `Cargo.lock` / README status line
+2. Move or write the release notes under `## [0.9.N] — YYYY-MM-DD` at the **top**
+   of `CHANGELOG.md` (Keep a Changelog sections: Added / Changed / Fixed /
+   Removed / Docs as needed)
+3. Clear or leave empty `## [Unreleased]`
+
+**During a long WIP session:** optional — park bullets under `[Unreleased]`
+so the next version bump is a cut-paste, not archaeology.
+
+**Do not** dump every commit. Prefer human-readable product deltas (hotkeys,
+ctl contracts, daemon behavior, intentional removals). Link deeper docs
+(`docs/HOST.md`, orchestration) instead of pasting them.
+
+**Do not** treat git log as the changelog. Agents and humans reading the repo
+should learn “what shipped” from `CHANGELOG.md` first.
