@@ -499,7 +499,51 @@ impl SeanceApp {
                 match decode_grid_b64(&data_b64, base_ref) {
                     Ok(snap) => self.apply_grid_snap(snap, cx),
                     Err(e) => {
-                        eprintln!("[seance gui] bad grid_bin for {pane}: {e}");
+                        // Size mismatch / missing base after upgrade or resize:
+                        // drop local base so the next FULL frame applies cleanly.
+                        // Rate-limit log + re-attach — reconnect used to spam.
+                        static LAST_RESYNC: std::sync::Mutex<Option<std::time::Instant>> =
+                            std::sync::Mutex::new(None);
+                        let now = std::time::Instant::now();
+                        let mut do_resync = true;
+                        if let Ok(mut g) = LAST_RESYNC.lock() {
+                            if let Some(t) = *g {
+                                if now.duration_since(t).as_millis() < 2000 {
+                                    do_resync = false;
+                                }
+                            }
+                            if do_resync {
+                                *g = Some(now);
+                            }
+                        }
+                        // Only touch the pane when we can guarantee a repair
+                        // frame. Blanking the base without a re-Attach would
+                        // leave an idle pane stuck empty until its next push;
+                        // when rate-limited we simply drop the bad frame and
+                        // keep the last-good grid until the in-flight FULL lands.
+                        if do_resync {
+                            eprintln!(
+                                "[seance gui] grid_bin resync for {pane}: {e} (cleared base; full reattach)"
+                            );
+                            if let Some(rt) = self
+                                .panes
+                                .iter()
+                                .find(|p| p.slug == pane)
+                                .and_then(|p| p.remote_terminal())
+                                .cloned()
+                            {
+                                rt.update(cx, |t, cx| {
+                                    t.snapshot = std::sync::Arc::new(
+                                        crate::runtime::snapshot::GridSnapshot::empty(&pane),
+                                    );
+                                    cx.notify();
+                                });
+                            }
+                            let _ = self.client.send(crate::runtime::protocol::GuiRequest::Attach {
+                                selected_workspace: self.selected_workspace.clone(),
+                                focused_pane: self.active_slug.clone(),
+                            });
+                        }
                     }
                 }
             }

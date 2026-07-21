@@ -757,6 +757,10 @@ impl Engine {
                 if focused_pane.is_some() {
                     self.focused_pane = focused_pane;
                 }
+                // GUI reconnect has no prior base — force FULL frames so we
+                // never send DAMAGE against a stale/missing GUI snapshot
+                // (post-upgrade "damage size mismatch" spam).
+                self.last_grid_cells.clear();
                 // Push full state + all grids
                 let state = self.full_state_event();
                 self.broadcast(state.clone());

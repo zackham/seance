@@ -351,8 +351,44 @@ fn serve_handoff_export(mut writer: UnixStream, engine: SharedEngine) -> Result<
     Ok(())
 }
 
+/// Serialize upgrades: only one `serve_upgrade_request` may run per daemon.
+/// Two racing requests would each spawn a new daemon, bind-race the handoff
+/// socket, and double-run `prepare_upgrade` — whichever exits first kills the
+/// other mid-handoff.
+static UPGRADE_SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Resets [`UPGRADE_SERVING`] on any early return from a failed upgrade so a
+/// later attempt can proceed. The happy path exits the process (skipping this
+/// drop) — fine, the successor daemon starts with a fresh flag.
+struct UpgradeGate;
+impl Drop for UpgradeGate {
+    fn drop(&mut self) {
+        UPGRADE_SERVING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 fn serve_upgrade_request(mut writer: UnixStream, engine: SharedEngine) -> Result<()> {
     eprintln!("[seance daemon] upgrade requested");
+    // Reject a concurrent upgrade rather than racing two teardowns.
+    if UPGRADE_SERVING
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        eprintln!("[seance daemon] upgrade rejected: another upgrade already in flight");
+        let _ = writeln!(
+            writer,
+            "{}",
+            serde_json::json!({"ok": false, "error": "upgrade already in progress"})
+        );
+        let _ = writer.flush();
+        return Ok(());
+    }
+    let _gate = UpgradeGate;
     let handoff_path = {
         let mut p = control::socket_path();
         p.set_extension("handoff.sock");
@@ -404,11 +440,22 @@ fn serve_upgrade_request(mut writer: UnixStream, engine: SharedEngine) -> Result
     // Send bundle JSON + SCM_RIGHTS.
     send_handoff(conn, &bundle, &fds)?;
 
-    let _ = writeln!(
-        writer,
-        "{}",
-        serde_json::json!({"ok": true, "pid": child.id()})
-    );
+    // Reply *before* tearing down the control socket so the client never
+    // races an unlink into EAGAIN/EOF on a half-closed stream.
+    //
+    // Best-effort on purpose: the handoff already happened and the new daemon
+    // is live, so we MUST fall through to teardown + exit even if the client
+    // vanished (e.g. Ctrl-C mid-upgrade → EPIPE). Bailing here would strand the
+    // old daemon holding the control socket while the new daemon can never bind.
+    {
+        let line = serde_json::json!({"ok": true, "pid": child.id()}).to_string();
+        if let Err(e) = writeln!(writer, "{line}") {
+            eprintln!("[seance daemon] upgrade: client write failed, tearing down anyway: {e}");
+        }
+        let _ = writer.flush();
+        // Half-close write so the client sees EOF after the line, not a hang.
+        let _ = writer.shutdown(std::net::Shutdown::Write);
+    }
 
     // Drop control socket FIRST so the new daemon can bind, then exit.
     // Children stay alive: prepare_upgrade already released master FDs
@@ -417,7 +464,7 @@ fn serve_upgrade_request(mut writer: UnixStream, engine: SharedEngine) -> Result
     let _ = std::fs::remove_file(&handoff_path);
     eprintln!("[seance daemon] upgrade complete, exiting old process");
     // Small delay so sendmsg flush / client response lands.
-    thread::sleep(Duration::from_millis(50));
+    thread::sleep(Duration::from_millis(80));
     std::process::exit(0);
 }
 
@@ -633,13 +680,59 @@ pub fn ensure_daemon() -> Result<bool> {
 pub fn request_upgrade() -> Result<()> {
     let mut stream = UnixStream::connect(control::socket_path())
         .context("connect to daemon for upgrade")?;
-    // Give the daemon time to do handoff (can take a second with many panes).
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
-    writeln!(stream, r#"{{"role":"upgrade"}}"#)?;
+    // Blocking + long timeout: handoff with many panes can take >30s, and a
+    // nonblocking socket races into EAGAIN (os error 11) on read_line.
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
+    writeln!(stream, r#"{{"role":"upgrade"}}"#).context("write upgrade hello")?;
+    let _ = stream.flush();
+
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    let n = reader.read_line(&mut line).context("read upgrade response")?;
+    // Retry Interrupted / WouldBlock — observed under load when the daemon is
+    // mid-handoff and the kernel returns EAGAIN despite SO_RCVTIMEO.
+    let n = {
+        let mut last_err = None;
+        let mut got = 0usize;
+        for attempt in 0..40 {
+            // Do NOT clear `line` between retries: read_line *appends*, so a
+            // partial line read before a WouldBlock/timeout is resumed on the
+            // next attempt rather than silently discarded (which would corrupt
+            // the JSON we parse below).
+            match reader.read_line(&mut line) {
+                Ok(n) => {
+                    got = n;
+                    last_err = None;
+                    break;
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::Interrupted
+                        || e.raw_os_error() == Some(11) /* EAGAIN */ =>
+                {
+                    last_err = Some(e);
+                    // First attempts: brief yield. Later: slightly longer.
+                    let ms = if attempt < 10 { 25 } else { 100 };
+                    thread::sleep(Duration::from_millis(ms));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    bail!(
+                        "upgrade timed out waiting for daemon reply \
+                         (check ~/.local/share/seance/daemon-upgrade.log)"
+                    );
+                }
+                Err(e) => return Err(e).context("read upgrade response"),
+            }
+        }
+        if let Some(e) = last_err {
+            return Err(e).context(
+                "read upgrade response: still WouldBlock/EAGAIN after retries \
+                 (daemon busy or upgrade already in flight? check daemon-upgrade.log)",
+            );
+        }
+        got
+    };
     if n == 0 {
         bail!(
             "daemon closed upgrade connection without reply \
@@ -656,12 +749,14 @@ pub fn request_upgrade() -> Result<()> {
             .unwrap_or("unknown upgrade failure");
         bail!("{err}");
     }
-    // Wait for new daemon to bind the control socket.
-    for _ in 0..50 {
+    // Wait for new daemon to bind the control socket (handoff can lag).
+    for _ in 0..100 {
         if UnixStream::connect(control::socket_path()).is_ok() {
+            // Brief settle so first ctl/GUI attach doesn't race empty accept.
+            thread::sleep(Duration::from_millis(50));
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(40));
+        thread::sleep(Duration::from_millis(50));
     }
     bail!("upgraded daemon did not become ready on control socket");
 }

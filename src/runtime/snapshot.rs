@@ -443,13 +443,21 @@ pub fn decode_grid_bin_onto(
     };
 
     let expect = cols as usize * rows as usize;
+    // A non-legacy FULL frame carries the complete hyperlink table (the
+    // encoder omits it only when there are *no* links). So a full frame with
+    // no trailing 'H' means the pane has no hyperlinks — do NOT inherit stale
+    // ones from base. DAMAGE (and legacy) frames still fall back to base.
+    let mut full_authoritative_links = false;
     let cells = if legacy {
         // SCG2: implicit full RLE of all cells
         read_rle_n(&mut r, expect)?
     } else {
         let kind = r.read_u8()?;
         match kind {
-            FRAME_FULL => read_rle_n(&mut r, expect)?,
+            FRAME_FULL => {
+                full_authoritative_links = true;
+                read_rle_n(&mut r, expect)?
+            }
             FRAME_DAMAGE => {
                 let base = base.ok_or_else(|| "damage frame without base".to_string())?;
                 if base.cols != cols || base.rows != rows || base.cells.len() != expect {
@@ -523,6 +531,9 @@ pub fn decode_grid_bin_onto(
                     });
                 }
                 links
+            } else if full_authoritative_links {
+                // Full frame, no table => authoritatively empty.
+                Vec::new()
             } else {
                 base.map(|b| b.hyperlinks.clone()).unwrap_or_default()
             }
@@ -752,6 +763,62 @@ mod bin_tests {
         assert_eq!(d.cells, b.cells);
         assert_eq!(d.cursor_col, 9);
         assert_eq!(d.rev, 43);
+    }
+
+    #[test]
+    fn full_frame_clears_stale_hyperlinks() {
+        // Base has a link; the new full frame has none. A FULL frame must be
+        // authoritative and NOT resurrect the base's stale link.
+        let mut base = sample();
+        base.hyperlinks = vec![HyperlinkSpan {
+            row: 0,
+            col_start: 0,
+            col_end: 3,
+            uri: "https://example.com".into(),
+        }];
+        let mut next = sample();
+        next.rev = 43;
+        next.hyperlinks = vec![];
+        let bin = encode_grid_bin(&next).unwrap();
+        let d = decode_grid_bin_onto(&bin, Some(&base)).unwrap();
+        assert!(
+            d.hyperlinks.is_empty(),
+            "full frame should clear stale links, got {:?}",
+            d.hyperlinks
+        );
+    }
+
+    #[test]
+    fn damage_frame_inherits_hyperlinks() {
+        // A damage frame omits the link table => inherit base's links.
+        let mut base = sample();
+        base.hyperlinks = vec![HyperlinkSpan {
+            row: 0,
+            col_start: 0,
+            col_end: 3,
+            uri: "https://example.com".into(),
+        }];
+        let mut next = base.clone();
+        next.rev = 43;
+        next.cells[80].c = 'X';
+        let dirty = dirty_rows(&base.cells, &next.cells, 80, 3);
+        let bin = encode_grid_bin_ex(&next, Some(&dirty)).unwrap();
+        let d = decode_grid_bin_onto(&bin, Some(&base)).unwrap();
+        assert_eq!(d.hyperlinks, base.hyperlinks, "damage should inherit links");
+    }
+
+    #[test]
+    fn full_frame_roundtrips_hyperlinks() {
+        let mut s = sample();
+        s.hyperlinks = vec![HyperlinkSpan {
+            row: 1,
+            col_start: 2,
+            col_end: 9,
+            uri: "https://seance.example/x".into(),
+        }];
+        let bin = encode_grid_bin(&s).unwrap();
+        let d = decode_grid_bin(&bin).unwrap();
+        assert_eq!(d.hyperlinks, s.hyperlinks);
     }
 
     #[test]
