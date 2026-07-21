@@ -116,6 +116,12 @@ pub struct AppState {
     /// 2-pane horizontal split ratio (0.2–0.8). Default 0.5.
     #[serde(default = "default_split_ratio")]
     pub split_ratio: f32,
+    /// Per-pane flex weights for multi-pane tile resize (slug → weight ≥ 0.15).
+    #[serde(default)]
+    pub pane_weights: Vec<(String, f32)>,
+    /// Shell command log (cold restore).
+    #[serde(default)]
+    pub cmd_log: crate::cmdlog::CommandLog,
 }
 
 fn default_split_ratio() -> f32 {
@@ -453,6 +459,8 @@ mod tests {
             task_counter: 0,
             active_tasks: vec![],
             split_ratio: 0.5,
+            pane_weights: vec![],
+            cmd_log: crate::cmdlog::CommandLog::new(),
         };
 
         state.save().expect("save should succeed");

@@ -341,6 +341,9 @@ pub struct HandoffBundle {
     /// pane slug → active task id
     #[serde(default)]
     pub active_tasks: Vec<(String, String)>,
+    /// Shell command log (0.9.11 — survive upgrade).
+    #[serde(default)]
+    pub cmd_log: crate::cmdlog::CommandLog,
 }
 
 /// Re-export control types for daemon routing.

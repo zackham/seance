@@ -121,7 +121,7 @@ impl Engine {
             extra_workspaces: state.extra_workspaces.clone(),
             workspace_order: state.workspace_order.clone(),
             store,
-            cmd_log: CommandLog::new(),
+            cmd_log: state.cmd_log.clone(),
             asks: Vec::new(),
             statuses: HashMap::new(),
             pad_revs: HashMap::new(),
@@ -205,7 +205,7 @@ impl Engine {
             extra_workspaces: bundle.extra_workspaces,
             workspace_order: bundle.workspace_order,
             store,
-            cmd_log: CommandLog::new(),
+            cmd_log: bundle.cmd_log.clone(),
             asks: bundle
                 .asks
                 .into_iter()
@@ -1468,6 +1468,8 @@ impl Engine {
                 .collect(),
             // GUI-local for now; default keeps layout sane on cold restore.
             split_ratio: 0.5,
+            pane_weights: vec![],
+            cmd_log: self.cmd_log.clone(),
         };
         let _ = state.save();
     }
@@ -2022,6 +2024,7 @@ impl Engine {
                 };
                 let cwd = cwd.unwrap_or_default();
                 let seq = self.cmd_log.begin(&pane, command.clone(), cwd.clone());
+                self.persist();
                 let span = format!("cmd:{pane}:{seq}");
                 events::log_ex(
                     &format!("agent:{pane}"),
@@ -2041,7 +2044,30 @@ impl Engine {
                 let Some(pane) = from else {
                     return err("cmd-end: must run inside a pane".into());
                 };
-                self.cmd_log.end(&pane, exit);
+                let closed = self.cmd_log.end(&pane, exit);
+                // Shell turn-end → idle only when:
+                //   (1) a real open cmd record closed (not a stray cmd-end),
+                //   (2) no inject task is still open (don't clobber agent working),
+                //   (3) status was working/planning.
+                // Agent CLIs don't source seance.bash; forged ctl cmd-end from an
+                // agent pane with an open task is ignored for status.
+                if closed
+                    && !self.active_tasks.contains_key(&pane)
+                    && matches!(
+                        self.statuses.get(&pane).map(|(s, _)| s.as_str()),
+                        Some("working" | "planning")
+                    )
+                {
+                    self.statuses
+                        .insert(pane.clone(), ("idle".into(), Some(format!("cmd exit {exit}"))));
+                    self.broadcast(GuiEvent::Status {
+                        slug: pane.clone(),
+                        state: "idle".into(),
+                        note: Some(format!("cmd exit {exit}")),
+                    });
+                }
+                // Throttle-persist cmdlog so export-from-disk sees recent cmds.
+                self.persist();
                 let (detail, span) = match self.cmd_log.last(&pane, false) {
                     Some(rec) => (
                         format!(
@@ -2770,6 +2796,7 @@ impl Engine {
             tasks,
             task_counter: self.task_counter,
             active_tasks,
+            cmd_log: self.cmd_log.clone(),
         };
         Ok((bundle, fds))
     }

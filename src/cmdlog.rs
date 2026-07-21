@@ -90,17 +90,23 @@ impl CommandRecord {
 /// log). Each pane gets an independent `VecDeque` capped at [`CAP_PER_PANE`] and
 /// its own monotonic `seq` counter (kept implicitly via the largest `seq` seen,
 /// so it never rewinds even after eviction empties the ring).
-#[derive(Default)]
+///
+/// Serde shape is used for daemon handoff + cold `state.json` so shell
+/// command history survives `seance upgrade` (0.9.11+).
+#[derive(Default, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CommandLog {
+    #[serde(default)]
     panes: HashMap<String, PaneLog>,
 }
 
 /// One pane's ring plus its next-seq counter.
-#[derive(Default)]
+#[derive(Default, Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct PaneLog {
+    #[serde(default)]
     records: VecDeque<CommandRecord>,
     /// The last `seq` we handed out. Next `begin` uses `next_seq + 1`. Kept
     /// separate from the ring so eviction can't rewind the counter.
+    #[serde(default)]
     next_seq: u64,
 }
 
@@ -141,23 +147,28 @@ impl CommandLog {
     }
 
     /// Close the most recent still-open record for `pane` at `ended_ms`,
-    /// recording `exit`. No-op if the pane is unknown or has no open record.
-    pub fn end_at(&mut self, pane: &str, exit: i32, ended_ms: u64) {
+    /// recording `exit`. Returns `true` if a record was closed; `false` if the
+    /// pane is unknown or had no open record (stray end).
+    pub fn end_at(&mut self, pane: &str, exit: i32, ended_ms: u64) -> bool {
         let Some(log) = self.panes.get_mut(pane) else {
-            return;
+            return false;
         };
         // Most recent open record = last record whose ended_ms is None. Scan
         // from the back; the common case hits on the first element.
         if let Some(rec) = log.records.iter_mut().rev().find(|r| r.ended_ms.is_none()) {
             rec.ended_ms = Some(ended_ms);
             rec.exit = Some(exit);
+            true
+        } else {
+            // A stray end (no open record) is deliberately ignored — see module docs.
+            false
         }
-        // A stray end (no open record) is deliberately ignored — see module docs.
     }
 
     /// Close the most recent open record for `pane`, stamping the current clock.
-    pub fn end(&mut self, pane: &str, exit: i32) {
-        self.end_at(pane, exit, now_ms());
+    /// Returns whether a record was closed.
+    pub fn end(&mut self, pane: &str, exit: i32) -> bool {
+        self.end_at(pane, exit, now_ms())
     }
 
     /// The most recent `limit` records for `pane`, oldest-first (the natural
@@ -189,6 +200,16 @@ impl CommandLog {
     pub fn remove_pane(&mut self, pane: &str) {
         self.panes.remove(pane);
     }
+
+    /// All pane slugs that have at least one record (for export / handoff).
+    pub fn pane_slugs(&self) -> Vec<String> {
+        self.panes.keys().cloned().collect()
+    }
+
+    /// Total record count across all panes.
+    pub fn total_records(&self) -> usize {
+        self.panes.values().map(|p| p.records.len()).sum()
+    }
 }
 
 /// Current wall clock in unix epoch millis (0 on the impossible clock error).
@@ -218,7 +239,7 @@ mod tests {
     fn end_closes_most_recent_open_record() {
         let mut log = CommandLog::new();
         log.begin_at("p", "make".into(), "/w".into(), 1_000);
-        log.end_at("p", 0, 1_500);
+        assert!(log.end_at("p", 0, 1_500));
 
         let rec = log.last("p", false).unwrap();
         assert_eq!(rec.exit, Some(0));
@@ -232,7 +253,7 @@ mod tests {
     fn end_records_nonzero_exit_as_failed() {
         let mut log = CommandLog::new();
         log.begin("p", "false".into(), "/w".into());
-        log.end("p", 1);
+        assert!(log.end("p", 1));
         let rec = log.last("p", false).unwrap();
         assert_eq!(rec.exit, Some(1));
         assert!(rec.is_failed());
@@ -242,7 +263,7 @@ mod tests {
     fn end_with_no_open_record_is_noop() {
         let mut log = CommandLog::new();
         // Prompt hook fired before any command ran: no panic, no phantom record.
-        log.end("p", 0);
+        assert!(!log.end("p", 0));
         assert!(log.last("p", false).is_none());
         assert!(log.list("p", 10).is_empty());
     }

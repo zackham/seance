@@ -134,6 +134,50 @@ fn tip(text: &'static str) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyV
     move |window, cx| gpui_component::tooltip::Tooltip::new(text).build(window, cx)
 }
 
+fn layout_file_path() -> PathBuf {
+    PathBuf::from(shellexpand::tilde("~/.local/share/seance/layout.json").into_owned())
+}
+
+fn load_layout_file() -> (f32, std::collections::HashMap<String, f32>) {
+    let Ok(bytes) = std::fs::read_to_string(layout_file_path()) else {
+        return (0.5, std::collections::HashMap::new());
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes) else {
+        return (0.5, std::collections::HashMap::new());
+    };
+    let split = v
+        .get("split_ratio")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.5) as f32;
+    let mut weights = std::collections::HashMap::new();
+    if let Some(obj) = v.get("weights").and_then(|w| w.as_object()) {
+        for (k, val) in obj {
+            if let Some(f) = val.as_f64() {
+                weights.insert(k.clone(), f as f32);
+            }
+        }
+    }
+    (split.clamp(0.2, 0.8), weights)
+}
+
+fn save_layout_file(split_ratio: f32, weights: &std::collections::HashMap<String, f32>) {
+    let mut wmap = serde_json::Map::new();
+    for (k, v) in weights {
+        wmap.insert(k.clone(), serde_json::json!(*v));
+    }
+    let v = serde_json::json!({
+        "split_ratio": split_ratio,
+        "weights": wmap,
+    });
+    if let Ok(s) = serde_json::to_string_pretty(&v) {
+        let path = layout_file_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, s);
+    }
+}
+
 fn ui_debug(msg: &str) {
     if std::env::var("SEANCE_DEBUG_UI").is_ok() {
         eprintln!("[seance:ui] {msg}");
@@ -340,8 +384,27 @@ pub struct SeanceApp {
     palette: PaletteMode,
     /// Horizontal split ratio for 2-pane layout (0.2–0.8). Used when n==2.
     split_ratio: f32,
-    /// Dragging the 2-pane sash.
-    sash_drag: Option<f32>,
+    /// Per-pane flex weights for n>2 tile resize (slug → weight).
+    pane_weights: std::collections::HashMap<String, f32>,
+    /// Dragging sash: (left_slug, right_slug) for multi-pane, or 2-pane marker.
+    sash_drag: Option<SashDrag>,
+    /// Pad drawer live-refresh generation (bumped on timer / events).
+    pad_refresh_tick: u64,
+}
+
+/// Active sash drag state.
+#[derive(Clone)]
+enum SashDrag {
+    /// Classic 2-pane ratio drag.
+    TwoPane { start_x: f32 },
+    /// Adjacent panes in a multi-pane row.
+    Pair {
+        left: String,
+        right: String,
+        start_x: f32,
+        left_w: f32,
+        right_w: f32,
+    },
 }
 
 impl SeanceApp {
@@ -379,9 +442,14 @@ impl SeanceApp {
             zoomed_slug: None,
             palette: PaletteMode::Closed,
             split_ratio: 0.5,
+            pane_weights: std::collections::HashMap::new(),
             sash_drag: None,
+            pad_refresh_tick: 0,
         };
         let _ = crate::prompts::ensure_user_file();
+        let (split, weights) = load_layout_file();
+        app.split_ratio = split;
+        app.pane_weights = weights;
 
         // Bridge: std thread blocks on daemon events → unbounded mpsc → gpui task.
         let (async_tx, mut async_rx) = futures::channel::mpsc::unbounded::<GuiEvent>();
@@ -402,6 +470,23 @@ impl SeanceApp {
                 let Some(this) = this.upgrade() else { break };
                 this.update(cx, |app: &mut SeanceApp, cx| {
                     app.apply_gui_event_no_window(ev, cx);
+                });
+            }
+        })
+        .detach();
+
+        // Live-refresh pad drawer every 2s while open (disk mtime/content).
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(2000))
+                    .await;
+                let Some(this) = this.upgrade() else { break };
+                this.update(cx, |app: &mut SeanceApp, cx| {
+                    if matches!(app.drawer, Drawer::Pad { .. }) {
+                        app.pad_refresh_tick = app.pad_refresh_tick.wrapping_add(1);
+                        cx.notify();
+                    }
                 });
             }
         })
@@ -612,6 +697,9 @@ impl SeanceApp {
                     telegram_status_bridge(&slug, &state, note.as_deref());
                 }
                 self.statuses.insert(slug, PaneStatus { state, note });
+                if matches!(self.drawer, Drawer::Pad { .. }) {
+                    self.pad_refresh_tick = self.pad_refresh_tick.wrapping_add(1);
+                }
                 cx.notify();
             }
             GuiEvent::Touch { slug, verb, actor } => {
@@ -1959,7 +2047,11 @@ impl SeanceApp {
                     format!("{} · {state}", pane.name)
                 } else {
                     let n = if note.len() > 28 {
-                        format!("{}…", &note[..28])
+                        let mut end = 28;
+                        while end > 0 && !note.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}…", &note[..end])
                     } else {
                         note.to_string()
                     };
@@ -2027,25 +2119,40 @@ impl SeanceApp {
         )).into_owned())
     }
 
-    fn phone_linked(slug: &str) -> Option<String> {
+    fn phone_bind_json(slug: &str) -> Option<serde_json::Value> {
         let p = Self::phone_bind_path(slug);
-        let Ok(bytes) = std::fs::read_to_string(&p) else {
-            return None;
-        };
-        serde_json::from_str::<serde_json::Value>(&bytes)
-            .ok()
-            .and_then(|v| {
-                v.get("topic_id")
-                    .and_then(|t| t.as_str())
-                    .map(|s| s.to_string())
-            })
+        let bytes = std::fs::read_to_string(&p).ok()?;
+        serde_json::from_str(&bytes).ok()
+    }
+
+    fn phone_linked(slug: &str) -> Option<String> {
+        Self::phone_bind_json(slug).and_then(|v| {
+            v.get("topic_id")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
+    }
+
+    fn phone_link(slug: &str) -> Option<String> {
+        Self::phone_bind_json(slug).and_then(|v| {
+            v.get("link")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
     }
 
     /// One-button telegram topic for a pane (shells `seance ctl phone`).
     fn phone_pane(&mut self, slug: &str, cx: &mut Context<Self>) {
         let slug = slug.to_string();
-        // If already linked, just open pad drawer so the human sees the bind.
+        // If already linked, open telegram if we have a link + pad drawer.
         if let Some(tid) = Self::phone_linked(&slug) {
+            if let Some(link) = Self::phone_link(&slug) {
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(&link)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
             crate::desktop_notify::notify(
                 "seance · already phoned",
                 &format!("{slug} → topic {tid}"),
@@ -2053,35 +2160,60 @@ impl SeanceApp {
             self.open_pad_drawer(&slug, cx);
             return;
         }
-        let out = std::process::Command::new("seance")
-            .args(["ctl", "phone", &slug])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                let topic = Self::phone_linked(&slug).unwrap_or_else(|| stdout.trim().to_string());
-                crate::desktop_notify::notify("seance · phone linked", &format!("{slug} → {topic}"));
-                self.open_pad_drawer(&slug, cx);
-            }
-            Ok(o) => {
-                let err = String::from_utf8_lossy(&o.stderr);
-                crate::desktop_notify::notify(
-                    "seance · phone failed",
-                    if err.trim().is_empty() {
-                        "ctl phone failed (is vita up?)"
-                    } else {
-                        err.trim()
-                    },
-                );
-            }
-            Err(e) => {
-                crate::desktop_notify::notify("seance · phone failed", &format!("{e}"));
-            }
-        }
-        cx.notify();
+        // Off UI thread — vita open_topic can take seconds.
+        let slug_bg = slug.clone();
+        cx.spawn(async move |this, cx| {
+            let out = cx
+                .background_executor()
+                .spawn(async move {
+                    std::process::Command::new("seance")
+                        .args(["ctl", "phone", &slug_bg])
+                        .output()
+                })
+                .await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |app, cx| {
+                match out {
+                    Ok(o) if o.status.success() => {
+                        let topic = Self::phone_linked(&slug)
+                            .unwrap_or_else(|| String::from_utf8_lossy(&o.stdout).trim().to_string());
+                        if let Some(link) = Self::phone_link(&slug) {
+                            let _ = std::process::Command::new("xdg-open")
+                                .arg(&link)
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn();
+                        }
+                        crate::desktop_notify::notify(
+                            "seance · phone linked",
+                            &format!("{slug} → {topic}"),
+                        );
+                        app.open_pad_drawer(&slug, cx);
+                    }
+                    Ok(o) => {
+                        let err = String::from_utf8_lossy(&o.stderr);
+                        crate::desktop_notify::notify(
+                            "seance · phone failed",
+                            if err.trim().is_empty() {
+                                "ctl phone failed (is vita up?)"
+                            } else {
+                                err.trim()
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        crate::desktop_notify::notify("seance · phone failed", &format!("{e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn render_pad_drawer(&self, slug: &str, cx: &Context<Self>) -> impl IntoElement {
+        // Include tick so GPUI re-renders when pad_refresh_tick advances.
+        let _tick = self.pad_refresh_tick;
         let _ = cx;
         let name = self
             .panes
@@ -2126,12 +2258,15 @@ impl SeanceApp {
         let task_display = if task_body.trim().is_empty() {
             "(no active/recent inject body)".to_string()
         } else {
-            let t = if task_body.len() > 2500 {
-                format!("{}…", &task_body[..2500])
+            if task_body.len() > 2500 {
+                let mut end = 2500;
+                while end > 0 && !task_body.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…", &task_body[..end])
             } else {
                 task_body
-            };
-            t
+            }
         };
 
         let slug_phone = slug.to_string();
@@ -2694,7 +2829,9 @@ impl SeanceApp {
                         .on_mouse_down(
                             gpui::MouseButton::Left,
                             cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| {
-                                this.sash_drag = Some(ev.position.x.into());
+                                this.sash_drag = Some(SashDrag::TwoPane {
+                                    start_x: ev.position.x.into(),
+                                });
                                 cx.notify();
                             }),
                         ),
@@ -2721,14 +2858,10 @@ impl SeanceApp {
                 .into_any_element();
         }
 
-        // Balanced auto-grid: cols = ceil(sqrt(n)).
+        // Weighted auto-grid with inter-pane sashes (n≠2, or zoomed single).
         let cols = (n as f32).sqrt().ceil() as usize;
         let rows = n.div_ceil(cols);
 
-        // min_w_0 / overflow_hidden on every flex level so panes can shrink
-        // with the window. Without that, flex items default to min-content
-        // (terminal grid / markdown line length) and the tile region refuses
-        // to narrow — content spills off-screen instead of reflowing.
         let mut grid = div()
             .flex_1()
             .h_full()
@@ -2738,10 +2871,19 @@ impl SeanceApp {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_0()
             .p_1();
         let mut it = tiled.into_iter();
         for _ in 0..rows {
+            let mut row_panes: Vec<&Pane> = Vec::new();
+            for _ in 0..cols {
+                if let Some(pane) = it.next() {
+                    row_panes.push(pane);
+                }
+            }
+            if row_panes.is_empty() {
+                continue;
+            }
             let mut row = div()
                 .flex_1()
                 .min_h_0()
@@ -2749,34 +2891,81 @@ impl SeanceApp {
                 .w_full()
                 .overflow_hidden()
                 .flex()
-                .gap_1();
-            for _ in 0..cols {
-                if let Some(pane) = it.next() {
-                    let whisper = self
-                        .whisper
-                        .as_ref()
-                        .filter(|(ws, _)| *ws == pane.slug)
-                        .map(|(_, i)| i);
-                    let flipped = self
-                        .flipped
-                        .as_ref()
-                        .filter(|(ws, _)| *ws == pane.slug)
-                        .map(|(_, d)| d);
-                    row = row.child(render_pane(
-                        pane,
-                        active.as_deref(),
-                        self.statuses.get(&pane.slug),
-                        self.owners.get(&pane.slug),
-                        self.touches.get(&pane.slug),
-                        whisper,
-                        flipped,
-                        cx,
-                    ));
+                .flex_row()
+                .gap_0();
+            for (i, pane) in row_panes.iter().enumerate() {
+                let w = self
+                    .pane_weights
+                    .get(&pane.slug)
+                    .copied()
+                    .unwrap_or(1.0)
+                    .max(0.15);
+                let whisper = self
+                    .whisper
+                    .as_ref()
+                    .filter(|(ws, _)| *ws == pane.slug)
+                    .map(|(_, i)| i);
+                let flipped = self
+                    .flipped
+                    .as_ref()
+                    .filter(|(ws, _)| *ws == pane.slug)
+                    .map(|(_, d)| d);
+                row = row.child(
+                    div()
+                        .h_full()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .flex()
+                        .flex_grow(w)
+                        .child(render_pane(
+                            pane,
+                            active.as_deref(),
+                            self.statuses.get(&pane.slug),
+                            self.owners.get(&pane.slug),
+                            self.touches.get(&pane.slug),
+                            whisper,
+                            flipped,
+                            cx,
+                        )),
+                );
+                if i + 1 < row_panes.len() {
+                    let left = pane.slug.clone();
+                    let right = row_panes[i + 1].slug.clone();
+                    let left_w = self.pane_weights.get(&left).copied().unwrap_or(1.0);
+                    let right_w = self.pane_weights.get(&right).copied().unwrap_or(1.0);
+                    row = row.child(
+                        div()
+                            .id(SharedString::from(format!("sash-{left}-{right}")))
+                            .flex_none()
+                            .w(px(5.))
+                            .h_full()
+                            .cursor_col_resize()
+                            .bg(SeancePalette::border())
+                            .hover(|s| s.bg(SeancePalette::flame_dim()))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                                    this.sash_drag = Some(SashDrag::Pair {
+                                        left: left.clone(),
+                                        right: right.clone(),
+                                        start_x: ev.position.x.into(),
+                                        left_w,
+                                        right_w,
+                                    });
+                                    cx.notify();
+                                }),
+                            ),
+                    );
                 }
             }
             grid = grid.child(row);
         }
         grid.into_any_element()
+    }
+
+    fn weight_of(&self, slug: &str) -> f32 {
+        self.pane_weights.get(slug).copied().unwrap_or(1.0).max(0.15)
     }
 }
 
@@ -3825,24 +4014,47 @@ impl Render for SeanceApp {
                 );
             }))
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
-                if this.sash_drag.is_some() {
-                    // Rough: map x within main column to split ratio.
-                    let bounds = window.bounds();
-                    let x: f32 = ev.position.x.into();
-                    let w: f32 = bounds.size.width.into();
-                    // Sidebar ~232px; clamp ratio of remaining width.
-                    let main_left = 232.0;
-                    let main_w = (w - main_left).max(100.0);
-                    let ratio = ((x - main_left) / main_w).clamp(0.2, 0.8);
-                    this.split_ratio = ratio;
-                    cx.notify();
+                let Some(drag) = this.sash_drag.clone() else {
+                    return;
+                };
+                let bounds = window.bounds();
+                let x: f32 = ev.position.x.into();
+                let w: f32 = bounds.size.width.into();
+                let main_left = 232.0;
+                let main_w = (w - main_left).max(100.0);
+                match drag {
+                    SashDrag::TwoPane { .. } => {
+                        let ratio = ((x - main_left) / main_w).clamp(0.2, 0.8);
+                        this.split_ratio = ratio;
+                    }
+                    SashDrag::Pair {
+                        left,
+                        right,
+                        start_x,
+                        left_w,
+                        right_w,
+                    } => {
+                        // Delta as fraction of main width → rebalance pair weights.
+                        let dx = (x - start_x) / main_w;
+                        let sum = (left_w + right_w).max(0.3);
+                        let mut nl = (left_w + dx * sum).clamp(0.15, sum - 0.15);
+                        let mut nr = sum - nl;
+                        if nr < 0.15 {
+                            nr = 0.15;
+                            nl = sum - nr;
+                        }
+                        this.pane_weights.insert(left, nl);
+                        this.pane_weights.insert(right, nr);
+                    }
                 }
+                cx.notify();
             }))
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     if this.sash_drag.is_some() {
                         this.sash_drag = None;
+                        save_layout_file(this.split_ratio, &this.pane_weights);
                         cx.notify();
                     }
                 }),

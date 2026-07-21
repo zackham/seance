@@ -2459,9 +2459,17 @@ fn run_phone(
         ))
         .into_owned(),
     );
+    let link = open_json
+        .pointer("/link")
+        .or_else(|| open_json.pointer("/data/link"))
+        .or_else(|| open_json.get("link"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("https://t.me/c/3864532297/{topic_id}"));
     let bind = serde_json::json!({
         "pane": pane,
         "topic_id": topic_id,
+        "link": link,
         "label": topic_label,
         "ttl_hours": ttl_hours,
         "created_ms": std::time::SystemTime::now()
@@ -2540,21 +2548,33 @@ fn run_vita_capability(name: &str, input: &serde_json::Value) -> Result<String, 
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// `seance ctl export-session [--workspace WS] [--out PATH] [--title T]`
+/// `seance ctl export-session [--workspace WS] [--out PATH] [--title T] [--share] [--pin N] [--open] [--redact]`
 fn run_export_session(args: Vec<String>, scope: Option<String>, json_out: bool) -> i32 {
-    let mut workspace = scope.clone();
-    let mut out: Option<PathBuf> = None;
-    let mut title = "seance session".to_string();
+    let mut opts = crate::export_html::ExportOpts {
+        workspace: scope.clone(),
+        ..Default::default()
+    };
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--workspace" | "--ws" => workspace = it.next(),
-            "--out" | "-o" => out = it.next().map(PathBuf::from),
-            "--title" => title = it.next().unwrap_or(title),
+            "--workspace" | "--ws" => opts.workspace = it.next(),
+            "--out" | "-o" => opts.out = it.next().map(PathBuf::from),
+            "--title" => opts.title = it.next().unwrap_or(opts.title),
+            "--share" => opts.share = true,
+            "--pin" => opts.pin = it.next(),
+            "--open" => opts.open = true,
+            "--redact" | "--redact-paths" => opts.redact_paths = true,
             "--help" | "-h" => {
                 println!(
-                    "export-session [--workspace WS] [--out PATH] [--title T]\n  \
-                     Write a scrubable offline HTML report (timeline + pads + roster)."
+                    "export-session [opts]\n  \
+                     --workspace WS   limit to workspace (default: $SEANCE_WORKSPACE)\n  \
+                     --out PATH       output HTML (default: ~/.local/share/seance/exports/)\n  \
+                     --title T        document title\n  \
+                     --redact         scrub /home/$USER paths for teaching shares\n  \
+                     --share          publish via vita-reports (~/work/vita)\n  \
+                     --pin N          PIN-gate the share (with --share)\n  \
+                     --open           xdg-open the HTML after write\n  \
+                     Offline scrubber v1: events JSON + virtual timeline + pads/tasks/cmdlog."
                 );
                 return 0;
             }
@@ -2564,16 +2584,32 @@ fn run_export_session(args: Vec<String>, scope: Option<String>, json_out: bool) 
             }
         }
     }
-    let path = out.unwrap_or_else(|| crate::export_html::default_out_path(workspace.as_deref()));
-    match crate::export_html::export_session(workspace.as_deref(), &path, &title) {
-        Ok(p) => {
+    match crate::export_html::export_with_opts(opts) {
+        Ok(r) => {
             if json_out {
                 println!(
                     "{}",
-                    serde_json::json!({"ok": true, "path": p.to_string_lossy()})
+                    serde_json::json!({
+                        "ok": true,
+                        "path": r.path.to_string_lossy(),
+                        "html_bytes": r.meta.html_bytes,
+                        "gen_ms": r.meta.gen_ms,
+                        "event_count": r.meta.event_count,
+                        "events_sampled": r.meta.events_sampled,
+                        "share_url": r.share_url,
+                    })
                 );
             } else {
-                println!("exported {}", p.display());
+                println!(
+                    "exported {} ({} events, {} bytes, {}ms)",
+                    r.path.display(),
+                    r.meta.event_count,
+                    r.meta.html_bytes,
+                    r.meta.gen_ms
+                );
+                if let Some(url) = r.share_url {
+                    println!("share {url}");
+                }
             }
             0
         }
