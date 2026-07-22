@@ -767,7 +767,16 @@ impl Engine {
                     }
                 }
                 // Per-window focus — empty windows stay unselected.
-                let default_sel = self.workspaces_for_window(window_id).first().cloned();
+                // Prefer the engine's last selection (survives Bye / restart-gui)
+                // when still owned by this window; else first owned circle.
+                let owned_now = self.workspaces_for_window(window_id);
+                let remembered_sel = self
+                    .selected_workspace
+                    .clone()
+                    .filter(|s| owned_now.iter().any(|o| o == s));
+                let default_sel = remembered_sel
+                    .clone()
+                    .or_else(|| owned_now.first().cloned());
                 if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
                     if empty && !sole {
                         c.selected_workspace = None;
@@ -780,11 +789,25 @@ impl Engine {
                         } else if c.selected_workspace.is_none() {
                             c.selected_workspace = default_sel.clone();
                         }
-                    } else if c.selected_workspace.is_none() {
-                        c.selected_workspace = default_sel;
+                    } else if c
+                        .selected_workspace
+                        .as_ref()
+                        .map_or(true, |s| !owned_now.iter().any(|o| o == s))
+                    {
+                        c.selected_workspace = default_sel.clone();
                     }
                     if let Some(p) = focused_pane.clone() {
                         c.focused_pane = Some(p);
+                    } else if c.focused_pane.is_none() {
+                        // Restore last focused pane when still in the selected circle.
+                        if let Some(fp) = self.focused_pane.clone() {
+                            let sel = c.selected_workspace.clone();
+                            if self.panes.iter().any(|p| {
+                                p.slug == fp && sel.as_deref() == Some(p.workspace.as_str())
+                            }) {
+                                c.focused_pane = Some(fp);
+                            }
+                        }
                     }
                 }
                 // Global "human" focus tracks non-empty attaches only.
@@ -792,12 +815,25 @@ impl Engine {
                     if selected_workspace.is_some() {
                         self.selected_workspace = selected_workspace;
                     } else if sole {
-                        // Reopen after last-close: pick first owned circle.
-                        self.selected_workspace =
-                            self.workspaces_for_window(window_id).first().cloned();
+                        // Reopen after last-close / restart-gui: keep prior
+                        // selection when still valid — don't jump to first.
+                        if !self
+                            .selected_workspace
+                            .as_ref()
+                            .is_some_and(|s| owned_now.iter().any(|o| o == s))
+                        {
+                            self.selected_workspace = default_sel.clone();
+                        }
                         if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
-                            if c.selected_workspace.is_none() {
+                            if c.selected_workspace
+                                .as_ref()
+                                .map_or(true, |s| !owned_now.iter().any(|o| o == s))
+                            {
                                 c.selected_workspace = self.selected_workspace.clone();
+                            }
+                            // Keep engine focused_pane in sync with conn when valid.
+                            if let Some(fp) = c.focused_pane.clone() {
+                                self.focused_pane = Some(fp);
                             }
                         }
                     }

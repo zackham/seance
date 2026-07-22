@@ -534,7 +534,7 @@ impl SeanceApp {
                 // Always a FRESH workspace named after the entry (uniquified
                 // against every window's workspaces), single pane, no rename
                 // prompt — the quicklaunch name IS the name.
-                let mut taken: Vec<String> = this.workspaces();
+                let mut taken: Vec<String> = this.known_workspace_names().into_iter().collect();
                 taken.extend(this.foreign_workspaces.iter().map(|f| f.workspace.clone()));
                 let taken_refs: Vec<&str> = taken.iter().map(|s| s.as_str()).collect();
                 let ws = crate::state::unique_slug(&entry.name, &taken_refs);

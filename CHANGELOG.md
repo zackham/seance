@@ -19,6 +19,26 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.9.22] — 2026-07-22
+
+### Changed
+
+- **Workspace sidebar auto-sorts; drag-reorder removed.** Circles with an
+  actively working agent (title spinner / agent status) float to the top;
+  otherwise order is last human touch — typing into any terminal in that
+  circle, or right-click header → **touch**. Selecting a workspace alone
+  does not reorder. Pane drag between circles is unchanged.
+- **Claude account strip is collapsed by default** — only the current account
+  shows. Click it (or the section title) to expand the full list; click
+  another account to switch and collapse. Clicking the already-selected
+  account is a no-op.
+- **Finishing work bumps sidebar recency** — when a circle stops having any
+  live-working agent (status or title spinner), it is touched so it sits at
+  the top of the non-working band.
+- **GUI relaunch restores last selected workspace** — after `restart-gui` /
+  last-window close, the sole reattaching window selects the prior circle
+  (and focused pane) instead of jumping to the first in order.
+
 ## [0.9.21] — 2026-07-22
 
 ### Fixed

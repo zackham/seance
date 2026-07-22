@@ -223,14 +223,6 @@ impl GuiClient {
         })
     }
 
-    /// Place workspace `moved` immediately before `before` in the sidebar.
-    pub fn reorder_workspace(&self, moved: &str, before: &str) -> Result<()> {
-        self.send(GuiRequest::ReorderWorkspace {
-            moved: moved.to_string(),
-            before: before.to_string(),
-        })
-    }
-
     pub fn rename_pane(&self, pane: &str, name: &str) -> Result<()> {
         self.send(GuiRequest::RenamePane {
             pane: pane.to_string(),

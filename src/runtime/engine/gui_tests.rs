@@ -60,6 +60,7 @@ impl FakeGui {
 /// Flattened copy of a `GuiEvent::State` payload for ergonomic assertions.
 struct StateSnapshot {
     selected_workspace: Option<String>,
+    focused_pane: Option<String>,
     workspace_order: Vec<String>,
     panes: Vec<String>,
     foreign: Vec<(String, String)>, // (workspace, owning window)
@@ -72,6 +73,7 @@ impl StateSnapshot {
         match ev {
             GuiEvent::State {
                 selected_workspace,
+                focused_pane,
                 workspace_order,
                 panes,
                 foreign_workspaces,
@@ -80,6 +82,7 @@ impl StateSnapshot {
                 ..
             } => Some(StateSnapshot {
                 selected_workspace,
+                focused_pane,
                 workspace_order,
                 panes: panes.into_iter().map(|p| p.slug).collect(),
                 foreign: foreign_workspaces
@@ -510,6 +513,69 @@ fn last_window_close_orphans_then_reattach_collects() {
         ));
         assert!(st.owns_ws("lab"));
         assert_eq!(st.panes.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn sole_reattach_restores_last_selected_workspace() {
+    with_test_state_dir("gui-restore-sel", || {
+        let scratch = temp_scratch("gui-restore-sel");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        eng.push_stub_pane("worker-a", "lab");
+        eng.push_stub_pane("worker-b", "cadence");
+        eng.push_stub_pane("worker-c", "notes");
+
+        let g1 = FakeGui::attach_to(&mut eng);
+        let _ = eng.handle_gui(
+            GuiRequest::Attach {
+                selected_workspace: None,
+                focused_pane: None,
+                empty: false,
+            },
+            &g1.id,
+        );
+        // Human was looking at "cadence" (not first in order).
+        let _ = eng.handle_gui(
+            GuiRequest::SetFocus {
+                pane: Some("worker-b".into()),
+                workspace: Some("cadence".into()),
+            },
+            &g1.id,
+        );
+        assert_eq!(eng.selected_workspace.as_deref(), Some("cadence"));
+        assert_eq!(eng.focused_pane.as_deref(), Some("worker-b"));
+
+        // restart-gui / last window close: Bye orphans the map, engine keeps selection.
+        let _ = eng.handle_gui(GuiRequest::Bye, &g1.id);
+        assert!(eng.gui_conns.is_empty());
+        assert_eq!(
+            eng.selected_workspace.as_deref(),
+            Some("cadence"),
+            "Bye must not forget the last selection"
+        );
+
+        // Fresh GUI attaches with no remembered client-side selection.
+        let g2 = FakeGui::attach_to(&mut eng);
+        let st = state_of(eng.handle_gui(
+            GuiRequest::Attach {
+                selected_workspace: None,
+                focused_pane: None,
+                empty: false,
+            },
+            &g2.id,
+        ));
+        assert_eq!(
+            st.selected_workspace.as_deref(),
+            Some("cadence"),
+            "sole reattach should restore prior workspace, not jump to first"
+        );
+        assert_eq!(
+            st.focused_pane.as_deref(),
+            Some("worker-b"),
+            "sole reattach should restore prior focused pane"
+        );
 
         let _ = std::fs::remove_dir_all(&scratch);
     });

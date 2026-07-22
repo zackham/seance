@@ -1,5 +1,5 @@
-//! Left rail for the SeanceApp view: the workspace/pane sidebar (drag-and-drop
-//! reorder, per-row context menus, inline rename, activity-band sorting) and
+//! Left rail for the SeanceApp view: the workspace/pane sidebar (auto-sorted
+//! workspaces, pane drag-and-drop, per-row context menus, inline rename) and
 //! the host-bridge widget strip (claude accounts) above the summon footer.
 
 use gpui::{div, prelude::*, px, Context, SharedString, Window};
@@ -11,14 +11,15 @@ use crate::pane::Pane;
 use crate::theme::SeancePalette;
 
 use super::actions::*;
-use super::util::{
-    kill_text_selection, selected_row_fill, sidebar_press_no_select, tip, tip_s, ui_debug,
-    DragPill, DraggedPane, DraggedWorkspace,
-};
+use super::util::{selected_row_fill, sidebar_press_no_select, tip, tip_s, ui_debug, DraggedPane};
 use super::{RenameTarget, SeanceApp};
 
 impl SeanceApp {
     /// Host-bridge strip(s) above the summon footer. Empty when no host or poll failed.
+    ///
+    /// Collapsed (default): only the current/selected account. Click expands
+    /// the full list; click an account to select it and collapse. Clicking the
+    /// already-selected account collapses without re-running select.
     pub(super) fn render_host_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         if self.host.widgets.is_empty() {
             return div().flex_none().into_any_element();
@@ -36,6 +37,24 @@ impl SeanceApp {
                     w.title.clone()
                 };
                 let widget_id = w.id.clone();
+                let expanded = self.host_expanded.contains(&widget_id);
+                let caret = if expanded { "▾" } else { "▸" };
+                // Prefer explicit selected flag, then host `active`, then first.
+                let current_id = w
+                    .items
+                    .iter()
+                    .find(|i| i.selected)
+                    .map(|i| i.id.clone())
+                    .or_else(|| w.active.clone())
+                    .or_else(|| w.items.first().map(|i| i.id.clone()));
+                let visible: Vec<_> = if expanded {
+                    w.items.iter().collect()
+                } else {
+                    w.items
+                        .iter()
+                        .filter(|i| current_id.as_deref() == Some(i.id.as_str()) || i.selected)
+                        .collect()
+                };
                 div()
                     .flex()
                     .flex_col()
@@ -49,9 +68,33 @@ impl SeanceApp {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(SeancePalette::text_faint())
-                                    .child(format!("── {title} ──")),
+                                    .id(SharedString::from(format!("host-title-{widget_id}")))
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .cursor_pointer()
+                                    .tooltip(tip(if expanded {
+                                        "collapse accounts"
+                                    } else {
+                                        "expand accounts"
+                                    }))
+                                    .on_click({
+                                        let wid = widget_id.clone();
+                                        cx.listener(move |this, _, _, cx| {
+                                            if this.host_expanded.contains(&wid) {
+                                                this.host_expanded.remove(&wid);
+                                            } else {
+                                                this.host_expanded.insert(wid.clone());
+                                            }
+                                            cx.notify();
+                                        })
+                                    })
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(SeancePalette::text_faint())
+                                            .child(format!("{caret} {title}")),
+                                    ),
                             )
                             .when_some(w.error.as_ref(), |d, err| {
                                 d.child(
@@ -64,10 +107,11 @@ impl SeanceApp {
                                 )
                             }),
                     )
-                    .children(w.items.iter().map(|item| {
+                    .children(visible.into_iter().map(|item| {
                         let wid = widget_id.clone();
                         let iid = item.id.clone();
-                        let selected = item.selected;
+                        let selected =
+                            item.selected || current_id.as_deref() == Some(item.id.as_str());
                         let state = item.state.as_str();
                         let color = match state {
                             "busy" => SeancePalette::danger(),
@@ -80,8 +124,10 @@ impl SeanceApp {
                         let label = item.label.clone();
                         let detail = item.detail.clone();
                         let detail2 = item.detail2.clone();
-                        let tip_text = if selected {
-                            format!("{label} · active · click to refresh")
+                        let tip_text = if !expanded {
+                            format!("{label} · click to show all accounts")
+                        } else if selected {
+                            format!("{label} · current · click to collapse")
                         } else {
                             format!("switch to {label}")
                         };
@@ -104,7 +150,7 @@ impl SeanceApp {
                             })
                             .tooltip(tip_s(tip_text))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.host_select(&wid, &iid, window, cx);
+                                this.host_item_click(&wid, &iid, window, cx);
                             }))
                             .child(
                                 div()
@@ -163,6 +209,43 @@ impl SeanceApp {
             .into_any_element()
     }
 
+    /// Collapsed → expand. Expanded → select clicked account and collapse.
+    /// Already-selected while expanded → collapse only (no re-switch).
+    pub(super) fn host_item_click(
+        &mut self,
+        widget_id: &str,
+        item_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let expanded = self.host_expanded.contains(widget_id);
+        if !expanded {
+            self.host_expanded.insert(widget_id.to_string());
+            cx.notify();
+            return;
+        }
+
+        let already = self
+            .host
+            .widgets
+            .iter()
+            .find(|w| w.id == widget_id)
+            .map(|w| {
+                w.items.iter().any(|i| i.id == item_id && i.selected)
+                    || w.active.as_deref() == Some(item_id)
+            })
+            .unwrap_or(false);
+
+        // Always collapse on the second click.
+        self.host_expanded.remove(widget_id);
+        if already {
+            // No-op for selection — already current, don't re-run select_cmd.
+            cx.notify();
+            return;
+        }
+        self.host_select(widget_id, item_id, window, cx);
+    }
+
     pub(super) fn host_select(
         &mut self,
         widget_id: &str,
@@ -170,19 +253,6 @@ impl SeanceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Already selected — soft re-poll only.
-        if self
-            .host
-            .widgets
-            .iter()
-            .find(|w| w.id == widget_id)
-            .and_then(|w| w.items.iter().find(|i| i.id == item_id))
-            .is_some_and(|i| i.selected)
-        {
-            self.host.poll_all();
-            cx.notify();
-            return;
-        }
         match self.host.select(widget_id, item_id) {
             Ok(raw) => {
                 // Prefer host JSON message when present.
@@ -222,7 +292,7 @@ impl SeanceApp {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         // Ordered groups, INCLUDING empty workspaces (they render with 0 panes).
-        let ordered = self.workspaces();
+        let ordered = self.workspaces(cx);
         let by_workspace: Vec<(String, Vec<&Pane>)> = ordered
             .into_iter()
             .map(|ws| {
@@ -303,7 +373,6 @@ impl SeanceApp {
                         let ws_for_click = workspace.clone();
                         let ws_for_group_drop = workspace.clone();
                         let ws_for_pane_drop = workspace.clone();
-                        let ws_for_ws_drop = workspace.clone();
                         let ws_for_menu = workspace.clone();
                         let renaming_this_ws = matches!(
                             &self.renaming,
@@ -340,17 +409,9 @@ impl SeanceApp {
                                         sidebar_press_no_select(window, cx);
                                     }),
                                 )
-                                .on_drag(
-                                    DraggedWorkspace {
-                                        name: workspace.clone(),
-                                    },
-                                    |drag, _, window, cx| {
-                                        kill_text_selection(window, cx);
-                                        ui_debug(&format!("drag started: workspace '{}'", drag.name));
-                                        let label = format!("◈ {}", drag.name);
-                                        cx.new(|_| DragPill { label })
-                                    },
-                                )
+                                // Drop a pane onto the header → move into this circle.
+                                // Workspace-vs-workspace drag-reorder is intentionally gone;
+                                // order is auto (working agents, then last human touch).
                                 .drag_over::<DraggedPane>(|style, _, _, _| {
                                     style.bg(SeancePalette::violet_dim())
                                 })
@@ -360,16 +421,6 @@ impl SeanceApp {
                                         drag.slug, ws_for_pane_drop
                                     ));
                                     this.reorder_pane(&drag.slug, &ws_for_pane_drop, None, cx);
-                                }))
-                                .drag_over::<DraggedWorkspace>(|style, _, _, _| {
-                                    style.bg(SeancePalette::flame_dim())
-                                })
-                                .on_drop(cx.listener(move |this, drag: &DraggedWorkspace, _, cx| {
-                                    ui_debug(&format!(
-                                        "drop workspace '{}' before '{}'",
-                                        drag.name, ws_for_ws_drop
-                                    ));
-                                    this.reorder_workspace(&drag.name, &ws_for_ws_drop, cx);
                                 }))
                                 .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                                     if event.click_count() == 2 {

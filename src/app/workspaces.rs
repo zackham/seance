@@ -1,8 +1,8 @@
-//! Workspace state operations: sidebar ordering (attention bands + activity
-//! recency), attention/unread bookkeeping, drag-reorder of workspaces and
-//! panes, and workspace lifecycle (create / select / cycle / move / fork /
-//! kill). Pure state — no rendering lives here (the sidebar/overview views
-//! call these to compute their layout).
+//! Workspace state operations: sidebar auto-sort (live-working agents first,
+//! then last human touch), attention/unread bookkeeping, pane drag-reorder,
+//! and workspace lifecycle (create / select / cycle / move / fork / kill).
+//! Pure state — no rendering lives here (the sidebar/overview views call
+//! these to compute their layout).
 
 use gpui::{Context, Window};
 
@@ -47,41 +47,44 @@ impl WorkspaceAttention {
 }
 
 impl SeanceApp {
-    /// All workspaces in sidebar display order.
-    /// Bands: working → needs → done-unread → rest; each by activity recency
-    /// (input/inject/status — *not* click-to-select).
-    pub(super) fn workspaces(&self) -> Vec<String> {
-        let known: std::collections::HashSet<String> = self
-            .panes
+    /// Unsorted set of workspace names this window knows about.
+    pub(super) fn known_workspace_names(&self) -> std::collections::HashSet<String> {
+        self.panes
             .iter()
             .map(|s| s.workspace.clone())
             .chain(self.extra_workspaces.iter().cloned())
             .chain(self.selected_workspace.iter().cloned())
-            .collect();
-        let mut out: Vec<String> = known.iter().cloned().collect();
-        out.sort_by_key(|ws| self.workspace_sort_key(ws));
-        // Keep explicit order as a weak tie-break for equal keys via stable sort of residual.
-        let _ = self.workspace_order;
+            .collect()
+    }
+
+    /// All workspaces in sidebar display order.
+    ///
+    /// 1. Circles with an actively working agent float to the top.
+    /// 2. Within / outside that band, sort by last *human touch* (typing into
+    ///    a terminal in the circle, or right-click → "touch"). Selecting a
+    ///    workspace alone does not bump touch. No manual drag-reorder.
+    pub(super) fn workspaces(&self, cx: &gpui::App) -> Vec<String> {
+        let mut out: Vec<String> = self.known_workspace_names().into_iter().collect();
+        out.sort_by_key(|ws| self.workspace_sort_key(ws, cx));
         out
     }
 
-    fn workspace_sort_key(&self, ws: &str) -> (u8, std::cmp::Reverse<u64>, String) {
-        let band = self.workspace_band(ws);
+    fn workspace_sort_key(&self, ws: &str, cx: &gpui::App) -> (u8, std::cmp::Reverse<u64>, String) {
+        // 0 = has a live-working agent, 1 = everyone else.
+        let band = if self.workspace_has_working_agent(ws, cx) {
+            0
+        } else {
+            1
+        };
         let touch = self.workspace_touch.get(ws).copied().unwrap_or(0);
         (band, std::cmp::Reverse(touch), ws.to_string())
     }
 
-    /// 0=working, 1=needs, 2=done-unread, 3=rest.
-    fn workspace_band(&self, ws: &str) -> u8 {
-        if let Some(a) = self.workspace_attention(ws) {
-            match a {
-                WorkspaceAttention::Working => 0,
-                WorkspaceAttention::NeedsHuman => 1,
-                WorkspaceAttention::Done => 2,
-            }
-        } else {
-            3
-        }
+    /// Any pane in this circle currently shows agent work in progress.
+    fn workspace_has_working_agent(&self, workspace: &str, cx: &gpui::App) -> bool {
+        self.panes
+            .iter()
+            .any(|p| p.workspace == workspace && self.pane_is_live_working(&p.slug, cx))
     }
 
     /// Observed live-busy: braille OSC title spinner, or agent-owned status.
@@ -110,6 +113,10 @@ impl SeanceApp {
         }
     }
 
+    /// Bump this circle's recency so it sorts above idle peers (working agents
+    /// still float above everything). Sources: human typing into a terminal
+    /// here, right-click → touch, newly created circles, and the moment a
+    /// workspace *finishes* working (falls out of the live-working band).
     pub(super) fn touch_workspace(&mut self, ws: &str) {
         if ws.is_empty() {
             return;
@@ -117,7 +124,27 @@ impl SeanceApp {
         self.workspace_touch.insert(ws.to_string(), now_ms());
     }
 
-    /// Ensure `ws` is listed in sidebar order, appended at the bottom when new.
+    /// Recompute live-working per workspace. When a circle stops having any
+    /// working agent, bump its touch so it lands at the top of the
+    /// non-working band (freshly finished work is what you want next).
+    pub(super) fn sync_workspace_working_touches(&mut self, cx: &gpui::App) {
+        let names: Vec<String> = self.known_workspace_names().into_iter().collect();
+        for ws in names {
+            let now = self.workspace_has_working_agent(&ws, cx);
+            let was = self.workspace_was_working.contains(&ws);
+            if was && !now {
+                self.touch_workspace(&ws);
+            }
+            if now {
+                self.workspace_was_working.insert(ws);
+            } else {
+                self.workspace_was_working.remove(&ws);
+            }
+        }
+    }
+
+    /// Track a newly known workspace name and give it a fresh touch so it
+    /// appears near the top of the non-working band.
     pub(super) fn ensure_workspace_at_bottom(&mut self, ws: &str) {
         if self.workspace_order.iter().any(|w| w == ws) {
             return;
@@ -135,7 +162,8 @@ impl SeanceApp {
         else {
             return;
         };
-        self.touch_workspace(&ws);
+        // Status changes do *not* bump touch — only human typing / explicit
+        // touch menu. Working agents re-sort via live-busy detection.
         // Sticky unread only when the human is *not* looking at this circle.
         if self.selected_workspace.as_deref() == Some(ws.as_str()) {
             self.workspace_unread.remove(&ws);
@@ -155,45 +183,8 @@ impl SeanceApp {
         }
     }
 
-    fn workspace_attention(&self, workspace: &str) -> Option<WorkspaceAttention> {
-        // Live busy wins over sticky status.
-        let live = self.panes.iter().any(|p| {
-            p.workspace == workspace && {
-                // Need App for title — approximate via statuses + owners without cx:
-                // title check done in render path with cx. Here status/owner only.
-                match self.statuses.get(&p.slug).map(|s| s.state.as_str()) {
-                    Some("working") | Some("planning") => {
-                        let human = self
-                            .owners
-                            .get(&p.slug)
-                            .map(|o| o.owner == "human")
-                            .unwrap_or(false);
-                        !human
-                    }
-                    Some("needs-human") | Some("blocked") | Some("risky") => false, // handled below
-                    _ => false,
-                }
-            }
-        });
-        // needs-human live
-        let needs = self.panes.iter().any(|p| {
-            p.workspace == workspace
-                && matches!(
-                    self.statuses.get(&p.slug).map(|s| s.state.as_str()),
-                    Some("needs-human") | Some("blocked") | Some("risky")
-                )
-        });
-        if needs {
-            return Some(WorkspaceAttention::NeedsHuman);
-        }
-        if live {
-            return Some(WorkspaceAttention::Working);
-        }
-        // Also check unread sticky
-        self.workspace_unread.get(workspace).copied()
-    }
-
-    /// Live attention with title spinners (needs `&App`).
+    /// Live attention with title spinners (needs `&App`) — badges only;
+    /// sidebar order uses [`Self::workspace_has_working_agent`].
     pub(super) fn workspace_attention_cx(
         &self,
         workspace: &str,
@@ -209,34 +200,10 @@ impl SeanceApp {
         if needs {
             return Some(WorkspaceAttention::NeedsHuman);
         }
-        let working = self
-            .panes
-            .iter()
-            .any(|p| p.workspace == workspace && self.pane_is_live_working(&p.slug, cx));
-        if working {
+        if self.workspace_has_working_agent(workspace, cx) {
             return Some(WorkspaceAttention::Working);
         }
         self.workspace_unread.get(workspace).copied()
-    }
-
-    /// Move workspace `moved` to appear before `before` in the sidebar.
-    /// Optimistic local update; daemon is the source of truth and persists.
-    pub(super) fn reorder_workspace(&mut self, moved: &str, before: &str, cx: &mut Context<Self>) {
-        if moved == before {
-            return;
-        }
-        let mut order = self.workspaces();
-        order.retain(|w| w != moved);
-        let idx = order
-            .iter()
-            .position(|w| w == before)
-            .unwrap_or(order.len());
-        order.insert(idx, moved.to_string());
-        self.workspace_order = order;
-        // Daemon owns persistence — GUI-only save would race and be overwritten
-        // by the next daemon persist with the old order.
-        let _ = self.client.reorder_workspace(moved, before);
-        cx.notify();
     }
 
     /// Move `slug` into `workspace`, positioned before pane `before_slug`
@@ -274,7 +241,7 @@ impl SeanceApp {
     }
 
     pub(super) fn create_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let existing = self.workspaces();
+        let existing = self.known_workspace_names();
         let mut n = existing.len() + 1;
         let name = loop {
             let candidate = format!("circle-{n}");
@@ -379,7 +346,7 @@ impl SeanceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let list = self.workspaces();
+        let list = self.workspaces(cx);
         if list.is_empty() {
             return;
         }

@@ -27,7 +27,7 @@ impl SeanceApp {
     }
 
     pub(super) fn render_overview(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let workspaces = self.workspaces();
+        let workspaces = self.workspaces(cx);
         let selected = self.selected_workspace.clone();
         let n = workspaces.len().max(1);
         let cols = (n as f32).sqrt().ceil() as usize;

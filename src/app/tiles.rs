@@ -198,7 +198,7 @@ impl SeanceApp {
             // A pulled-open second window with no workspaces yet gets pull
             // instructions, not the summon hint (empty_window is sticky for
             // the window's life; once a workspace arrives the normal path wins).
-            let hint = if self.empty_window && self.workspaces().is_empty() {
+            let hint = if self.empty_window && self.known_workspace_names().is_empty() {
                 "empty window — right-click the sidebar to pull a workspace here,\nor right-click a workspace in another window and send it over".to_string()
             } else {
                 let ws = self

@@ -890,14 +890,15 @@ pub(super) fn render_help() -> gpui::AnyElement {
         .child(h1("workspaces"))
         .child(row("click header", "select workspace (tiling region filters to it)"))
         .child(row("double-click", "rename workspace inline"))
-        .child(row("drag header", "reorder workspaces in the sidebar"))
         .child(row("drag pane row", "move pane into another workspace / reorder"))
-        .child(row("right-click header", "rename · fork ⑂ · banish (kill all panes)"))
+        .child(row("right-click header", "touch · rename · fork ⑂ · banish"))
         .child(row("+ (footer)", "new empty workspace"))
         .child(p(
-            "banish workspace kills every pane under it (PTYs shut down), removes \
-             the workspace from the sidebar, and selects another. irreversible \
-             for the processes — scratchpad files on disk are kept.",
+            "sidebar order is automatic: circles with working agents float to \
+             the top; otherwise last human touch wins (type into a terminal, or \
+             right-click → touch). selecting a circle alone does not reorder. \
+             banish kills every pane under a workspace (PTYs shut down) and is \
+             irreversible for the processes — scratchpad files on disk are kept.",
         ))
         // ── keys ───────────────────────────────────────────────────────────
         .child(h1("keys"))

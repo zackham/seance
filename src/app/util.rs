@@ -28,12 +28,6 @@ pub(super) struct DraggedPane {
     pub slug: String,
 }
 
-/// Payload for dragging a workspace header (reorder workspaces).
-#[derive(Clone)]
-pub(super) struct DraggedWorkspace {
-    pub name: String,
-}
-
 /// Payload for dragging a quicklaunch chip (reorder chips, insert-before).
 #[derive(Clone)]
 pub(super) struct DraggedQuickLaunch {

@@ -40,7 +40,7 @@ impl SeanceApp {
                         q.split_whitespace().all(|t| hay.contains(t))
                     })
                     .count();
-                pane_n + self.workspaces().len()
+                pane_n + self.known_workspace_names().len()
             }
             PaletteMode::Closed => 0,
         };
@@ -144,7 +144,7 @@ impl SeanceApp {
                     })
                     .map(|p| p.slug.clone())
                     .collect();
-                for ws in self.workspaces() {
+                for ws in self.workspaces(cx) {
                     if q.is_empty() || ws.to_ascii_lowercase().contains(&q) {
                         items.push(format!("ws:{ws}"));
                     }
@@ -217,7 +217,7 @@ impl SeanceApp {
                         })
                         .collect();
                     // Also offer workspaces as jump targets with ws: prefix
-                    for ws in self.workspaces() {
+                    for ws in self.workspaces(_cx) {
                         if q.is_empty() || ws.to_ascii_lowercase().contains(&q) {
                             items.push((format!("ws:{ws}"), format!("workspace · {ws}")));
                         }

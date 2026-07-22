@@ -149,6 +149,9 @@ pub struct SeanceApp {
     pad_refresh_tick: u64,
     /// Optional host-bridge widgets (claude accounts, …) — fail closed.
     host: crate::host::HostState,
+    /// Host widget ids currently expanded to show every account (collapsed =
+    /// current account only).
+    host_expanded: std::collections::HashSet<String>,
     /// This GUI connection's window id (from daemon State).
     window_id: Option<String>,
     /// Live windows for transfer menus.
@@ -157,6 +160,9 @@ pub struct SeanceApp {
     foreign_workspaces: Vec<ForeignWorkspace>,
     /// Last activity timestamp (ms) per workspace — input/inject/status, not click.
     workspace_touch: std::collections::HashMap<String, u64>,
+    /// Workspaces that currently have a live-working agent (for falling-edge
+    /// touch when work finishes → top of the non-working band).
+    workspace_was_working: std::collections::HashSet<String>,
     /// Sticky attention on inactive circles until selected (done/needs).
     workspace_unread: std::collections::HashMap<String, WorkspaceAttention>,
     /// Full-window live overview (ctrl+shift+space).
@@ -248,10 +254,12 @@ impl SeanceApp {
             sash_drag: None,
             pad_refresh_tick: 0,
             host: crate::host::HostState::load(),
+            host_expanded: std::collections::HashSet::new(),
             window_id: None,
             windows: Vec::new(),
             foreign_workspaces: Vec::new(),
             workspace_touch: std::collections::HashMap::new(),
+            workspace_was_working: std::collections::HashSet::new(),
             workspace_unread: std::collections::HashMap::new(),
             overview: false,
             pending_transfer: None,
@@ -443,6 +451,7 @@ impl SeanceApp {
                 // workspace. Keyboard recovery is render-side (ensure_keyboard_focus)
                 // so we don't steal focus from whisper / rename / palette here.
                 self.ensure_active_pane_in_workspace();
+                self.sync_workspace_working_touches(cx);
                 cx.notify();
             }
             GuiEvent::Grid(snap) => {
@@ -575,6 +584,7 @@ impl SeanceApp {
                 }
                 self.note_workspace_status_event(&slug, &state);
                 self.statuses.insert(slug, PaneStatus { state, note });
+                self.sync_workspace_working_touches(cx);
                 if matches!(self.drawer, Drawer::Pad { .. }) {
                     self.pad_refresh_tick = self.pad_refresh_tick.wrapping_add(1);
                 }
@@ -584,8 +594,9 @@ impl SeanceApp {
                 self.touch(&slug, &verb, &actor, cx);
             }
             GuiEvent::InputOrigin { pane, origin } => {
-                // Real input (keystroke / inject / propose) bumps recency.
-                // Focus/select alone never emits InputOrigin.
+                // Real input (keystroke / inject / propose) bumps workspace
+                // recency for sidebar auto-sort. Focus/select alone never
+                // emits InputOrigin.
                 if let Some(ws) = self
                     .panes
                     .iter()
@@ -593,6 +604,7 @@ impl SeanceApp {
                     .map(|p| p.workspace.clone())
                 {
                     self.touch_workspace(&ws);
+                    cx.notify(); // re-sort sidebar by last human touch
                 }
                 if let Some(rt) = self
                     .panes
@@ -621,6 +633,7 @@ impl SeanceApp {
                         exit_code,
                     },
                 );
+                self.sync_workspace_working_touches(cx);
                 cx.notify();
             }
             GuiEvent::Ghost { pane, ghost } => {
@@ -643,22 +656,40 @@ impl SeanceApp {
 
     /// Apply a decoded grid to the matching remote pane. Shared by JSON
     /// `grid` and binary `grid_bin` events. Outside overview, only panes on
-    /// the selected workspace apply (others never get live pushes anyway).
+    /// the selected workspace fully paint — hidden panes only absorb frames
+    /// when busy-ness flips (spinner ↔ idle) so working badges + finish-touch
+    /// stay correct without the old 90%+ CPU tax from spinning TUIs.
     fn apply_grid_snap(&mut self, snap: GridSnapshot, cx: &mut Context<Self>) {
         let slug = snap.pane.clone();
-        // Skip paint work for panes not on screen. Hidden workspaces with
-        // spinning TUIs used to keep the GUI at 90%+ CPU. EXCEPT in overview:
-        // it shows EVERY circle's thumbs, so all frames must apply — with the
-        // gate up, the open-flush got dropped and cards stayed blank until a
-        // resize forced a flush while selected. The daemon throttles
-        // non-selected circles to ~15fps during overview, so the CPU guard
-        // isn't needed there.
         if !self.overview {
             let ws = self.selected_workspace.as_deref();
             let visible = self.panes.iter().any(|p| {
                 p.slug == slug && p.popped.is_none() && ws.is_none_or(|w| p.workspace == w)
             });
             if !visible {
+                if let Some(rt) = self
+                    .panes
+                    .iter()
+                    .find(|p| p.slug == slug)
+                    .and_then(|p| p.remote_terminal())
+                    .cloned()
+                {
+                    let old_busy = rt
+                        .read(cx)
+                        .title()
+                        .as_deref()
+                        .map(title_looks_busy)
+                        .unwrap_or(false);
+                    let new_busy = snap.title.as_deref().map(title_looks_busy).unwrap_or(false);
+                    if old_busy == new_busy {
+                        return;
+                    }
+                    rt.update(cx, |t, cx| {
+                        t.apply_snapshot(snap, cx);
+                    });
+                    self.sync_workspace_working_touches(cx);
+                    cx.notify();
+                }
                 return;
             }
         }
@@ -672,6 +703,7 @@ impl SeanceApp {
             rt.update(cx, |t, cx| {
                 t.apply_snapshot(snap, cx);
             });
+            self.sync_workspace_working_touches(cx);
         }
     }
 
@@ -1163,6 +1195,12 @@ impl SeanceApp {
                         *w = new_ws.clone();
                     }
                 }
+                if let Some(t) = self.workspace_touch.remove(&old) {
+                    self.workspace_touch.insert(new_ws.clone(), t);
+                }
+                if let Some(u) = self.workspace_unread.remove(&old) {
+                    self.workspace_unread.insert(new_ws.clone(), u);
+                }
                 if self.selected_workspace.as_deref() == Some(old.as_str()) {
                     self.selected_workspace = Some(new_ws.clone());
                 }
@@ -1600,15 +1638,9 @@ impl SeanceApp {
 
     /// Record a transient cross-pane touch ("⚡ driven by X") and schedule its
     /// fade — the visible-agency overlay the council converged on.
+    /// Does *not* bump workspace sidebar recency (only human typing / explicit
+    /// "touch" menu does that).
     fn touch(&mut self, slug: &str, verb: &str, actor: &str, cx: &mut Context<Self>) {
-        if let Some(ws) = self
-            .panes
-            .iter()
-            .find(|p| p.slug == slug)
-            .map(|p| p.workspace.clone())
-        {
-            self.touch_workspace(&ws);
-        }
         self.touches.insert(
             slug.to_string(),
             (
@@ -1726,7 +1758,7 @@ impl Render for SeanceApp {
                 this.move_to_workspace(&act.slug.clone(), &act.workspace.clone(), cx);
             }))
             .on_action(cx.listener(|this, act: &ActMoveToNewWorkspace, _, cx| {
-                let n = this.workspaces().len() + 1;
+                let n = this.known_workspace_names().len() + 1;
                 this.move_to_workspace(&act.0.clone(), &format!("circle-{n}"), cx);
             }))
             .on_action(cx.listener(|this, act: &ActTogglePopout, _, cx| {
