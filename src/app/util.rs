@@ -193,3 +193,71 @@ pub(super) fn telegram_status_bridge(slug: &str, state: &str, note: Option<&str>
             .status();
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hsla has no PartialEq — compare component floats exactly (palette
+    /// consts are fixed literals, so bit-equality is fine).
+    fn same_color(a: gpui::Hsla, b: gpui::Hsla) -> bool {
+        a.h == b.h && a.s == b.s && a.l == b.l && a.a == b.a
+    }
+
+    #[test]
+    fn title_looks_busy_detects_braille_spinner() {
+        // Claude/ink stream a braille spinner (U+2800..=U+28FF) in the title.
+        assert!(title_looks_busy("\u{2800} building"));
+        assert!(title_looks_busy("\u{28FF} working"));
+        assert!(title_looks_busy("\u{2809} running tests"));
+        // Leading whitespace is trimmed before the spinner check.
+        assert!(title_looks_busy("   \u{2807} thinking"));
+    }
+
+    #[test]
+    fn title_looks_busy_idle_and_empty() {
+        // Idle Claude uses ✳ (U+2733) — explicitly NOT busy.
+        assert!(!title_looks_busy("\u{2733} idle"));
+        // Plain text titles.
+        assert!(!title_looks_busy("bash"));
+        assert!(!title_looks_busy("vim src/main.rs"));
+        // Empty / whitespace-only.
+        assert!(!title_looks_busy(""));
+        assert!(!title_looks_busy("   "));
+    }
+
+    #[test]
+    fn status_color_maps_variants_distinctly() {
+        let blocked = status_color("blocked");
+        let risky = status_color("risky");
+        let needs_human = status_color("needs-human");
+        let done = status_color("done");
+        let idle = status_color("idle");
+        let unknown = status_color("planning-or-anything-else");
+
+        // Documented pairings.
+        assert!(same_color(blocked, SeancePalette::danger()));
+        assert!(same_color(risky, SeancePalette::danger()));
+        assert!(same_color(needs_human, SeancePalette::violet()));
+        assert!(same_color(done, SeancePalette::success()));
+        assert!(same_color(idle, SeancePalette::text_faint()));
+        // Fallback: unknown → flame (planning/working).
+        assert!(same_color(unknown, SeancePalette::flame()));
+
+        // Distinct families map to distinct colors.
+        assert!(!same_color(blocked, needs_human));
+        assert!(!same_color(needs_human, done));
+        assert!(!same_color(done, idle));
+        assert!(!same_color(idle, unknown));
+        // blocked/risky share danger by design.
+        assert!(same_color(blocked, risky));
+    }
+
+    #[test]
+    fn now_ms_is_monotonic_nonzero() {
+        let a = now_ms();
+        let b = now_ms();
+        assert!(a > 0);
+        assert!(b >= a);
+    }
+}

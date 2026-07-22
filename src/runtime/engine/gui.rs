@@ -54,6 +54,19 @@ impl Engine {
         id
     }
 
+    /// Test-only: is a GUI window with this id currently registered?
+    #[cfg(test)]
+    pub(super) fn has_gui_window(&self, window_id: &str) -> bool {
+        self.gui_conns.iter().any(|c| c.id == window_id)
+    }
+
+    /// Test-only accessor for the pure grid-interval selection logic (no clocks).
+    /// `None` = pane not streamed to its owning window right now.
+    #[cfg(test)]
+    pub(super) fn grid_interval_ms_for(&self, slug: &str) -> Option<u64> {
+        self.grid_interval_for(slug).map(|d| d.as_millis() as u64)
+    }
+
     pub fn unregister_gui(&mut self, window_id: &str) {
         let was_registered = self.gui_conns.iter().any(|c| c.id == window_id);
         self.gui_conns.retain(|c| c.id != window_id);

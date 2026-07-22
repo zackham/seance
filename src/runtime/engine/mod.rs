@@ -6,6 +6,8 @@ pub(crate) mod helpers;
 mod spawn;
 
 #[cfg(test)]
+mod gui_tests;
+#[cfg(test)]
 mod tests;
 
 // Re-export helpers used by sibling modules / tests.

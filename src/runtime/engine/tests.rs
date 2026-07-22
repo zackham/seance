@@ -5,7 +5,7 @@ use super::*;
 use crate::control::ControlRequest;
 use std::path::PathBuf;
 
-fn with_test_state_dir<T>(tag: &str, f: impl FnOnce() -> T) -> T {
+pub(super) fn with_test_state_dir<T>(tag: &str, f: impl FnOnce() -> T) -> T {
     // Share lock with state::tests — both mutate SEANCE_STATE_DIR.
     let _g = crate::state::test_env_lock();
     let prev = std::env::var("SEANCE_STATE_DIR").ok();
