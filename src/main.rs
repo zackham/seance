@@ -29,6 +29,12 @@ use gpui_component::Root;
 use crate::app::SeanceApp;
 
 fn main() {
+    // Rust ignores SIGPIPE by default, turning `seance ctl … | head` into a
+    // broken-pipe panic. Restore the conventional CLI disposition: die quietly.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let args: Vec<String> = std::env::args().collect();
 
     // `seance --version` / `-V` / `version` — never open the GUI.
