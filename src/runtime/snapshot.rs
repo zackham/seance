@@ -257,10 +257,7 @@ pub fn encode_grid_bin(snap: &GridSnapshot) -> Result<Vec<u8>, String> {
 /// Encode full frame, or row-damage when `dirty` is `Some` non-empty subset.
 /// Pass `None` for full. Pass `Some(&[])` only when nothing changed (caller
 /// should skip the send entirely).
-pub fn encode_grid_bin_ex(
-    snap: &GridSnapshot,
-    dirty: Option<&[u16]>,
-) -> Result<Vec<u8>, String> {
+pub fn encode_grid_bin_ex(snap: &GridSnapshot, dirty: Option<&[u16]>) -> Result<Vec<u8>, String> {
     let expect = (snap.cols as usize).saturating_mul(snap.rows as usize);
     if !snap.cells.is_empty() && snap.cells.len() != expect {
         return Err(format!(
@@ -557,7 +554,8 @@ fn write_rle(out: &mut Vec<u8>, cells: &[CellSnap]) -> Result<(), String> {
         if cells[i].is_default_blank() {
             let start = i;
             i += 1;
-            while i < cells.len() && cells[i].is_default_blank() && (i - start) < u16::MAX as usize {
+            while i < cells.len() && cells[i].is_default_blank() && (i - start) < u16::MAX as usize
+            {
                 i += 1;
             }
             let n = (i - start) as u16;

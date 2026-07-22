@@ -2,13 +2,12 @@ mod agency;
 mod agents;
 mod app;
 mod caps;
+mod cmdlog;
 mod control;
 mod ctl;
 mod daemon;
 mod desktop_notify;
-mod scratchpad;
 mod events;
-mod cmdlog;
 mod fileview;
 mod gui_client;
 mod host;
@@ -18,8 +17,9 @@ mod prompts;
 mod remote_term;
 mod remote_term_view;
 mod runtime;
-mod term_font;
+mod scratchpad;
 mod state;
+mod term_font;
 mod terminal;
 mod terminal_view;
 mod theme;
@@ -89,7 +89,9 @@ fn main() {
             .output()
         {
             for pid_s in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-                let Ok(pid) = pid_s.parse::<u32>() else { continue };
+                let Ok(pid) = pid_s.parse::<u32>() else {
+                    continue;
+                };
                 if pid == self_pid {
                     continue;
                 }

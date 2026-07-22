@@ -742,9 +742,8 @@ pub fn start_server(handle: ControlHandle) -> Result<PathBuf> {
             }
             Err(_) => {
                 // Stale file from a crashed instance — safe to remove.
-                std::fs::remove_file(&path).with_context(|| {
-                    format!("removing stale control socket {}", path.display())
-                })?;
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing stale control socket {}", path.display()))?;
             }
         }
     }
@@ -814,13 +813,12 @@ fn handle_connection(stream: UnixStream, handle: ControlHandle) -> Result<()> {
             Err(err) => ControlResponse::err(format!("invalid request json: {err}")),
         };
 
-        let mut out =
-            serde_json::to_string(&response).unwrap_or_else(|e| {
-                // Serializing our own response should never fail; if it somehow
-                // does, emit a hand-rolled error line so the client sees *some*
-                // valid JSON rather than a dropped connection.
-                format!("{{\"ok\":false,\"error\":\"failed to serialize response: {e}\"}}")
-            });
+        let mut out = serde_json::to_string(&response).unwrap_or_else(|e| {
+            // Serializing our own response should never fail; if it somehow
+            // does, emit a hand-rolled error line so the client sees *some*
+            // valid JSON rather than a dropped connection.
+            format!("{{\"ok\":false,\"error\":\"failed to serialize response: {e}\"}}")
+        });
         out.push('\n');
         writer
             .write_all(out.as_bytes())
@@ -842,12 +840,10 @@ fn handle_connection(stream: UnixStream, handle: ControlHandle) -> Result<()> {
 fn dispatch(handle: &ControlHandle, request: ControlRequest) -> ControlResponse {
     let (reply_tx, reply_rx) = oneshot::channel();
 
-    if handle
-        .tx
-        .unbounded_send((request, reply_tx))
-        .is_err()
-    {
-        return ControlResponse::err("seance app is not accepting control requests (shutting down?)");
+    if handle.tx.unbounded_send((request, reply_tx)).is_err() {
+        return ControlResponse::err(
+            "seance app is not accepting control requests (shutting down?)",
+        );
     }
 
     // Block this connection thread on the oneshot with a timeout. We race the
@@ -931,8 +927,7 @@ mod tests {
 
     #[test]
     fn new_defaults_optional_fields_to_none() {
-        let req: ControlRequest =
-            serde_json::from_str(r#"{"op":"new","name":"worker"}"#).unwrap();
+        let req: ControlRequest = serde_json::from_str(r#"{"op":"new","name":"worker"}"#).unwrap();
         match req {
             ControlRequest::New {
                 name,
@@ -952,8 +947,7 @@ mod tests {
 
     #[test]
     fn read_lines_optional() {
-        let full: ControlRequest =
-            serde_json::from_str(r#"{"op":"read","session":"w"}"#).unwrap();
+        let full: ControlRequest = serde_json::from_str(r#"{"op":"read","session":"w"}"#).unwrap();
         match full {
             ControlRequest::Read { lines, .. } => assert!(lines.is_none()),
             _ => panic!("expected read"),

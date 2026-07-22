@@ -110,15 +110,17 @@ impl Engine {
                             format!("spawned '{pname}'"),
                         );
                         self.persist();
-                        let info = self.pane_infos().into_iter().find(|p| p.slug == slug).unwrap();
+                        let info = self
+                            .pane_infos()
+                            .into_iter()
+                            .find(|p| p.slug == slug)
+                            .unwrap();
                         // PaneSpawned for snappy add + focus steal; full State
                         // so a GUI that missed the push (or just reconnected)
                         // still reconciles the complete pane list. External
                         // `seance ctl new` used to create panes the daemon
                         // owned but a disconnected GUI never painted.
-                        self.broadcast(GuiEvent::PaneSpawned {
-                            pane: info.clone(),
-                        });
+                        self.broadcast(GuiEvent::PaneSpawned { pane: info.clone() });
                         if let Some(snap) = self.snapshot_pane(&slug) {
                             self.broadcast_grid(snap);
                         }
@@ -175,13 +177,12 @@ impl Engine {
                         session.scroll_to_bottom();
                         session.inject(text, submit);
                     }
-                    let (pad_rev, pad_bytes) = self
-                        .inject_baselines
-                        .get(&slug)
-                        .copied()
-                        .unwrap_or((0, 0));
-                    self.statuses
-                        .insert(slug.clone(), ("working".into(), Some(format!("inject from {act}"))));
+                    let (pad_rev, pad_bytes) =
+                        self.inject_baselines.get(&slug).copied().unwrap_or((0, 0));
+                    self.statuses.insert(
+                        slug.clone(),
+                        ("working".into(), Some(format!("inject from {act}"))),
+                    );
                     self.broadcast(GuiEvent::Status {
                         slug: slug.clone(),
                         state: "working".into(),
@@ -194,13 +195,7 @@ impl Engine {
                         "status_set",
                         format!("working: inject from {act} task={task_id}"),
                     );
-                    events::log(
-                        &act,
-                        Some(&ws),
-                        Some(&slug),
-                        "task_open",
-                        task_id.clone(),
-                    );
+                    events::log(&act, Some(&ws), Some(&slug), "task_open", task_id.clone());
                     self.broadcast_agency(&slug);
                     self.broadcast(GuiEvent::InputOrigin {
                         pane: slug.clone(),
@@ -310,11 +305,7 @@ impl Engine {
                 }
                 Err(e) => err(e),
             },
-            Kill {
-                pane,
-                scope,
-                from,
-            } => match find(self, &pane, &scope) {
+            Kill { pane, scope, from } => match find(self, &pane, &scope) {
                 Ok(idx) => {
                     let slug = self.panes[idx].slug.clone();
                     events::log(
@@ -599,8 +590,10 @@ impl Engine {
                         Some("working" | "planning")
                     )
                 {
-                    self.statuses
-                        .insert(pane.clone(), ("idle".into(), Some(format!("cmd exit {exit}"))));
+                    self.statuses.insert(
+                        pane.clone(),
+                        ("idle".into(), Some(format!("cmd exit {exit}"))),
+                    );
                     self.broadcast(GuiEvent::Status {
                         slug: pane.clone(),
                         state: "idle".into(),
@@ -653,7 +646,9 @@ impl Engine {
                 Ok(idx) => {
                     let slug = self.panes[idx].slug.clone();
                     match self.cmd_log.last(&slug, failed_only) {
-                        Some(rec) => ok(serde_json::to_value(rec).unwrap_or(serde_json::Value::Null)),
+                        Some(rec) => {
+                            ok(serde_json::to_value(rec).unwrap_or(serde_json::Value::Null))
+                        }
                         None => err("no matching command".into()),
                     }
                 }
@@ -757,9 +752,7 @@ impl Engine {
                 from,
                 ..
             } => {
-                let n = self
-                    .caps
-                    .revoke(&principal, &cap, workspace.as_deref());
+                let n = self.caps.revoke(&principal, &cap, workspace.as_deref());
                 let _ = self.caps.save();
                 events::log(
                     &actor(&from),
@@ -770,7 +763,9 @@ impl Engine {
                 );
                 ok(json!({"revoked": n}))
             }
-            PolicyGet { workspace, scope, .. } => {
+            PolicyGet {
+                workspace, scope, ..
+            } => {
                 let ws = workspace.or(scope);
                 let policy = self.caps.policy_for(ws.as_deref());
                 ok(json!({
@@ -914,11 +909,8 @@ impl Engine {
                         if let Err(e) = assert_self_or_cross(&slug, &from, &author) {
                             return err(e);
                         }
-                        let stamp = format!(
-                            "\n\n---\n<!-- {} · {} -->\n\n",
-                            author,
-                            chrono_lite_stamp()
-                        );
+                        let stamp =
+                            format!("\n\n---\n<!-- {} · {} -->\n\n", author, chrono_lite_stamp());
                         let chunk = format!("{stamp}{text}\n");
                         let result = if append {
                             atomic_append_pad(&path, &chunk)
@@ -970,11 +962,9 @@ impl Engine {
                 }
                 let body_empty = body.as_ref().map(|b| b.trim().is_empty()).unwrap_or(true);
                 if status == "done" && body_empty && !empty_ok {
-                    return err(
-                        "finish: status=done requires a body (or --empty-ok). \
+                    return err("finish: status=done requires a body (or --empty-ok). \
                          Evidence-bound completion: write the answer, then finish."
-                            .into(),
-                    );
+                        .into());
                 }
                 match find(self, &target, &scope) {
                     Ok(idx) => {
@@ -1066,8 +1056,7 @@ impl Engine {
                     let target = pane.or_else(|| from.clone());
                     let Some(target) = target else {
                         return err(
-                            "task: need pane, --id, or $SEANCE_SESSION (your inject inbox)"
-                                .into(),
+                            "task: need pane, --id, or $SEANCE_SESSION (your inject inbox)".into(),
                         );
                     };
                     match find(self, &target, &scope) {
@@ -1080,11 +1069,8 @@ impl Engine {
                                 }
                             } else {
                                 // Fall back to most recent task for this pane.
-                                let mut candidates: Vec<_> = self
-                                    .tasks
-                                    .values()
-                                    .filter(|t| t.pane == slug)
-                                    .collect();
+                                let mut candidates: Vec<_> =
+                                    self.tasks.values().filter(|t| t.pane == slug).collect();
                                 candidates.sort_by_key(|t| std::cmp::Reverse(t.created_ms));
                                 match candidates.first() {
                                     Some(t) => ok(task_json(t)),
@@ -1165,7 +1151,11 @@ impl Engine {
         let id = format!("task-{}", self.task_counter);
         // Cap stored body so state.json stays sane (full inject usually fits).
         let body = if body.len() > 64_000 {
-            format!("{}…\n<!-- truncated {} chars -->\n", &body[..64_000], body.len())
+            format!(
+                "{}…\n<!-- truncated {} chars -->\n",
+                &body[..64_000],
+                body.len()
+            )
         } else {
             body.to_string()
         };
@@ -1192,7 +1182,11 @@ impl Engine {
     }
 
     /// Mark active (or named) task done; returns task_id if any.
-    pub(crate) fn complete_active_task(&mut self, slug: &str, want: Option<&str>) -> Option<String> {
+    pub(crate) fn complete_active_task(
+        &mut self,
+        slug: &str,
+        want: Option<&str>,
+    ) -> Option<String> {
         let tid = want
             .map(|s| s.to_string())
             .or_else(|| self.active_tasks.get(slug).cloned());

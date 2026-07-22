@@ -27,7 +27,14 @@ pub(crate) fn parse_timeline(args: Vec<String>) -> Result<ControlRequest, String
             other => return Err(format!("timeline: unknown arg '{other}'")),
         }
     }
-    Ok(ControlRequest::Timeline { since_secs, pane, actor, limit, scope: None, from: None })
+    Ok(ControlRequest::Timeline {
+        since_secs,
+        pane,
+        actor,
+        limit,
+        scope: None,
+        from: None,
+    })
 }
 
 pub(crate) fn parse_duration_secs(v: &str) -> Result<u64, String> {
@@ -55,7 +62,9 @@ pub(crate) fn parse_status_set(args: Vec<String>) -> Result<ControlRequest, Stri
         }
     }
     if positionals.is_empty() {
-        return Err("status-set: expected STATE (planning|working|blocked|needs-human|done|idle)".into());
+        return Err(
+            "status-set: expected STATE (planning|working|blocked|needs-human|done|idle)".into(),
+        );
     }
     let state = positionals.remove(0);
     let note = if positionals.is_empty() {
@@ -63,7 +72,13 @@ pub(crate) fn parse_status_set(args: Vec<String>) -> Result<ControlRequest, Stri
     } else {
         Some(positionals.join(" "))
     };
-    Ok(ControlRequest::StatusSet { state, note, pane, scope: None, from: None })
+    Ok(ControlRequest::StatusSet {
+        state,
+        note,
+        pane,
+        scope: None,
+        from: None,
+    })
 }
 
 /// `propose PANE TEXT... [--reason R]`
@@ -102,7 +117,12 @@ pub(crate) fn parse_fork(args: Vec<String>) -> Result<ControlRequest, String> {
             other => return Err(format!("fork: unknown arg '{other}'")),
         }
     }
-    Ok(ControlRequest::WorkspaceFork { workspace, name, scope: None, from: None })
+    Ok(ControlRequest::WorkspaceFork {
+        workspace,
+        name,
+        scope: None,
+        from: None,
+    })
 }
 
 /// `ask QUESTION... [--choices a,b,c]`
@@ -122,7 +142,12 @@ pub(crate) fn parse_ask(args: Vec<String>) -> Result<ControlRequest, String> {
     if words.is_empty() {
         return Err("ask: expected a question".into());
     }
-    Ok(ControlRequest::Ask { question: words.join(" "), choices, scope: None, from: None })
+    Ok(ControlRequest::Ask {
+        question: words.join(" "),
+        choices,
+        scope: None,
+        from: None,
+    })
 }
 
 /// Stamp the caller's workspace scope + identity onto a parsed request.
@@ -134,24 +159,128 @@ pub(crate) fn with_identity(
     use ControlRequest::*;
     match request {
         List { .. } => List { scope, from },
-        New { name, cwd, command, workspace, file, .. } => New { name, cwd, command, workspace, file, scope, from },
-        Send { pane, text, submit, force, .. } => Send { pane, text, submit, force, scope, from },
-        SendRaw { pane, bytes_b64, force, .. } => SendRaw { pane, bytes_b64, force, scope, from },
-        Read { pane, lines, .. } => Read { pane, lines, scope, from },
+        New {
+            name,
+            cwd,
+            command,
+            workspace,
+            file,
+            ..
+        } => New {
+            name,
+            cwd,
+            command,
+            workspace,
+            file,
+            scope,
+            from,
+        },
+        Send {
+            pane,
+            text,
+            submit,
+            force,
+            ..
+        } => Send {
+            pane,
+            text,
+            submit,
+            force,
+            scope,
+            from,
+        },
+        SendRaw {
+            pane,
+            bytes_b64,
+            force,
+            ..
+        } => SendRaw {
+            pane,
+            bytes_b64,
+            force,
+            scope,
+            from,
+        },
+        Read { pane, lines, .. } => Read {
+            pane,
+            lines,
+            scope,
+            from,
+        },
         Status { pane, .. } => Status { pane, scope, from },
         Kill { pane, .. } => Kill { pane, scope, from },
         Scratchpad { pane, .. } => Scratchpad { pane, scope, from },
-        Propose { pane, text, reason, .. } => Propose { pane, text, reason, scope, from },
+        Propose {
+            pane, text, reason, ..
+        } => Propose {
+            pane,
+            text,
+            reason,
+            scope,
+            from,
+        },
         ProposeResult { id, .. } => ProposeResult { id, scope, from },
         Human { .. } => Human { scope, from },
-        CmdBegin { command, cwd, .. } => CmdBegin { command, cwd, scope, from },
+        CmdBegin { command, cwd, .. } => CmdBegin {
+            command,
+            cwd,
+            scope,
+            from,
+        },
         CmdEnd { exit, .. } => CmdEnd { exit, scope, from },
-        Commands { pane, limit, .. } => Commands { pane, limit, scope, from },
-        LastCommand { pane, failed_only, .. } => LastCommand { pane, failed_only, scope, from },
-        WorkspaceFork { workspace, name, .. } => WorkspaceFork { workspace, name, scope, from },
-        Timeline { since_secs, pane, actor, limit, .. } => Timeline { since_secs, pane, actor, limit, scope, from },
-        StatusSet { state, note, pane, .. } => StatusSet { state, note, pane, scope, from },
-        Ask { question, choices, .. } => Ask { question, choices, scope, from },
+        Commands { pane, limit, .. } => Commands {
+            pane,
+            limit,
+            scope,
+            from,
+        },
+        LastCommand {
+            pane, failed_only, ..
+        } => LastCommand {
+            pane,
+            failed_only,
+            scope,
+            from,
+        },
+        WorkspaceFork {
+            workspace, name, ..
+        } => WorkspaceFork {
+            workspace,
+            name,
+            scope,
+            from,
+        },
+        Timeline {
+            since_secs,
+            pane,
+            actor,
+            limit,
+            ..
+        } => Timeline {
+            since_secs,
+            pane,
+            actor,
+            limit,
+            scope,
+            from,
+        },
+        StatusSet {
+            state, note, pane, ..
+        } => StatusSet {
+            state,
+            note,
+            pane,
+            scope,
+            from,
+        },
+        Ask {
+            question, choices, ..
+        } => Ask {
+            question,
+            choices,
+            scope,
+            from,
+        },
         AskResult { id, .. } => AskResult { id, scope, from },
         Watch {
             since_seq,
@@ -210,17 +339,24 @@ pub(crate) fn with_identity(
             scope,
             from,
         },
-        Seize { pane, as_owner, .. } => Seize { pane, as_owner, scope, from },
+        Seize { pane, as_owner, .. } => Seize {
+            pane,
+            as_owner,
+            scope,
+            from,
+        },
         Release { pane, .. } => Release { pane, scope, from },
-        DriveMode { pane, mode, .. } => DriveMode { pane, mode, scope, from },
+        DriveMode { pane, mode, .. } => DriveMode {
+            pane,
+            mode,
+            scope,
+            from,
+        },
         Doctor { .. } => Doctor { scope, from },
         Brief { .. } => Brief { scope, from },
         Roster { .. } => Roster { scope, from },
         Note {
-            pane,
-            text,
-            append,
-            ..
+            pane, text, append, ..
         } => Note {
             pane,
             text,
@@ -248,11 +384,7 @@ pub(crate) fn with_identity(
             scope,
             from,
         },
-        Task {
-            pane,
-            id,
-            ..
-        } => Task {
+        Task { pane, id, .. } => Task {
             pane,
             id,
             scope,
@@ -385,11 +517,12 @@ pub(crate) fn parse_note(args: Vec<String>) -> Result<ControlRequest, String> {
             "--pane" => pane = Some(it.next().ok_or("note: --pane needs value")?),
             "--replace" => append = false,
             "--file" => file = Some(it.next().ok_or("note: --file needs PATH")?),
-            other if pane.is_none()
-                && !other.starts_with('-')
-                && !other.contains('/')
-                && words.is_empty()
-                && std::env::var("SEANCE_SESSION").is_err() =>
+            other
+                if pane.is_none()
+                    && !other.starts_with('-')
+                    && !other.contains('/')
+                    && words.is_empty()
+                    && std::env::var("SEANCE_SESSION").is_err() =>
             {
                 // first bare token as pane when outside seance
                 pane = Some(other.to_string());
@@ -398,9 +531,18 @@ pub(crate) fn parse_note(args: Vec<String>) -> Result<ControlRequest, String> {
         }
     }
     // If first word looks like pane id when multiple words
-    if pane.is_none() && !words.is_empty() && words[0].chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if pane.is_none()
+        && !words.is_empty()
+        && words[0]
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         // could be pane or text — if from is set, text only
-        if std::env::var("SEANCE_SESSION").ok().filter(|s| !s.is_empty()).is_none() {
+        if std::env::var("SEANCE_SESSION")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_none()
+        {
             pane = Some(words.remove(0));
         }
     }
@@ -452,12 +594,16 @@ pub(crate) fn parse_finish(args: Vec<String>) -> Result<ControlRequest, String> 
             }
             // When inside a seance pane, first bare token is body text (not pane).
             // Outside, first bare token can be pane if it looks like a slug.
-            other if pane.is_none()
-                && !other.starts_with('-')
-                && std::env::var("SEANCE_SESSION").ok().filter(|s| !s.is_empty()).is_none()
-                && other
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_') =>
+            other
+                if pane.is_none()
+                    && !other.starts_with('-')
+                    && std::env::var("SEANCE_SESSION")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .is_none()
+                    && other
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_') =>
             {
                 pane = Some(other.to_string());
             }
@@ -550,19 +696,32 @@ pub(crate) fn parse_read(args: Vec<String>) -> Result<ControlRequest, String> {
     }
 
     let pane = pane.ok_or("read: expected SESSION")?;
-    Ok(ControlRequest::Read { pane, lines, scope: None, from: None })
+    Ok(ControlRequest::Read {
+        pane,
+        lines,
+        scope: None,
+        from: None,
+    })
 }
 
 /// `status SESSION`
 pub(crate) fn parse_status(args: Vec<String>) -> Result<ControlRequest, String> {
     let pane = single_positional(args, "status")?;
-    Ok(ControlRequest::Status { pane, scope: None, from: None })
+    Ok(ControlRequest::Status {
+        pane,
+        scope: None,
+        from: None,
+    })
 }
 
 /// `kill SESSION`
 pub(crate) fn parse_kill(args: Vec<String>) -> Result<ControlRequest, String> {
     let pane = single_positional(args, "kill")?;
-    Ok(ControlRequest::Kill { pane, scope: None, from: None })
+    Ok(ControlRequest::Kill {
+        pane,
+        scope: None,
+        from: None,
+    })
 }
 
 /// `scratchpad [SESSION]` — defaults to `$SEANCE_SESSION` when unset.
@@ -579,7 +738,11 @@ pub(crate) fn parse_scratchpad(args: Vec<String>) -> Result<ControlRequest, Stri
     } else {
         single_positional(filtered, "scratchpad")?
     };
-    Ok(ControlRequest::Scratchpad { pane, scope: None, from: None })
+    Ok(ControlRequest::Scratchpad {
+        pane,
+        scope: None,
+        from: None,
+    })
 }
 
 /// `task [--id ID] [PANE]` — durable inject inbox / task envelope.
@@ -591,12 +754,10 @@ pub(crate) fn parse_task(args: Vec<String>) -> Result<ControlRequest, String> {
         match a.as_str() {
             "--id" | "--task" => id = Some(it.next().ok_or("task: --id needs value")?),
             "--help" | "-h" => {
-                return Err(
-                    "__help__\ntask [--id TASK_ID] [PANE]\n  \
+                return Err("__help__\ntask [--id TASK_ID] [PANE]\n  \
                      Show active inject inbox for a pane (default $SEANCE_SESSION).\n  \
                      Body is the durable text from the last `send`."
-                        .into(),
-                );
+                    .into());
             }
             other if !other.starts_with('-') => pane = Some(other.to_string()),
             other => return Err(format!("task: unexpected '{other}'")),
@@ -816,13 +977,15 @@ pub(crate) fn single_positional(args: Vec<String>, cmd: &str) -> Result<String, 
 }
 
 /// Consume the next iterator item as a flag's value, or explain its absence.
-pub(crate) fn take_value(it: &mut std::vec::IntoIter<String>, flag: &str) -> Result<String, String> {
+pub(crate) fn take_value(
+    it: &mut std::vec::IntoIter<String>,
+    flag: &str,
+) -> Result<String, String> {
     it.next().ok_or_else(|| format!("{flag} expects a value"))
 }
 
 pub(crate) fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
 
     for chunk in input.chunks(3) {

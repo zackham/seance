@@ -70,7 +70,11 @@ pub(crate) fn validate_status(state: &str) -> Result<(), String> {
 
 /// Agents may only mutate their own pane's status/pad unless `from` is unset
 /// (external cli orchestrator) or target matches session.
-pub(crate) fn assert_self_or_cross(target_slug: &str, from: &Option<String>, actor: &str) -> Result<(), String> {
+pub(crate) fn assert_self_or_cross(
+    target_slug: &str,
+    from: &Option<String>,
+    actor: &str,
+) -> Result<(), String> {
     // External orchestrator (no $SEANCE_SESSION) → cli may cross-pane.
     if from.is_none() || actor == "cli" || actor == "agent:cli" {
         return Ok(());
@@ -91,9 +95,7 @@ pub(crate) fn atomic_write_pad(path: &std::path::Path, contents: &str) -> Result
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let tmp = parent.join(format!(
         ".{}.tmp.{}",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("pad"),
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("pad"),
         std::process::id()
     ));
     std::fs::write(&tmp, contents).map_err(|e| e.to_string())?;
@@ -140,17 +142,21 @@ pub(crate) fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
 
-
     #[test]
     fn validate_status_accepts_vocab() {
-        for s in ["planning", "working", "blocked", "needs-human", "done", "idle"] {
+        for s in [
+            "planning",
+            "working",
+            "blocked",
+            "needs-human",
+            "done",
+            "idle",
+        ] {
             assert!(validate_status(s).is_ok(), "{s}");
         }
         assert!(validate_status("DONE").is_err());

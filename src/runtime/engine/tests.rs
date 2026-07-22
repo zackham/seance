@@ -4,7 +4,6 @@ use super::*;
 use crate::control::ControlRequest;
 use std::path::PathBuf;
 
-
 fn with_test_state_dir<T>(tag: &str, f: impl FnOnce() -> T) -> T {
     // Share lock with state::tests — both mutate SEANCE_STATE_DIR.
     let _g = crate::state::test_env_lock();
@@ -50,18 +49,14 @@ fn handle_control_list_scope_and_status_set() {
             from: None,
         });
         assert!(list_all.ok);
-        let panes = list_all.data.as_ref().unwrap()["panes"]
-            .as_array()
-            .unwrap();
+        let panes = list_all.data.as_ref().unwrap()["panes"].as_array().unwrap();
         assert_eq!(panes.len(), 2);
 
         let list_lab = eng.handle_control(ControlRequest::List {
             scope: Some("lab".into()),
             from: None,
         });
-        let panes = list_lab.data.as_ref().unwrap()["panes"]
-            .as_array()
-            .unwrap();
+        let panes = list_lab.data.as_ref().unwrap()["panes"].as_array().unwrap();
         assert_eq!(panes.len(), 1);
         assert_eq!(panes[0]["slug"], a);
 
@@ -74,7 +69,9 @@ fn handle_control_list_scope_and_status_set() {
         });
         assert!(set.ok, "{:?}", set.error);
         assert_eq!(
-            eng.statuses.get(&a).map(|(s, n)| (s.as_str(), n.as_deref())),
+            eng.statuses
+                .get(&a)
+                .map(|(s, n)| (s.as_str(), n.as_deref())),
             Some(("working", Some("busy")))
         );
 
@@ -164,7 +161,13 @@ fn handle_control_note_bumps_pad_rev() {
         assert_eq!(r2.data.as_ref().unwrap()["pad_rev"], 2);
         assert_eq!(eng.pad_revs.get(&slug).copied(), Some(2));
 
-        let path = eng.panes.iter().find(|p| p.slug == slug).unwrap().scratch_path.clone();
+        let path = eng
+            .panes
+            .iter()
+            .find(|p| p.slug == slug)
+            .unwrap()
+            .scratch_path
+            .clone();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("hello"));
         assert!(body.contains("world"));
@@ -182,15 +185,27 @@ fn begin_and_complete_task_lifecycle() {
 
         let id1 = eng.begin_task(&slug, "first inject");
         assert!(id1.starts_with("task-"));
-        assert_eq!(eng.active_tasks.get(&slug).map(|s| s.as_str()), Some(id1.as_str()));
+        assert_eq!(
+            eng.active_tasks.get(&slug).map(|s| s.as_str()),
+            Some(id1.as_str())
+        );
         assert_eq!(eng.tasks.get(&id1).map(|t| t.status.as_str()), Some("open"));
-        assert_eq!(eng.tasks.get(&id1).map(|t| t.body.as_str()), Some("first inject"));
+        assert_eq!(
+            eng.tasks.get(&id1).map(|t| t.body.as_str()),
+            Some("first inject")
+        );
 
         // Second inject cancels prior open task
         let id2 = eng.begin_task(&slug, "second inject");
         assert_ne!(id1, id2);
-        assert_eq!(eng.tasks.get(&id1).map(|t| t.status.as_str()), Some("cancelled"));
-        assert_eq!(eng.active_tasks.get(&slug).map(|s| s.as_str()), Some(id2.as_str()));
+        assert_eq!(
+            eng.tasks.get(&id1).map(|t| t.status.as_str()),
+            Some("cancelled")
+        );
+        assert_eq!(
+            eng.active_tasks.get(&slug).map(|s| s.as_str()),
+            Some(id2.as_str())
+        );
 
         let done = eng.complete_active_task(&slug, None);
         assert_eq!(done.as_deref(), Some(id2.as_str()));
@@ -198,9 +213,18 @@ fn begin_and_complete_task_lifecycle() {
         assert!(eng.active_tasks.get(&slug).is_none());
 
         // Sidecar written
-        let path = eng.panes.iter().find(|p| p.slug == slug).unwrap().scratch_path.clone();
-        assert!(path.with_extension("taskid").exists() || path.with_extension("task.json").exists()
-            || true /* last complete may leave files from begin */);
+        let path = eng
+            .panes
+            .iter()
+            .find(|p| p.slug == slug)
+            .unwrap()
+            .scratch_path
+            .clone();
+        assert!(
+            path.with_extension("taskid").exists()
+                || path.with_extension("task.json").exists()
+                || true /* last complete may leave files from begin */
+        );
 
         let _ = std::fs::remove_dir_all(&scratch);
     });
@@ -295,7 +319,10 @@ fn seize_release_drive_agency() {
         });
         assert!(drive.ok, "{:?}", drive.error);
         let pane = eng.panes.iter().find(|p| p.slug == slug).unwrap();
-        assert_eq!(pane.agency.drive_mode, crate::agency::DriveMode::LockedHuman);
+        assert_eq!(
+            pane.agency.drive_mode,
+            crate::agency::DriveMode::LockedHuman
+        );
 
         let _ = std::fs::remove_dir_all(&scratch);
     });

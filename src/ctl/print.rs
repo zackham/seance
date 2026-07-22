@@ -277,9 +277,7 @@ pub(crate) fn print_new(data: &serde_json::Value) {
 
 /// Best-effort string field extraction.
 pub(crate) fn str_field(v: &serde_json::Value, key: &str) -> Option<String> {
-    v.get(key)
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
+    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
 }
 
 /// Print a newline only if the text didn't already end with one — keeps
@@ -357,5 +355,3 @@ EXAMPLES:
     seance ctl doctor"
     );
 }
-
-

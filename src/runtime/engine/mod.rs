@@ -724,7 +724,12 @@ impl Engine {
     }
 
     fn owner_of_pane(&self, slug: &str) -> Option<&str> {
-        let ws = self.panes.iter().find(|p| p.slug == slug)?.workspace.as_str();
+        let ws = self
+            .panes
+            .iter()
+            .find(|p| p.slug == slug)?
+            .workspace
+            .as_str();
         self.owner_of_workspace(ws)
     }
 
@@ -862,7 +867,10 @@ impl Engine {
             .and_then(|p| {
                 let owner = self.owner_of_workspace(&p.workspace)?;
                 let conn = self.gui_conns.iter().find(|c| c.id == owner)?;
-                Some(conn.overview && conn.selected_workspace.as_deref() != Some(p.workspace.as_str()))
+                Some(
+                    conn.overview
+                        && conn.selected_workspace.as_deref() != Some(p.workspace.as_str()),
+                )
             })
             .unwrap_or(false);
         if use_full {
@@ -874,8 +882,7 @@ impl Engine {
 
     fn push_grid_now(&mut self, slug: &str) {
         self.grid_flush_pending.remove(slug);
-        self.last_grid_push
-            .insert(slug.to_string(), Instant::now());
+        self.last_grid_push.insert(slug.to_string(), Instant::now());
         if let Some(s) = self.session_mut(slug) {
             s.bump_rev();
         }
@@ -889,8 +896,7 @@ impl Engine {
     /// the circle was hidden.
     fn push_grid_full(&mut self, slug: &str) {
         self.grid_flush_pending.remove(slug);
-        self.last_grid_push
-            .insert(slug.to_string(), Instant::now());
+        self.last_grid_push.insert(slug.to_string(), Instant::now());
         self.last_grid_cells.remove(slug);
         if let Some(s) = self.session_mut(slug) {
             s.bump_rev();
@@ -934,8 +940,7 @@ impl Engine {
                     s.bump_rev();
                 }
                 self.grid_flush_pending.remove(slug);
-                self.last_grid_push
-                    .insert(slug.clone(), Instant::now());
+                self.last_grid_push.insert(slug.clone(), Instant::now());
                 if let Some(snap) = self.snapshot_pane(slug) {
                     let mut s = snap;
                     s.title = title.clone();
@@ -963,9 +968,7 @@ impl Engine {
                     format!("process exited ({code:?}) — auto-closed"),
                 );
                 self.kill_pane(&slug);
-                self.broadcast(GuiEvent::PaneKilled {
-                    slug: slug.clone(),
-                });
+                self.broadcast(GuiEvent::PaneKilled { slug: slug.clone() });
                 self.push_state_to_all();
                 self.persist();
             }
@@ -1026,11 +1029,7 @@ impl Engine {
         let running = if p.kind == "file" {
             true
         } else {
-            p.session
-                .as_ref()
-                .map(|s| s.is_running())
-                .unwrap_or(false)
-                && !p.agency.exited
+            p.session.as_ref().map(|s| s.is_running()).unwrap_or(false) && !p.agency.exited
         };
         let scratch = p.scratch_path.to_string_lossy().to_string();
         let scratchpad_bytes = std::fs::metadata(&p.scratch_path)
@@ -1100,11 +1099,7 @@ impl Engine {
                 let running = if p.kind == "file" {
                     true
                 } else {
-                    p.session
-                        .as_ref()
-                        .map(|s| s.is_running())
-                        .unwrap_or(false)
-                        && !p.agency.exited
+                    p.session.as_ref().map(|s| s.is_running()).unwrap_or(false) && !p.agency.exited
                 };
                 let w = p.agency.to_wire();
                 PaneInfo {
@@ -1183,8 +1178,7 @@ impl Engine {
                 if sole {
                     // First / only window: vacuum every known circle + any stale map keys.
                     for ws in self.all_workspace_names() {
-                        self.workspace_window
-                            .insert(ws, window_id.to_string());
+                        self.workspace_window.insert(ws, window_id.to_string());
                     }
                     // Remap anything still pointing at a dead window id.
                     let dead: Vec<String> = self
@@ -1230,10 +1224,8 @@ impl Engine {
                         self.selected_workspace = selected_workspace;
                     } else if sole {
                         // Reopen after last-close: pick first owned circle.
-                        self.selected_workspace = self
-                            .workspaces_for_window(window_id)
-                            .first()
-                            .cloned();
+                        self.selected_workspace =
+                            self.workspaces_for_window(window_id).first().cloned();
                         if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
                             if c.selected_workspace.is_none() {
                                 c.selected_workspace = self.selected_workspace.clone();
@@ -1318,8 +1310,7 @@ impl Engine {
                 // workspace switch that also reflows tiles can leave a blank
                 // pane until the human resizes the window.
                 self.last_grid_cells.remove(&pane);
-                self.last_grid_push
-                    .insert(pane.clone(), Instant::now());
+                self.last_grid_push.insert(pane.clone(), Instant::now());
                 if let Some(snap) = self.snapshot_pane(&pane) {
                     self.broadcast_grid(snap);
                 }
@@ -1407,12 +1398,15 @@ impl Engine {
                     if let Some(entry) = self.proposals.get_mut(&g.id) {
                         entry.1 = Some("rejected".into());
                     }
-                    events::log("human", None, Some(&pane), "propose_rejected", "rejected".into());
+                    events::log(
+                        "human",
+                        None,
+                        Some(&pane),
+                        "propose_rejected",
+                        "rejected".into(),
+                    );
                 }
-                self.broadcast(GuiEvent::Ghost {
-                    pane,
-                    ghost: None,
-                });
+                self.broadcast(GuiEvent::Ghost { pane, ghost: None });
                 None
             }
             GuiRequest::Spawn {
@@ -1423,15 +1417,13 @@ impl Engine {
                 file,
                 tiled,
             } => {
-                let ws = workspace
-                    .clone()
-                    .unwrap_or_else(|| {
-                        self.gui_conns
-                            .iter()
-                            .find(|c| c.id == window_id)
-                            .and_then(|c| c.selected_workspace.clone())
-                            .unwrap_or_else(|| "main".into())
-                    });
+                let ws = workspace.clone().unwrap_or_else(|| {
+                    self.gui_conns
+                        .iter()
+                        .find(|c| c.id == window_id)
+                        .and_then(|c| c.selected_workspace.clone())
+                        .unwrap_or_else(|| "main".into())
+                });
                 self.ensure_workspace_owned(&ws, window_id);
                 match self.spawn(SpawnSpec {
                     name,
@@ -1450,12 +1442,7 @@ impl Engine {
                             .find(|p| p.slug == slug)
                             .unwrap();
                         if let Some(owner) = self.owner_of_pane(&slug).map(|s| s.to_string()) {
-                            self.send_to(
-                                &owner,
-                                GuiEvent::PaneSpawned {
-                                    pane: info.clone(),
-                                },
-                            );
+                            self.send_to(&owner, GuiEvent::PaneSpawned { pane: info.clone() });
                         }
                         if let Some(snap) = self.snapshot_pane(&slug) {
                             self.broadcast_grid(snap);
@@ -1723,9 +1710,7 @@ impl Engine {
                 thread::spawn(move || {
                     thread::sleep(Duration::from_millis(100));
                     for slug in &slugs_d {
-                        let _ = tx.send(SessionEvent::ForceFullGrid {
-                            slug: slug.clone(),
-                        });
+                        let _ = tx.send(SessionEvent::ForceFullGrid { slug: slug.clone() });
                     }
                     thread::sleep(Duration::from_millis(250));
                     for slug in slugs_d {
@@ -1871,7 +1856,13 @@ impl Engine {
                     agency: crate::agency::Agency::default(),
                 },
             );
-            events::log("daemon", None, Some(&slug), "pane_spawned", "file pane".into());
+            events::log(
+                "daemon",
+                None,
+                Some(&slug),
+                "pane_spawned",
+                "file pane".into(),
+            );
             return Ok(slug);
         }
 
@@ -1891,8 +1882,7 @@ impl Engine {
             command = format!("{command} --continue");
         }
 
-        let session =
-            self.spawn_terminal_session(&slug, &command, &cwd_raw, &workspace, false)?;
+        let session = self.spawn_terminal_session(&slug, &command, &cwd_raw, &workspace, false)?;
 
         self.panes.insert(
             insert_at,
@@ -1951,8 +1941,7 @@ impl Engine {
         }
 
         let mut command = p.command.clone();
-        if p.resume_on_restore && command.starts_with("claude") && !command.contains("--continue")
-        {
+        if p.resume_on_restore && command.starts_with("claude") && !command.contains("--continue") {
             command = format!("{command} --continue");
         }
         if command == DEFAULT_COMMAND || command.starts_with("bash") {
@@ -2137,7 +2126,10 @@ impl Engine {
             }
         }
         order.retain(|w| w != moved);
-        let idx = order.iter().position(|w| w == before).unwrap_or(order.len());
+        let idx = order
+            .iter()
+            .position(|w| w == before)
+            .unwrap_or(order.len());
         order.insert(idx, moved.to_string());
         self.workspace_order = order;
         events::log(
@@ -2278,7 +2270,8 @@ impl Engine {
                 answer: a.answer.clone(),
             })
             .collect();
-        let pad_revs: Vec<(String, u64)> = self.pad_revs.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let pad_revs: Vec<(String, u64)> =
+            self.pad_revs.iter().map(|(k, v)| (k.clone(), *v)).collect();
         let inject_baselines: Vec<InjectBaseline> = self
             .inject_baselines
             .iter()
@@ -2314,4 +2307,3 @@ impl Engine {
         Ok((bundle, fds))
     }
 }
-

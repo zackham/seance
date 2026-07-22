@@ -101,10 +101,8 @@ fn builtins() -> Vec<PromptEntry> {
 
 /// Load merged library (builtins + user file). User ids override builtins.
 pub fn load_all() -> Vec<PromptEntry> {
-    let mut by_id: std::collections::BTreeMap<String, PromptEntry> = builtins()
-        .into_iter()
-        .map(|p| (p.id.clone(), p))
-        .collect();
+    let mut by_id: std::collections::BTreeMap<String, PromptEntry> =
+        builtins().into_iter().map(|p| (p.id.clone(), p)).collect();
     let path = config_path();
     if let Ok(bytes) = std::fs::read_to_string(&path) {
         if let Ok(file) = serde_json::from_str::<PromptFile>(&bytes) {
@@ -126,14 +124,8 @@ pub fn filter(entries: &[PromptEntry], query: &str) -> Vec<PromptEntry> {
     entries
         .iter()
         .filter(|e| {
-            let hay = format!(
-                "{} {} {} {}",
-                e.id,
-                e.title,
-                e.body,
-                e.tags.join(" ")
-            )
-            .to_ascii_lowercase();
+            let hay = format!("{} {} {} {}", e.id, e.title, e.body, e.tags.join(" "))
+                .to_ascii_lowercase();
             tokens.iter().all(|t| hay.contains(t))
         })
         .cloned()

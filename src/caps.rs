@@ -178,8 +178,7 @@ impl CapStore {
 
     fn purge_expired(&mut self) {
         let now = now_ms();
-        self.grants
-            .retain(|g| g.expires_ms.is_none_or(|e| e > now));
+        self.grants.retain(|g| g.expires_ms.is_none_or(|e| e > now));
     }
 
     fn has_grant(&self, principal: &str, op: &str, workspace: Option<&str>) -> bool {

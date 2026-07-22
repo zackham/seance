@@ -92,11 +92,8 @@ fn builtin(name: &str) -> Option<AgentProfile> {
     match name {
         "claude" => Some(AgentProfile {
             name: "claude".into(),
-            bin: first_existing(&[
-                "/home/zack/.local/bin/claude",
-                "/usr/local/bin/claude",
-            ])
-            .unwrap_or_else(|| "claude".into()),
+            bin: first_existing(&["/home/zack/.local/bin/claude", "/usr/local/bin/claude"])
+                .unwrap_or_else(|| "claude".into()),
             args: vec!["--dangerously-skip-permissions".into()],
             note: Some(
                 "Claude Code interactive; skip tool confirms for pair/swarm. \
@@ -273,11 +270,7 @@ pub fn doctor() -> Vec<DoctorRow> {
         .map(|n| match resolve(n) {
             Ok(p) => {
                 let exists = Path::new(&p.bin).exists() || which(&p.bin).is_some();
-                let version = if exists {
-                    version_of(&p.bin)
-                } else {
-                    None
-                };
+                let version = if exists { version_of(&p.bin) } else { None };
                 DoctorRow {
                     name: (*n).into(),
                     ok: exists,

@@ -13,9 +13,7 @@ use anyhow::{bail, Context as _, Result};
 
 use crate::control::{self, ControlRequest, ControlResponse};
 use crate::runtime::engine::{Engine, OwnedFdAdopt};
-use crate::runtime::protocol::{
-    GuiEvent, GuiRequest, HandoffBundle, Hello,
-};
+use crate::runtime::protocol::{GuiEvent, GuiRequest, HandoffBundle, Hello};
 use crate::runtime::{daemon_pid_path, SessionEvent, SharedEngine};
 
 /// Entry: `seance daemon` or `seance daemon --takeover PATH`.
@@ -110,8 +108,8 @@ fn run_daemon_inner(args: Vec<String>) -> Result<()> {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let listener = UnixListener::bind(&sock_path)
-        .with_context(|| format!("bind {}", sock_path.display()))?;
+    let listener =
+        UnixListener::bind(&sock_path).with_context(|| format!("bind {}", sock_path.display()))?;
     eprintln!("[seance daemon] listening on {}", sock_path.display());
     eprintln!("[seance daemon] pid {}", std::process::id());
 
@@ -260,10 +258,26 @@ fn serve_watch(
         // Prefer in-memory ring; fall back to disk for deeper history.
         let mut backlog = events::ring_since(since_seq);
         if backlog.is_empty() && since_seq > 0 {
-            backlog = events::read_ex(0, since_seq, scope.as_deref(), pane.as_deref(), actor.as_deref(), kinds.as_deref(), 500);
+            backlog = events::read_ex(
+                0,
+                since_seq,
+                scope.as_deref(),
+                pane.as_deref(),
+                actor.as_deref(),
+                kinds.as_deref(),
+                500,
+            );
         } else if backlog.is_empty() && since_seq == 0 {
             // Fresh subscriber with no cursor: last 50 matching from disk.
-            backlog = events::read_ex(0, 0, scope.as_deref(), pane.as_deref(), actor.as_deref(), kinds.as_deref(), 50);
+            backlog = events::read_ex(
+                0,
+                0,
+                scope.as_deref(),
+                pane.as_deref(),
+                actor.as_deref(),
+                kinds.as_deref(),
+                50,
+            );
         }
         for e in backlog {
             write_ev(&mut writer, &e)?;
@@ -569,11 +583,7 @@ fn recv_handoff(stream: UnixStream) -> Result<(HandoffBundle, Vec<OwnedFd>)> {
     stream.read_exact(&mut json)?;
     let bundle: HandoffBundle = serde_json::from_slice(&json)?;
 
-    let n_fds = bundle
-        .panes
-        .iter()
-        .filter_map(|p| p.fd_index)
-        .count();
+    let n_fds = bundle.panes.iter().filter_map(|p| p.fd_index).count();
     if n_fds == 0 {
         return Ok((bundle, Vec::new()));
     }
@@ -583,9 +593,11 @@ fn recv_handoff(stream: UnixStream) -> Result<(HandoffBundle, Vec<OwnedFd>)> {
         iov_base: dummy.as_mut_ptr() as *mut _,
         iov_len: 1,
     };
-    let mut cbuf = vec![0u8; unsafe {
-        libc::CMSG_SPACE((n_fds * std::mem::size_of::<RawFd>()) as u32) as usize
-    }];
+    let mut cbuf =
+        vec![
+            0u8;
+            unsafe { libc::CMSG_SPACE((n_fds * std::mem::size_of::<RawFd>()) as u32) as usize }
+        ];
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
@@ -687,8 +699,8 @@ pub fn ensure_daemon() -> Result<bool> {
 
 /// Ask the live daemon to upgrade to this binary.
 pub fn request_upgrade() -> Result<()> {
-    let mut stream = UnixStream::connect(control::socket_path())
-        .context("connect to daemon for upgrade")?;
+    let mut stream =
+        UnixStream::connect(control::socket_path()).context("connect to daemon for upgrade")?;
     // Blocking + long timeout: handoff with many panes can take >30s, and a
     // nonblocking socket races into EAGAIN (os error 11) on read_line.
     let _ = stream.set_nonblocking(false);

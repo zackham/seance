@@ -189,10 +189,7 @@ impl Bus {
         let Ok(ring) = self.ring.lock() else {
             return Vec::new();
         };
-        ring.iter()
-            .filter(|e| e.seq > since_seq)
-            .cloned()
-            .collect()
+        ring.iter().filter(|e| e.seq > since_seq).cloned().collect()
     }
 }
 
@@ -207,7 +204,13 @@ fn bus() -> &'static Bus {
 
 /// Append + publish one event. Best-effort: failure never breaks the app.
 /// Returns the fully stamped event (with id/seq).
-pub fn log(actor: &str, workspace: Option<&str>, pane: Option<&str>, kind: &str, detail: String) -> Event {
+pub fn log(
+    actor: &str,
+    workspace: Option<&str>,
+    pane: Option<&str>,
+    kind: &str,
+    detail: String,
+) -> Event {
     log_ex(actor, workspace, pane, kind, detail, LogOpts::default())
 }
 
@@ -287,7 +290,10 @@ pub fn read_ex(
         .filter(|e| actor.is_none_or(|a| e.actor == a || e.actor.starts_with(&format!("{a}:"))))
         .filter(|e| {
             kinds.is_none_or(|ks| {
-                ks.is_empty() || ks.iter().any(|k| k == &e.kind || e.kind.starts_with(k.as_str()))
+                ks.is_empty()
+                    || ks
+                        .iter()
+                        .any(|k| k == &e.kind || e.kind.starts_with(k.as_str()))
             })
         })
         .collect();

@@ -36,14 +36,26 @@ const SCROLL_HISTORY: usize = 10_000;
 /// Events surfaced to the engine / GUI broadcaster.
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
-    Wakeup { slug: String },
+    Wakeup {
+        slug: String,
+    },
     /// Delayed re-attempt after a throttled grid push (so the final frame
     /// after a spinner burst still lands).
-    FlushGrid { slug: String },
+    FlushGrid {
+        slug: String,
+    },
     /// Guaranteed FULL frame (post-kick repaint, damage desync recovery).
-    ForceFullGrid { slug: String },
-    Title { slug: String, title: Option<String> },
-    Exited { slug: String, code: Option<i32> },
+    ForceFullGrid {
+        slug: String,
+    },
+    Title {
+        slug: String,
+        title: Option<String>,
+    },
+    Exited {
+        slug: String,
+        code: Option<i32>,
+    },
 }
 
 struct Listener {
@@ -101,9 +113,7 @@ impl EventListener for Listener {
             }
             AlacEvent::ClipboardLoad(_, formatter) => {
                 // Best-effort empty clipboard (GUI owns the real clipboard).
-                let _ = self
-                    .write_tx
-                    .send(IoMsg::Write(formatter("").into_bytes()));
+                let _ = self.write_tx.send(IoMsg::Write(formatter("").into_bytes()));
             }
             _ => {}
         }
@@ -418,11 +428,7 @@ impl PtySession {
             bytes.extend_from_slice(b"\x1b[201~");
             self.write_bytes(bytes);
         } else {
-            self.write_bytes(
-                text.replace("\r\n", "\r")
-                    .replace('\n', "\r")
-                    .into_bytes(),
-            );
+            self.write_bytes(text.replace("\r\n", "\r").replace('\n', "\r").into_bytes());
         }
     }
 
@@ -715,9 +721,7 @@ fn io_loop(
                     }
                     let dims = Dims { cols: c, rows: r };
                     term.lock().resize(dims);
-                    let _ = event_tx.send(SessionEvent::Wakeup {
-                        slug: slug.clone(),
-                    });
+                    let _ = event_tx.send(SessionEvent::Wakeup { slug: slug.clone() });
                 }
                 Ok(IoMsg::Shutdown { kill_child }) => {
                     if kill_child {
@@ -767,9 +771,7 @@ fn io_loop(
                     let mut t = term.lock();
                     parser.advance(&mut *t, &buf[..n]);
                 }
-                let _ = event_tx.send(SessionEvent::Wakeup {
-                    slug: slug.clone(),
-                });
+                let _ = event_tx.send(SessionEvent::Wakeup { slug: slug.clone() });
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(_) => {
@@ -828,7 +830,15 @@ fn open_pty(cols: u16, rows: u16) -> Result<(OwnedFd, OwnedFd)> {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut ws) };
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut ws,
+        )
+    };
     if rc != 0 {
         bail!("openpty failed: {}", std::io::Error::last_os_error());
     }
@@ -887,8 +897,8 @@ fn color_for_index(index: usize) -> AlacRgb {
             let v = (8 + (index - 232) * 10) as u32;
             (v << 16) | (v << 8) | v
         }
-        256 => DEFAULT_FG, // foreground
-        257 => DEFAULT_BG, // background
+        256 => DEFAULT_FG,    // foreground
+        257 => DEFAULT_BG,    // background
         258 => 0x00_e5_c0_7b, // cursor
         _ => DEFAULT_FG,
     };

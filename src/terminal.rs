@@ -5,12 +5,7 @@
 //! EventLoop pumping the PTY on its own thread, and a gpui task moving
 //! events from the listener channel into this entity.
 
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use alacritty_terminal::{
     event::{Event as AlacEvent, EventListener, Notify, WindowSize},
@@ -497,9 +492,9 @@ fn color_for_index(index: usize) -> AlacRgb {
             let v = (8 + (index - 232) * 10) as u8;
             AlacRgb { r: v, g: v, b: v }
         }
-        256 => hsla_to_rgb(theme::SeancePalette::text()),      // foreground
-        257 => hsla_to_rgb(theme::SeancePalette::bg()),        // background
-        258 => hsla_to_rgb(theme::SeancePalette::flame()),     // cursor
+        256 => hsla_to_rgb(theme::SeancePalette::text()), // foreground
+        257 => hsla_to_rgb(theme::SeancePalette::bg()),   // background
+        258 => hsla_to_rgb(theme::SeancePalette::flame()), // cursor
         _ => hsla_to_rgb(theme::SeancePalette::text()),
     }
 }
@@ -538,13 +533,15 @@ pub fn convert_color(color: &AnsiColor, dim: bool) -> Option<gpui::Hsla> {
             NamedColor::DimWhite => Some(dimmed(theme::ansi_palette()[7])),
             NamedColor::DimForeground => Some(dimmed(theme::SeancePalette::text())),
         },
-        AnsiColor::Spec(rgb) => Some(gpui::Rgba {
-            r: rgb.r as f32 / 255.,
-            g: rgb.g as f32 / 255.,
-            b: rgb.b as f32 / 255.,
-            a: 1.,
-        }
-        .into()),
+        AnsiColor::Spec(rgb) => Some(
+            gpui::Rgba {
+                r: rgb.r as f32 / 255.,
+                g: rgb.g as f32 / 255.,
+                b: rgb.b as f32 / 255.,
+                a: 1.,
+            }
+            .into(),
+        ),
         AnsiColor::Indexed(i) => {
             let i = *i as usize;
             match i {
@@ -564,7 +561,15 @@ pub fn convert_color(color: &AnsiColor, dim: bool) -> Option<gpui::Hsla> {
                 }
                 _ => {
                     let v = (8 + (i.saturating_sub(232)) * 10) as f32 / 255.;
-                    Some(gpui::Rgba { r: v, g: v, b: v, a: 1. }.into())
+                    Some(
+                        gpui::Rgba {
+                            r: v,
+                            g: v,
+                            b: v,
+                            a: 1.,
+                        }
+                        .into(),
+                    )
                 }
             }
         }
@@ -662,16 +667,10 @@ pub fn keystroke_bytes(keystroke: &gpui::Keystroke, mode: TermMode) -> Option<Ve
 }
 
 /// Size helper for views: pixel bounds -> TermBounds with given cell metrics.
-pub fn term_bounds(
-    bounds: Bounds<Pixels>,
-    cell_width: Pixels,
-    line_height: Pixels,
-) -> TermBounds {
+pub fn term_bounds(bounds: Bounds<Pixels>, cell_width: Pixels, line_height: Pixels) -> TermBounds {
     TermBounds {
         cell_width,
         line_height,
         bounds,
     }
 }
-
-

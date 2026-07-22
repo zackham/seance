@@ -78,7 +78,11 @@ pub(crate) fn run_phone(
                 .and_then(|p| p.get("workspace").and_then(|s| s.as_str()))
                 .map(|s| s.to_string())
         })
-        .or_else(|| std::env::var("SEANCE_WORKSPACE").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("SEANCE_WORKSPACE")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| "main".into());
 
     // Roster lines for the seed (workspace-scoped when we can filter).
@@ -93,10 +97,7 @@ pub(crate) fn run_phone(
         let st = p.get("status").and_then(|s| s.as_str()).unwrap_or("-");
         let owner = p.get("owner").and_then(|s| s.as_str()).unwrap_or("none");
         let pad_rev = p.get("pad_rev").and_then(|v| v.as_u64()).unwrap_or(0);
-        let task = p
-            .get("task_id")
-            .and_then(|s| s.as_str())
-            .unwrap_or("-");
+        let task = p.get("task_id").and_then(|s| s.as_str()).unwrap_or("-");
         roster_lines.push_str(&format!(
             "· `{slug}` ({nm}) status={st} owner={owner} pad@r{pad_rev} task={task}\n"
         ));
@@ -192,8 +193,7 @@ pub(crate) fn run_phone(
          \n\
          Host has the seance daemon. Scope keeps you in this workspace unless `--all`.\n\
          Optional: status one-liners may post here when a pane goes needs-human.\n\
-         This topic is **not** an exclusive participant claim — just a phone surface."
-        ,
+         This topic is **not** an exclusive participant claim — just a phone surface.",
         roster = roster_lines,
     );
     let _ = run_vita_capability(
@@ -236,13 +236,7 @@ pub(crate) fn run_vita_capability(name: &str, input: &serde_json::Value) -> Resu
     let mut cmd = if run_script.exists() {
         let mut c = std::process::Command::new(&run_script);
         c.current_dir(&vita_root);
-        c.args([
-            "capabilities",
-            "call",
-            name,
-            "--input",
-            &input_s,
-        ]);
+        c.args(["capabilities", "call", name, "--input", &input_s]);
         c
     } else {
         let mut c = std::process::Command::new("vita");
@@ -279,7 +273,10 @@ pub(crate) fn run_prompts(args: Vec<String>, json_out: bool) -> i32 {
     let all = crate::prompts::load_all();
     let hits = crate::prompts::filter(&all, &q);
     if json_out {
-        println!("{}", serde_json::to_string_pretty(&hits).unwrap_or_else(|_| "[]".into()));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&hits).unwrap_or_else(|_| "[]".into())
+        );
     } else {
         for p in &hits {
             println!("{:<18} {}", p.id, p.title);

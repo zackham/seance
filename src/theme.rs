@@ -28,9 +28,7 @@
 //! (crates/ui/src/theme/color.rs:16) so degrees/percent match the table above.
 
 use gpui::{App, Hsla};
-use gpui_component::{
-    hsl, Colorize as _, Theme, ThemeColor, ThemeMode, ThemeTokens,
-};
+use gpui_component::{hsl, Colorize as _, Theme, ThemeColor, ThemeMode, ThemeTokens};
 
 /// The candlelit palette. Each associated fn returns a `gpui::Hsla`.
 ///

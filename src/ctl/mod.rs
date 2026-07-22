@@ -122,9 +122,6 @@ Exit → tombstone + status idle until `kill`.
 - Live docs for the human → **`new --file`**, never bat/watch loops.
 "#;
 
-
-
-
 pub fn run_ctl(args: Vec<String>) -> i32 {
     // Global flags may appear anywhere; pull them out first so subcommand
     // parsers don't have to each account for them.
@@ -158,9 +155,15 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
     let scope: Option<String> = if all_flag {
         None
     } else {
-        scope_override.or_else(|| std::env::var("SEANCE_WORKSPACE").ok().filter(|s| !s.is_empty()))
+        scope_override.or_else(|| {
+            std::env::var("SEANCE_WORKSPACE")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
     };
-    let from: Option<String> = std::env::var("SEANCE_SESSION").ok().filter(|s| !s.is_empty());
+    let from: Option<String> = std::env::var("SEANCE_SESSION")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     let mut it = rest.into_iter();
     let sub = match it.next() {
@@ -192,7 +195,10 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
             print!("{SKILL_TEXT}");
             return 0;
         }
-        "list" | "ls" => Ok(ControlRequest::List { scope: None, from: None }),
+        "list" | "ls" => Ok(ControlRequest::List {
+            scope: None,
+            from: None,
+        }),
         "new" => parse_new(sub_args),
         "send" => parse_send(sub_args),
         "send-raw" | "raw" => parse_send_raw(sub_args),
@@ -205,10 +211,17 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
         "ask" => parse_ask(sub_args),
         "propose" => parse_propose(sub_args),
         "propose-result" => match sub_args.first() {
-            Some(id) => Ok(ControlRequest::ProposeResult { id: id.clone(), scope: None, from: None }),
+            Some(id) => Ok(ControlRequest::ProposeResult {
+                id: id.clone(),
+                scope: None,
+                from: None,
+            }),
             None => Err("propose-result: expected PROPOSAL_ID".into()),
         },
-        "human" | "whereis-human" => Ok(ControlRequest::Human { scope: None, from: None }),
+        "human" | "whereis-human" => Ok(ControlRequest::Human {
+            scope: None,
+            from: None,
+        }),
         "fork" => parse_fork(sub_args),
         "cmd-begin" => {
             let mut cwd = None;
@@ -237,7 +250,11 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
             }
         }
         "cmd-end" => match sub_args.first().and_then(|v| v.parse::<i32>().ok()) {
-            Some(exit) => Ok(ControlRequest::CmdEnd { exit, scope: None, from: None }),
+            Some(exit) => Ok(ControlRequest::CmdEnd {
+                exit,
+                scope: None,
+                from: None,
+            }),
             None => Err("cmd-end: expected EXIT_CODE".into()),
         },
         "commands" => {
@@ -251,7 +268,12 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
                 }
             }
             match pane {
-                Some(pane) => Ok(ControlRequest::Commands { pane, limit, scope: None, from: None }),
+                Some(pane) => Ok(ControlRequest::Commands {
+                    pane,
+                    limit,
+                    scope: None,
+                    from: None,
+                }),
                 None => Err("commands: expected PANE".into()),
             }
         }
@@ -266,12 +288,21 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
                 }
             }
             match pane {
-                Some(pane) => Ok(ControlRequest::LastCommand { pane, failed_only, scope: None, from: None }),
+                Some(pane) => Ok(ControlRequest::LastCommand {
+                    pane,
+                    failed_only,
+                    scope: None,
+                    from: None,
+                }),
                 None => Err("last-command: expected PANE".into()),
             }
         }
         "ask-result" => match sub_args.first() {
-            Some(id) => Ok(ControlRequest::AskResult { id: id.clone(), scope: None, from: None }),
+            Some(id) => Ok(ControlRequest::AskResult {
+                id: id.clone(),
+                scope: None,
+                from: None,
+            }),
             None => Err("ask-result: expected ASK_ID".into()),
         },
         "watch" => parse_watch(sub_args),
@@ -289,9 +320,18 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
         "seize" => parse_seize(sub_args),
         "release" => parse_release(sub_args),
         "drive" | "drive-mode" => parse_drive(sub_args),
-        "doctor" => Ok(ControlRequest::Doctor { scope: None, from: None }),
-        "brief" => Ok(ControlRequest::Brief { scope: None, from: None }),
-        "roster" | "stage" => Ok(ControlRequest::Roster { scope: None, from: None }),
+        "doctor" => Ok(ControlRequest::Doctor {
+            scope: None,
+            from: None,
+        }),
+        "brief" => Ok(ControlRequest::Brief {
+            scope: None,
+            from: None,
+        }),
+        "roster" | "stage" => Ok(ControlRequest::Roster {
+            scope: None,
+            from: None,
+        }),
         "task" | "inbox" => parse_task(sub_args),
         "note" => parse_note(sub_args),
         "finish" => parse_finish(sub_args),
@@ -319,7 +359,9 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
         "prompts" => {
             return run_prompts(sub_args, json_out);
         }
-        other => Err(format!("unknown subcommand '{other}' (try `seance ctl help`)")),
+        other => Err(format!(
+            "unknown subcommand '{other}' (try `seance ctl help`)"
+        )),
     };
 
     let request = match request {
@@ -477,14 +519,13 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
     if response.ok {
         // pad --cat: body only (no path line) — one-hop verify.
         if scratch_cat {
-            let path = response
-                .data
-                .as_ref()
-                .and_then(|d| {
-                    d.as_str()
+            let path = response.data.as_ref().and_then(|d| {
+                d.as_str().map(|s| s.to_string()).or_else(|| {
+                    d.get("path")
+                        .and_then(|p| p.as_str())
                         .map(|s| s.to_string())
-                        .or_else(|| d.get("path").and_then(|p| p.as_str()).map(|s| s.to_string()))
-                });
+                })
+            });
             if let Some(path) = path {
                 match std::fs::read_to_string(&path) {
                     Ok(body) => {
@@ -553,7 +594,6 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
     }
 }
 
-
 /// `timeline [--since 10m|2h|30s] [--pane P] [--actor A] [--limit N]`
 
 pub(crate) enum ConnectError {
@@ -590,9 +630,7 @@ pub(crate) fn send_request(request: &ControlRequest) -> Result<ControlResponse, 
 
     let mut reader = BufReader::new(stream);
     let mut resp_line = String::new();
-    let n = reader
-        .read_line(&mut resp_line)
-        .map_err(ConnectError::Io)?;
+    let n = reader.read_line(&mut resp_line).map_err(ConnectError::Io)?;
     if n == 0 {
         return Err(ConnectError::Protocol(
             "connection closed before a response was received".into(),
@@ -639,10 +677,7 @@ mod tests {
         .unwrap();
         match req {
             ControlRequest::Send {
-                pane,
-                text,
-                submit,
-                ..
+                pane, text, submit, ..
             } => {
                 assert_eq!(pane, "worker");
                 assert_eq!(text, "run the tests");
@@ -677,7 +712,8 @@ mod tests {
 
     #[test]
     fn parse_finish_defaults() {
-        let req = parse_finish(vec!["--status".into(), "done".into(), "--empty-ok".into()]).unwrap();
+        let req =
+            parse_finish(vec!["--status".into(), "done".into(), "--empty-ok".into()]).unwrap();
         match req {
             ControlRequest::Finish {
                 status,
@@ -749,7 +785,9 @@ mod tests {
     fn parse_send_raw_encodes() {
         let req = parse_send_raw(vec!["w".into(), "\u{3}".into()]).unwrap();
         match req {
-            ControlRequest::SendRaw { pane, bytes_b64, .. } => {
+            ControlRequest::SendRaw {
+                pane, bytes_b64, ..
+            } => {
                 assert_eq!(pane, "w");
                 assert_eq!(bytes_b64, "Aw==");
             }
@@ -1047,17 +1085,19 @@ mod tests {
 
         let r = parse_revoke(vec!["agent:w".into(), "send".into()]).unwrap();
         match r {
-            ControlRequest::CapsRevoke {
-                principal, cap, ..
-            } => {
+            ControlRequest::CapsRevoke { principal, cap, .. } => {
                 assert_eq!(principal, "agent:w");
                 assert_eq!(cap, "send");
             }
             _ => panic!("expected revoke"),
         }
 
-        let p = parse_policy(vec!["propose_required".into(), "--workspace".into(), "lab".into()])
-            .unwrap();
+        let p = parse_policy(vec![
+            "propose_required".into(),
+            "--workspace".into(),
+            "lab".into(),
+        ])
+        .unwrap();
         match p {
             ControlRequest::PolicySet {
                 mode, workspace, ..

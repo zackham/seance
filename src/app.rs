@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use gpui::{
-    div, prelude::*, px, relative, Action, Animation, AnimationExt as _, Context, Entity,
-    FocusHandle, Focusable as _, SharedString, Window, ease_in_out,
+    div, ease_in_out, prelude::*, px, relative, Action, Animation, AnimationExt as _, Context,
+    Entity, FocusHandle, Focusable as _, SharedString, Window,
 };
 use gpui_component::{
     input::{Input, InputEvent, InputState},
@@ -38,12 +38,9 @@ use crate::{
 };
 use std::sync::Arc;
 
-fn decode_grid_b64(
-    data_b64: &str,
-    base: Option<&GridSnapshot>,
-) -> Result<GridSnapshot, String> {
-    use base64::Engine as _;
+fn decode_grid_b64(data_b64: &str, base: Option<&GridSnapshot>) -> Result<GridSnapshot, String> {
     use crate::runtime::snapshot::decode_grid_bin_onto;
+    use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_b64)
         .map_err(|e| e.to_string())?;
@@ -123,8 +120,7 @@ shell with bat/less/watch:
 - Wrong: `new --name x --command \"bash -c 'while true; do clear; bat f; sleep 1; done'\"`
 - Right:  `new --name x --file \"$PWD/path/to/f.md\"`
 
-Confirm you're oriented and ready, then wait for the next instruction."
-;
+Confirm you're oriented and ready, then wait for the next instruction.";
 
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]
@@ -177,7 +173,9 @@ fn tip(text: &'static str) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyV
 }
 
 /// Owned-string tooltip (host chip labels, errors, …).
-fn tip_s(text: impl Into<String>) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
+fn tip_s(
+    text: impl Into<String>,
+) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
     let text = text.into();
     move |window, cx| gpui_component::tooltip::Tooltip::new(text.clone()).build(window, cx)
 }
@@ -211,10 +209,7 @@ fn load_layout_file() -> (
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes) else {
         return empty();
     };
-    let split = v
-        .get("split_ratio")
-        .and_then(|x| x.as_f64())
-        .unwrap_or(0.5) as f32;
+    let split = v.get("split_ratio").and_then(|x| x.as_f64()).unwrap_or(0.5) as f32;
     let mut weights = std::collections::HashMap::new();
     if let Some(obj) = v.get("weights").and_then(|w| w.as_object()) {
         for (k, val) in obj {
@@ -325,7 +320,9 @@ enum Drawer {
     Closed,
     Activity,
     /// Live pad + task envelope for a pane (stage chip / pad chip).
-    Pad { slug: String },
+    Pad {
+        slug: String,
+    },
 }
 
 /// Overlay palette (precanned prompts or fuzzy jump).
@@ -431,16 +428,23 @@ fn now_ms() -> u64 {
 /// If `~/.local/share/seance/scratch/<slug>.telegram.json` exists, post status
 /// to that topic via vita (best-effort, never blocks the GUI).
 fn telegram_status_bridge(slug: &str, state: &str, note: Option<&str>) {
-    let path = PathBuf::from(shellexpand::tilde(&format!(
-        "~/.local/share/seance/scratch/{slug}.telegram.json"
-    )).into_owned());
+    let path = PathBuf::from(
+        shellexpand::tilde(&format!(
+            "~/.local/share/seance/scratch/{slug}.telegram.json"
+        ))
+        .into_owned(),
+    );
     let Ok(bytes) = std::fs::read_to_string(&path) else {
         return;
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes) else {
         return;
     };
-    let Some(topic_id) = v.get("topic_id").and_then(|t| t.as_str()).map(|s| s.to_string()) else {
+    let Some(topic_id) = v
+        .get("topic_id")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string())
+    else {
         return;
     };
     let text = match note {
@@ -455,11 +459,23 @@ fn telegram_status_bridge(slug: &str, state: &str, note: Option<&str>) {
         let mut cmd = if run.exists() {
             let mut c = std::process::Command::new(&run);
             c.current_dir(&vita);
-            c.args(["capabilities", "call", "vita.telegram.send", "--input", &input_s]);
+            c.args([
+                "capabilities",
+                "call",
+                "vita.telegram.send",
+                "--input",
+                &input_s,
+            ]);
             c
         } else {
             let mut c = std::process::Command::new("vita");
-            c.args(["capabilities", "call", "vita.telegram.send", "--input", &input_s]);
+            c.args([
+                "capabilities",
+                "call",
+                "vita.telegram.send",
+                "--input",
+                &input_s,
+            ]);
             c
         };
         let _ = cmd
@@ -698,19 +714,17 @@ impl SeanceApp {
         .detach();
 
         // Live-refresh pad drawer every 2s while open (disk mtime/content).
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(2000))
-                    .await;
-                let Some(this) = this.upgrade() else { break };
-                this.update(cx, |app: &mut SeanceApp, cx| {
-                    if matches!(app.drawer, Drawer::Pad { .. }) {
-                        app.pad_refresh_tick = app.pad_refresh_tick.wrapping_add(1);
-                        cx.notify();
-                    }
-                });
-            }
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(2000))
+                .await;
+            let Some(this) = this.upgrade() else { break };
+            this.update(cx, |app: &mut SeanceApp, cx| {
+                if matches!(app.drawer, Drawer::Pad { .. }) {
+                    app.pad_refresh_tick = app.pad_refresh_tick.wrapping_add(1);
+                    cx.notify();
+                }
+            });
         })
         .detach();
 
@@ -813,9 +827,8 @@ impl SeanceApp {
                     .enumerate()
                     .map(|(i, p)| (p.slug.as_str(), i))
                     .collect();
-                self.panes.sort_by_key(|p| {
-                    order.get(p.slug.as_str()).copied().unwrap_or(usize::MAX)
-                });
+                self.panes
+                    .sort_by_key(|p| order.get(p.slug.as_str()).copied().unwrap_or(usize::MAX));
                 // active_slug from daemon; repair if missing / not in selected
                 // workspace. Keyboard recovery is render-side (ensure_keyboard_focus)
                 // so we don't steal focus from whisper / rename / palette here.
@@ -874,11 +887,13 @@ impl SeanceApp {
                                 // rev and every full frame at that rev is dropped.
                                 rt.update(cx, |t, cx| t.clear_for_resync(cx));
                             }
-                            let _ = self.client.send(crate::runtime::protocol::GuiRequest::Attach {
-                                empty: false,
-                                selected_workspace: self.selected_workspace.clone(),
-                                focused_pane: self.active_slug.clone(),
-                            });
+                            let _ =
+                                self.client
+                                    .send(crate::runtime::protocol::GuiRequest::Attach {
+                                        empty: false,
+                                        selected_workspace: self.selected_workspace.clone(),
+                                        focused_pane: self.active_slug.clone(),
+                                    });
                         }
                     }
                 }
@@ -1027,9 +1042,10 @@ impl SeanceApp {
         // Skip paint work for panes not on screen. Hidden workspaces with
         // spinning TUIs used to keep the GUI at 90%+ CPU.
         let ws = self.selected_workspace.as_deref();
-        let visible = self.panes.iter().any(|p| {
-            p.slug == slug && p.popped.is_none() && ws.is_none_or(|w| p.workspace == w)
-        });
+        let visible = self
+            .panes
+            .iter()
+            .any(|p| p.slug == slug && p.popped.is_none() && ws.is_none_or(|w| p.workspace == w));
         if !visible {
             return;
         }
@@ -1327,11 +1343,8 @@ impl SeanceApp {
             return;
         }
         if info.kind == "file" {
-            let path = std::path::PathBuf::from(
-                info.file
-                    .clone()
-                    .unwrap_or_else(|| info.command.clone()),
-            );
+            let path =
+                std::path::PathBuf::from(info.file.clone().unwrap_or_else(|| info.command.clone()));
             let view = cx.new(|cx| crate::fileview::FileView::new(path.clone(), cx));
             self.panes.push(Pane {
                 kind: PaneKind::File,
@@ -1552,7 +1565,11 @@ impl SeanceApp {
     }
 
     /// Live attention with title spinners (needs `&App`).
-    fn workspace_attention_cx(&self, workspace: &str, cx: &gpui::App) -> Option<WorkspaceAttention> {
+    fn workspace_attention_cx(
+        &self,
+        workspace: &str,
+        cx: &gpui::App,
+    ) -> Option<WorkspaceAttention> {
         let needs = self.panes.iter().any(|p| {
             p.workspace == workspace
                 && matches!(
@@ -1757,22 +1774,17 @@ impl SeanceApp {
                             )
                             .children(badge),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_1()
-                            .min_h(px(100.))
-                            .children(if thumbs.is_empty() {
-                                vec![div()
-                                    .text_xs()
-                                    .text_color(SeancePalette::text_faint())
-                                    .child("(empty)")
-                                    .into_any_element()]
-                            } else {
-                                thumbs
-                            }),
-                    )
+                    .child(div().flex().flex_row().gap_1().min_h(px(100.)).children(
+                        if thumbs.is_empty() {
+                            vec![div()
+                                .text_xs()
+                                .text_color(SeancePalette::text_faint())
+                                .child("(empty)")
+                                .into_any_element()]
+                        } else {
+                            thumbs
+                        },
+                    ))
                     .into_any_element(),
             );
         }
@@ -1809,7 +1821,10 @@ impl SeanceApp {
         }
         let mut order = self.workspaces();
         order.retain(|w| w != moved);
-        let idx = order.iter().position(|w| w == before).unwrap_or(order.len());
+        let idx = order
+            .iter()
+            .position(|w| w == before)
+            .unwrap_or(order.len());
         order.insert(idx, moved.to_string());
         self.workspace_order = order;
         // Daemon owns persistence — GUI-only save would race and be overwritten
@@ -1881,9 +1896,7 @@ impl SeanceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input = cx.new(|cx| {
-            InputState::new(window, cx).default_value(current.to_string())
-        });
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(current.to_string()));
         cx.subscribe_in(
             &input,
             window,
@@ -2192,11 +2205,10 @@ impl SeanceApp {
             }
             return;
         };
-        let ok = self.active_slug.as_ref().is_some_and(|s| {
-            self.panes
-                .iter()
-                .any(|p| &p.slug == s && p.workspace == ws)
-        });
+        let ok = self
+            .active_slug
+            .as_ref()
+            .is_some_and(|s| self.panes.iter().any(|p| &p.slug == s && p.workspace == ws));
         if ok {
             if let Some(slug) = self.active_slug.clone() {
                 self.workspace_focus.insert(ws, slug);
@@ -2226,7 +2238,13 @@ impl SeanceApp {
                 .iter()
                 .find(|p| p.slug == slug)
                 .map(|p| p.workspace.clone());
-            events::log("human", ws.as_deref(), Some(slug), "focus", format!("focused '{slug}'"));
+            events::log(
+                "human",
+                ws.as_deref(),
+                Some(slug),
+                "focus",
+                format!("focused '{slug}'"),
+            );
         }
         self.active_slug = Some(slug.to_string());
         if let Some(pane) = self.panes.iter().find(|s| s.slug == slug) {
@@ -2440,7 +2458,8 @@ impl SeanceApp {
         if self.whisper.as_ref().is_some_and(|(s, _)| s == slug) {
             self.whisper = None;
         }
-        let drawer = cx.new(|cx| ScratchpadDrawer::new(&self.store, slug.to_string(), title, window, cx));
+        let drawer =
+            cx.new(|cx| ScratchpadDrawer::new(&self.store, slug.to_string(), title, window, cx));
         // Focus the notes editor.
         let focus = drawer.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
@@ -2485,12 +2504,15 @@ impl SeanceApp {
     #[allow(dead_code)]
     /// Retired: control plane lives in the daemon (`Engine::handle_control`).
     #[allow(dead_code)]
-    fn handle_control(&mut self, _request: ControlRequest, _cx: &mut Context<Self>) -> ControlResponse {
+    fn handle_control(
+        &mut self,
+        _request: ControlRequest,
+        _cx: &mut Context<Self>,
+    ) -> ControlResponse {
         ControlResponse::err(
             "control plane is daemon-only — this GUI path is retired (foundation 0.9.1)",
         )
     }
-
 
     /// Fork a workspace via the daemon (sole owner of PTYs + scratch copy).
     /// GUI never spawns local PTYs post-daemon-split.
@@ -2599,13 +2621,7 @@ impl SeanceApp {
         cx: &mut Context<Self>,
     ) {
         if let Some(pane) = self.panes.iter().find(|p| p.slug == slug) {
-            events::log(
-                "human",
-                Some(&pane.workspace),
-                Some(slug),
-                kind,
-                detail,
-            );
+            events::log("human", Some(&pane.workspace), Some(slug), kind, detail);
             if let Some(rt) = pane.remote_terminal() {
                 rt.read(cx).inject(text.to_string(), true);
                 self.touch(slug, "whispered", "you", cx);
@@ -2631,9 +2647,7 @@ impl SeanceApp {
     ) {
         let Some(slug) = self.active_slug.clone() else {
             window.push_notification(
-                gpui_component::notification::Notification::warning(
-                    "select a pane first",
-                ),
+                gpui_component::notification::Notification::warning("select a pane first"),
                 cx,
             );
             return;
@@ -2645,9 +2659,7 @@ impl SeanceApp {
             .is_some_and(|p| p.remote_terminal().is_some() || p.terminal().is_some());
         if !has_term {
             window.push_notification(
-                gpui_component::notification::Notification::warning(
-                    "active pane isn't a terminal",
-                ),
+                gpui_component::notification::Notification::warning("active pane isn't a terminal"),
                 cx,
             );
             return;
@@ -2663,17 +2675,12 @@ impl SeanceApp {
                     cx,
                 );
                 window.push_notification(
-                    gpui_component::notification::Notification::success(format!(
-                        "→ {profile}"
-                    )),
+                    gpui_component::notification::Notification::success(format!("→ {profile}")),
                     cx,
                 );
             }
             Err(e) => {
-                window.push_notification(
-                    gpui_component::notification::Notification::error(e),
-                    cx,
-                );
+                window.push_notification(gpui_component::notification::Notification::error(e), cx);
             }
         }
     }
@@ -2769,7 +2776,11 @@ impl SeanceApp {
         }
         self.touches.insert(
             slug.to_string(),
-            (verb.to_string(), actor.to_string(), std::time::Instant::now()),
+            (
+                verb.to_string(),
+                actor.to_string(),
+                std::time::Instant::now(),
+            ),
         );
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -2805,9 +2816,7 @@ impl SeanceApp {
             .panes
             .iter()
             .filter(|p| {
-                !p.tiled
-                    && p.popped.is_none()
-                    && ws.as_ref().is_none_or(|w| p.workspace == *w)
+                !p.tiled && p.popped.is_none() && ws.as_ref().is_none_or(|w| p.workspace == *w)
             })
             .collect();
         if shelved.is_empty() {
@@ -3163,7 +3172,9 @@ impl SeanceApp {
             }
             Err(e) => {
                 window.push_notification(
-                    gpui_component::notification::Notification::error(format!("switch failed: {e}")),
+                    gpui_component::notification::Notification::error(format!(
+                        "switch failed: {e}"
+                    )),
                     cx,
                 );
             }
@@ -3177,8 +3188,7 @@ impl SeanceApp {
         let by_workspace: Vec<(String, Vec<&Pane>)> = ordered
             .into_iter()
             .map(|ws| {
-                let panes: Vec<&Pane> =
-                    self.panes.iter().filter(|p| p.workspace == ws).collect();
+                let panes: Vec<&Pane> = self.panes.iter().filter(|p| p.workspace == ws).collect();
                 (ws, panes)
             })
             .collect();
@@ -3679,14 +3689,16 @@ impl SeanceApp {
                     .cursor_pointer()
                     .hover(|s| s.bg(SeancePalette::border()))
                     .tooltip(tip("click focus + pad drawer · double-click zoom"))
-                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                        if event.click_count() >= 2 {
-                            this.toggle_zoom(&slug, cx);
-                        } else {
-                            this.focus_pane_slug(&slug, window, cx);
-                            this.open_pad_drawer(&slug, cx);
-                        }
-                    }))
+                    .on_click(
+                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                            if event.click_count() >= 2 {
+                                this.toggle_zoom(&slug, cx);
+                            } else {
+                                this.focus_pane_slug(&slug, window, cx);
+                                this.open_pad_drawer(&slug, cx);
+                            }
+                        }),
+                    )
                     .child(label)
                     .into_any_element()
             }))
@@ -3702,9 +3714,7 @@ impl SeanceApp {
 
     /// Read pad body + task sidecar from disk (daemon-owned paths).
     fn load_pad_bundle(slug: &str) -> (String, Option<String>, Option<serde_json::Value>) {
-        let base = PathBuf::from(
-            shellexpand::tilde("~/.local/share/seance/scratch").into_owned(),
-        );
+        let base = PathBuf::from(shellexpand::tilde("~/.local/share/seance/scratch").into_owned());
         let pad_path = base.join(format!("{slug}.md"));
         let pad = std::fs::read_to_string(&pad_path).unwrap_or_else(|_| String::new());
         let task_id = std::fs::read_to_string(base.join(format!("{slug}.taskid")))
@@ -3718,9 +3728,12 @@ impl SeanceApp {
     }
 
     fn phone_bind_path(slug: &str) -> PathBuf {
-        PathBuf::from(shellexpand::tilde(&format!(
-            "~/.local/share/seance/scratch/{slug}.telegram.json"
-        )).into_owned())
+        PathBuf::from(
+            shellexpand::tilde(&format!(
+                "~/.local/share/seance/scratch/{slug}.telegram.json"
+            ))
+            .into_owned(),
+        )
     }
 
     fn phone_bind_json(slug: &str) -> Option<serde_json::Value> {
@@ -3779,8 +3792,9 @@ impl SeanceApp {
             this.update(cx, |app, cx| {
                 match out {
                     Ok(o) if o.status.success() => {
-                        let topic = Self::phone_linked(&slug)
-                            .unwrap_or_else(|| String::from_utf8_lossy(&o.stdout).trim().to_string());
+                        let topic = Self::phone_linked(&slug).unwrap_or_else(|| {
+                            String::from_utf8_lossy(&o.stdout).trim().to_string()
+                        });
                         if let Some(link) = Self::phone_link(&slug) {
                             let _ = std::process::Command::new("xdg-open")
                                 .arg(&link)
@@ -3906,9 +3920,7 @@ impl SeanceApp {
                         div()
                             .flex_1()
                             .text_xs()
-                            .text_color(status_color(
-                                st.map(|s| s.state.as_str()).unwrap_or("-"),
-                            ))
+                            .text_color(status_color(st.map(|s| s.state.as_str()).unwrap_or("-")))
                             .child(status_line),
                     ),
             )
@@ -4068,11 +4080,7 @@ impl SeanceApp {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .bg(SeancePalette::flame().opacity(if window_active {
-                        0.18
-                    } else {
-                        0.10
-                    }))
+                    .bg(SeancePalette::flame().opacity(if window_active { 0.18 } else { 0.10 }))
                     .border_b_2()
                     .border_color(if window_active {
                         SeancePalette::flame()
@@ -4331,9 +4339,23 @@ impl SeanceApp {
                     let hits = crate::prompts::filter(&all, query);
                     let items: Vec<_> = hits
                         .into_iter()
-                        .map(|p| (p.id, format!("{} — {}", p.title, p.body.chars().take(60).collect::<String>())))
+                        .map(|p| {
+                            (
+                                p.id,
+                                format!(
+                                    "{} — {}",
+                                    p.title,
+                                    p.body.chars().take(60).collect::<String>()
+                                ),
+                            )
+                        })
                         .collect();
-                    ("precanned prompts · ctrl+shift+k".into(), query.clone(), *selected, items)
+                    (
+                        "precanned prompts · ctrl+shift+k".into(),
+                        query.clone(),
+                        *selected,
+                        items,
+                    )
                 }
                 PaletteMode::Jump { query, selected } => {
                     let q = query.trim().to_ascii_lowercase();
@@ -4344,8 +4366,9 @@ impl SeanceApp {
                             if q.is_empty() {
                                 return true;
                             }
-                            let hay = format!("{} {} {} {}", p.name, p.slug, p.command, p.workspace)
-                                .to_ascii_lowercase();
+                            let hay =
+                                format!("{} {} {} {}", p.name, p.slug, p.command, p.workspace)
+                                    .to_ascii_lowercase();
                             q.split_whitespace().all(|t| hay.contains(t))
                         })
                         .map(|p| {
@@ -4362,13 +4385,16 @@ impl SeanceApp {
                         .collect();
                     // Also offer workspaces as jump targets with ws: prefix
                     for ws in self.workspaces() {
-                        if q.is_empty()
-                            || ws.to_ascii_lowercase().contains(&q)
-                        {
+                        if q.is_empty() || ws.to_ascii_lowercase().contains(&q) {
                             items.push((format!("ws:{ws}"), format!("workspace · {ws}")));
                         }
                     }
-                    ("jump · ctrl+shift+j".into(), query.clone(), *selected, items)
+                    (
+                        "jump · ctrl+shift+j".into(),
+                        query.clone(),
+                        *selected,
+                        items,
+                    )
                 }
             };
         let n = items.len();
@@ -4764,7 +4790,11 @@ impl SeanceApp {
     }
 
     fn weight_of(&self, slug: &str) -> f32 {
-        self.pane_weights.get(slug).copied().unwrap_or(1.0).max(0.15)
+        self.pane_weights
+            .get(slug)
+            .copied()
+            .unwrap_or(1.0)
+            .max(0.15)
     }
 }
 
@@ -4848,9 +4878,7 @@ fn render_session_row(
                 })
             },
         )
-        .drag_over::<DraggedPane>(|style, _, _, _| {
-            style.border_color(SeancePalette::flame_dim())
-        })
+        .drag_over::<DraggedPane>(|style, _, _, _| style.border_color(SeancePalette::flame_dim()))
         .on_drop(cx.listener({
             let target_slug = slug.clone();
             let target_ws = pane.workspace.clone();
@@ -4863,48 +4891,44 @@ fn render_session_row(
                 cx.stop_propagation();
             }
         }))
-        .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-            if event.click_count() == 2 {
-                let current = this
+        .on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                if event.click_count() == 2 {
+                    let current = this
+                        .panes
+                        .iter()
+                        .find(|p| p.slug == slug_for_click)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_default();
+                    this.start_rename(
+                        RenameTarget::Pane(slug_for_click.clone()),
+                        &current,
+                        window,
+                        cx,
+                    );
+                    return;
+                }
+                let popped = this
                     .panes
                     .iter()
                     .find(|p| p.slug == slug_for_click)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_default();
-                this.start_rename(
-                    RenameTarget::Pane(slug_for_click.clone()),
-                    &current,
-                    window,
-                    cx,
-                );
-                return;
-            }
-            let popped = this
-                .panes
-                .iter()
-                .find(|p| p.slug == slug_for_click)
-                .and_then(|p| p.popped);
-            if let Some(handle) = popped {
-                this.active_slug = Some(slug_for_click.clone());
-                let _ = handle.update(cx, |_, window, _| window.activate_window());
-                cx.notify();
-            } else {
-                // Click-to-show: a shelved pane tiles itself on click.
-                if let Some(p) = this.panes.iter_mut().find(|p| p.slug == slug_for_click) {
-                    if !p.tiled {
-                        p.tiled = true;
+                    .and_then(|p| p.popped);
+                if let Some(handle) = popped {
+                    this.active_slug = Some(slug_for_click.clone());
+                    let _ = handle.update(cx, |_, window, _| window.activate_window());
+                    cx.notify();
+                } else {
+                    // Click-to-show: a shelved pane tiles itself on click.
+                    if let Some(p) = this.panes.iter_mut().find(|p| p.slug == slug_for_click) {
+                        if !p.tiled {
+                            p.tiled = true;
+                        }
                     }
+                    this.set_active(&slug_for_click, window, cx);
                 }
-                this.set_active(&slug_for_click, window, cx);
-            }
-        }))
-        .child(
-            div()
-                .flex_none()
-                .size(px(7.))
-                .rounded_full()
-                .bg(dot_color),
+            }),
         )
+        .child(div().flex_none().size(px(7.)).rounded_full().bg(dot_color))
         .child(
             div()
                 .flex_1()
@@ -4926,13 +4950,7 @@ fn render_session_row(
         // Stage/roster lite: show badge text so humans see status without
         // flipping every pane (0.9.5).
         .when_some(status.map(|s| s.state.clone()), |d, st| {
-            d.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(dot_color)
-                    .child(st),
-            )
+            d.child(div().flex_none().text_xs().text_color(dot_color).child(st))
         })
         .child(
             div()
@@ -4957,13 +4975,21 @@ fn render_session_row(
         .context_menu(move |menu, _window, _cx| {
             let mut menu = menu
                 .menu(
-                    if menu_tiled { "shelve pane" } else { "tile pane" },
+                    if menu_tiled {
+                        "shelve pane"
+                    } else {
+                        "tile pane"
+                    },
                     Box::new(ActToggleTiled(menu_slug.clone())),
                 )
                 .menu("flip notes ✎", Box::new(ActOpenNotes(menu_slug.clone())))
                 .menu("rename", Box::new(ActRenamePane(menu_slug.clone())))
                 .menu(
-                    if is_popped { "return to circle ⇲" } else { "pop out ⇱" },
+                    if is_popped {
+                        "return to circle ⇲"
+                    } else {
+                        "pop out ⇱"
+                    },
                     Box::new(ActTogglePopout(menu_slug.clone())),
                 )
                 .separator();
@@ -5359,7 +5385,6 @@ fn render_pane(
                 ),
         )
         .child(body)
-
 }
 
 fn drawer_close_bar(title: &'static str, cx: &Context<SeanceApp>) -> impl IntoElement {
@@ -5442,7 +5467,12 @@ fn render_help() -> gpui::AnyElement {
             .gap_2()
             .text_sm()
             .text_color(SeancePalette::text_dim())
-            .child(div().flex_none().text_color(SeancePalette::flame_dim()).child("·"))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(SeancePalette::flame_dim())
+                    .child("·"),
+            )
             .child(div().child(text))
     }
 
@@ -5734,9 +5764,11 @@ impl Render for SeanceApp {
                     .client
                     .transfer_workspace(&act.workspace, &act.to_window);
             }))
-            .on_action(cx.listener(|this, act: &ActTransferWorkspaceNewWindow, _, cx| {
-                this.send_workspace_to_new_window(&act.0, cx);
-            }))
+            .on_action(
+                cx.listener(|this, act: &ActTransferWorkspaceNewWindow, _, cx| {
+                    this.send_workspace_to_new_window(&act.0, cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &ActCollectAllWindows, _, cx| {
                 let _ = this.client.collect_all();
             }))
@@ -5807,11 +5839,7 @@ impl Render for SeanceApp {
                 cx.listener(|this, _, _, cx| {
                     if this.sash_drag.is_some() {
                         this.sash_drag = None;
-                        save_layout_file(
-                            this.split_ratio,
-                            &this.pane_weights,
-                            &this.row_weights,
-                        );
+                        save_layout_file(this.split_ratio, &this.pane_weights, &this.row_weights);
                         cx.notify();
                     }
                 }),
@@ -5834,7 +5862,10 @@ impl Render for SeanceApp {
                     .child(self.render_stage_strip(window.is_window_active(), cx))
                     .child(self.render_tiles(window.is_window_active(), cx)),
             )
-            .children(self.overview.then(|| self.render_overview(cx).into_any_element()))
+            .children(
+                self.overview
+                    .then(|| self.render_overview(cx).into_any_element()),
+            )
             .children(self.render_palette(cx))
             .children(match &self.drawer {
                 Drawer::Closed => None,
@@ -5886,10 +5917,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
     for (i, &c) in ALPHABET.iter().enumerate() {
         lookup[c as usize] = i as u8;
     }
-    let input: Vec<u8> = input
-        .bytes()
-        .filter(|b| !b.is_ascii_whitespace())
-        .collect();
+    let input: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     let mut out = Vec::with_capacity(input.len() / 4 * 3);
     for chunk in input.chunks(4) {
         let vals: Vec<u8> = chunk

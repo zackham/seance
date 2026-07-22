@@ -80,8 +80,7 @@ impl GuiClient {
         if let Some(tx) = self.tx.lock().unwrap().as_ref() {
             let _ = tx.send(GuiRequest::Bye);
         }
-        self.stop
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         // Drop sender → supervisor sees Disconnected and exits.
         *self.tx.lock().unwrap() = None;
     }
@@ -216,12 +215,7 @@ impl GuiClient {
 
     /// Move `pane` into `workspace`. When `before` is set, insert immediately
     /// before that slug (sidebar / tile order); otherwise append.
-    pub fn move_pane(
-        &self,
-        pane: &str,
-        workspace: &str,
-        before: Option<&str>,
-    ) -> Result<()> {
+    pub fn move_pane(&self, pane: &str, workspace: &str, before: Option<&str>) -> Result<()> {
         self.send(GuiRequest::MovePane {
             pane: pane.to_string(),
             workspace: workspace.to_string(),
@@ -278,11 +272,16 @@ pub type PaneList = Vec<PaneInfo>;
 /// True if another non-daemon seance process is already running.
 fn other_gui_running() -> bool {
     let self_pid = std::process::id();
-    let Ok(out) = std::process::Command::new("pgrep").args(["-x", "seance"]).output() else {
+    let Ok(out) = std::process::Command::new("pgrep")
+        .args(["-x", "seance"])
+        .output()
+    else {
         return false;
     };
     for pid_s in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-        let Ok(pid) = pid_s.parse::<u32>() else { continue };
+        let Ok(pid) = pid_s.parse::<u32>() else {
+            continue;
+        };
         if pid == self_pid {
             continue;
         }
@@ -437,8 +436,8 @@ fn connection_supervisor(
 
 fn open_gui_stream() -> Result<UnixStream> {
     let path = socket_path();
-    let stream = UnixStream::connect(&path)
-        .with_context(|| format!("connect gui to {}", path.display()))?;
+    let stream =
+        UnixStream::connect(&path).with_context(|| format!("connect gui to {}", path.display()))?;
     let _ = stream.set_read_timeout(None);
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
     let mut writer = stream.try_clone()?;
@@ -448,9 +447,8 @@ fn open_gui_stream() -> Result<UnixStream> {
 }
 
 fn write_request(writer: &mut UnixStream, req: &GuiRequest) -> std::io::Result<()> {
-    let mut line = serde_json::to_string(req).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-    })?;
+    let mut line = serde_json::to_string(req)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     line.push('\n');
     writer.write_all(line.as_bytes())?;
     writer.flush()?;

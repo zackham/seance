@@ -48,23 +48,14 @@ pub(crate) fn run_wait(
             "--cat" | "--harvest" => cat_pads = true,
             "--task" => task_id = it.next(),
             "--min-bytes" => {
-                min_bytes = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(1);
+                min_bytes = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
             }
             "--ready" => ready = true,
             "--stable-ms" => {
-                stable_ms = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(1200);
+                stable_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(1200);
             }
             "--timeout" => {
-                timeout_secs = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(300);
+                timeout_secs = it.next().and_then(|v| v.parse().ok()).unwrap_or(300);
             }
             "--help" | "-h" => {
                 println!(
@@ -97,7 +88,8 @@ pub(crate) fn run_wait(
     }
 
     let started = std::time::Instant::now();
-    let mut last_screens: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut last_screens: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut stable_since: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
 
@@ -136,9 +128,7 @@ pub(crate) fn run_wait(
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
                     let tid = row.get("task_id").and_then(|v| v.as_str()).unwrap_or("-");
-                    eprintln!(
-                        "  {slug}: status={st} pad={bytes}B@r{rev} inj={inj:?} task={tid}"
-                    );
+                    eprintln!("  {slug}: status={st} pad={bytes}B@r{rev} inj={inj:?} task={tid}");
                 }
             }
             return 1;
@@ -156,7 +146,10 @@ pub(crate) fn run_wait(
         let brief = match send_request(&brief_req) {
             Ok(r) if r.ok => r,
             Ok(r) => {
-                eprintln!("seance ctl wait: {}", r.error.unwrap_or_else(|| "brief failed".into()));
+                eprintln!(
+                    "seance ctl wait: {}",
+                    r.error.unwrap_or_else(|| "brief failed".into())
+                );
                 return 1;
             }
             Err(_) => {
@@ -193,14 +186,14 @@ pub(crate) fn run_wait(
                 continue;
             };
 
-            let running = row.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+            let running = row
+                .get("running")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let exited = row.get("exited").and_then(|v| v.as_bool()).unwrap_or(false);
             let o = row.get("owner").and_then(|v| v.as_str()).unwrap_or("none");
             let st = row.get("status").and_then(|v| v.as_str());
-            let _pad = row
-                .get("scratchpad")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let _pad = row.get("scratchpad").and_then(|v| v.as_str()).unwrap_or("");
             let pad_bytes = row
                 .get("scratchpad_bytes")
                 .and_then(|v| v.as_u64())
@@ -274,9 +267,7 @@ pub(crate) fn run_wait(
             }
             if scratchpad {
                 if since_inject {
-                    let inj_rev = row
-                        .get("inject_pad_rev")
-                        .and_then(|v| v.as_u64());
+                    let inj_rev = row.get("inject_pad_rev").and_then(|v| v.as_u64());
                     let inj_bytes = row
                         .get("inject_pad_bytes")
                         .and_then(|v| v.as_u64())
@@ -315,13 +306,11 @@ pub(crate) fn run_wait(
                             .data
                             .as_ref()
                             .and_then(|d| {
-                                d.as_str()
-                                    .map(|s| s.to_string())
-                                    .or_else(|| {
-                                        d.get("screen")
-                                            .and_then(|s| s.as_str())
-                                            .map(|s| s.to_string())
-                                    })
+                                d.as_str().map(|s| s.to_string()).or_else(|| {
+                                    d.get("screen")
+                                        .and_then(|s| s.as_str())
+                                        .map(|s| s.to_string())
+                                })
                             })
                             .unwrap_or_default();
                         if let Some(c) = &contains {
@@ -454,7 +443,11 @@ pub(crate) fn run_wait(
 }
 
 /// Resolve a pane's scratchpad path via ctl and read the body (harvest helper).
-pub(crate) fn harvest_pad_body(pane: &str, scope: &Option<String>, from: &Option<String>) -> Option<String> {
+pub(crate) fn harvest_pad_body(
+    pane: &str,
+    scope: &Option<String>,
+    from: &Option<String>,
+) -> Option<String> {
     let req = with_identity(
         ControlRequest::Scratchpad {
             pane: pane.to_string(),
@@ -469,9 +462,11 @@ pub(crate) fn harvest_pad_body(pane: &str, scope: &Option<String>, from: &Option
         return None;
     }
     let path = r.data.as_ref().and_then(|d| {
-        d.as_str()
-            .map(|s| s.to_string())
-            .or_else(|| d.get("path").and_then(|p| p.as_str()).map(|s| s.to_string()))
+        d.as_str().map(|s| s.to_string()).or_else(|| {
+            d.get("path")
+                .and_then(|p| p.as_str())
+                .map(|s| s.to_string())
+        })
     })?;
     std::fs::read_to_string(path).ok()
 }
@@ -574,16 +569,10 @@ pub(crate) fn run_watch(request: &ControlRequest, json_out: bool) -> i32 {
         if let Some(data) = &resp.data {
             let seq = data.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
             let ts = data.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
-            let actor = data
-                .get("actor")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let actor = data.get("actor").and_then(|v| v.as_str()).unwrap_or("?");
             let kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
             let detail = data.get("detail").and_then(|v| v.as_str()).unwrap_or("");
-            let pane = data
-                .get("pane")
-                .and_then(|v| v.as_str())
-                .unwrap_or("-");
+            let pane = data.get("pane").and_then(|v| v.as_str()).unwrap_or("-");
             let origin = data
                 .get("origin")
                 .and_then(|v| v.as_str())

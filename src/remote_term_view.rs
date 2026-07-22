@@ -245,7 +245,8 @@ impl RemoteTerminalView {
                 ' '
             }
         };
-        let is_word = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':');
+        let is_word =
+            |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':');
         let col = (pos.col as usize).min(cols.saturating_sub(1));
         let ch0 = cell(col);
         if !is_word(ch0) {
@@ -309,12 +310,7 @@ impl RemoteTerminalView {
                 sel.cursor = pos;
             }
             SelectKind::Lines => {
-                let cols = self
-                    .terminal
-                    .read(cx)
-                    .snapshot
-                    .cols
-                    .saturating_sub(1);
+                let cols = self.terminal.read(cx).snapshot.cols.saturating_sub(1);
                 sel.cursor = CellPos {
                     row: pos.row,
                     col: cols,
@@ -478,7 +474,12 @@ impl RemoteTerminalView {
         }
     }
 
-    fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let line_height = px(FONT_SIZE * LINE_HEIGHT_FACTOR);
         self.scroll_accum +=
             f32::from(event.delta.pixel_delta(line_height).y) / f32::from(line_height);
@@ -722,11 +723,7 @@ impl Render for OverviewThumb {
                             let scale = fit.min(1.0);
                             let grid_w = cols * ncw * scale;
                             let grid_h = rows * nlh * scale;
-                            (
-                                scale,
-                                -((bw - grid_w) * 0.5),
-                                -((bh - grid_h) * 0.5),
-                            )
+                            (scale, -((bw - grid_w) * 0.5), -((bh - grid_h) * 0.5))
                         } else {
                             let scale = MIN_READABLE;
                             let cell_w = ncw * scale;
@@ -760,10 +757,7 @@ impl Render for OverviewThumb {
                         Layout {
                             // Separate cache key from the live full-size view.
                             // Include scale+scroll so crop pans invalidate cache.
-                            slug: format!(
-                                "ov:{slug}:{:.2}:{:.0}:{:.0}",
-                                scale, scroll_x, scroll_y
-                            ),
+                            slug: format!("ov:{slug}:{:.2}:{:.0}:{:.0}", scale, scroll_x, scroll_y),
                             bounds: paint_bounds,
                             cell_w,
                             line_h,
@@ -845,7 +839,11 @@ struct ShapedPaintCache {
     ghost_shaped: Option<(f32, f32, ShapedLine)>,
 }
 
-fn selection_key(sel: &Option<TermSelection>, cols: u16, rows: u16) -> Option<(u16, u16, u16, u16)> {
+fn selection_key(
+    sel: &Option<TermSelection>,
+    cols: u16,
+    rows: u16,
+) -> Option<(u16, u16, u16, u16)> {
     let sel = sel.as_ref()?;
     let (lo, hi) = sel.range(cols, rows);
     Some((lo.row, lo.col, hi.row, hi.col))
@@ -922,8 +920,7 @@ fn cache_matches(c: &ShapedPaintCache, layout: &Layout) -> bool {
         && c.font_size == f32::from(layout.font_size)
         && c.ghost == layout.ghost_text
         && c.input_origin == layout.input_origin
-        && c.selection_key
-            == selection_key(&layout.selection, layout.snap.cols, layout.snap.rows)
+        && c.selection_key == selection_key(&layout.selection, layout.snap.cols, layout.snap.rows)
 }
 
 fn replay_shaped_paint(c: &ShapedPaintCache, window: &mut Window, cx: &mut App) {
@@ -1077,9 +1074,8 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
     let sel = layout.selection.as_ref();
     let sel_cols = layout.snap.cols;
     let sel_rows = layout.snap.rows;
-    let in_sel = |row: usize, col: usize| {
-        sel.is_some_and(|s| s.contains(row, col, sel_cols, sel_rows))
-    };
+    let in_sel =
+        |row: usize, col: usize| sel.is_some_and(|s| s.contains(row, col, sel_cols, sel_rows));
     let sel_bg = SeancePalette::violet_dim().opacity(0.55);
 
     for row in 0..rows {
@@ -1142,9 +1138,7 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
             }
 
             let continues = open.as_ref().is_some_and(|b| {
-                b.row == row
-                    && b.style == style
-                    && b.start_col + b.text.chars().count() == col
+                b.row == row && b.style == style && b.start_col + b.text.chars().count() == col
             });
             if continues {
                 open.as_mut().unwrap().text.push(ch);
@@ -1262,11 +1256,7 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
                 font_size: f32::from(layout.font_size),
                 ghost: layout.ghost_text.clone(),
                 input_origin: layout.input_origin.clone(),
-                selection_key: selection_key(
-                    &layout.selection,
-                    layout.snap.cols,
-                    layout.snap.rows,
-                ),
+                selection_key: selection_key(&layout.selection, layout.snap.cols, layout.snap.rows),
                 rects: cache_rects,
                 texts: cache_texts,
                 cursor: (

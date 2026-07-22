@@ -147,9 +147,15 @@ impl TerminalView {
         }
     }
 
-    fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let line_height = px(FONT_SIZE * LINE_HEIGHT_FACTOR);
-        self.scroll_accum += f32::from(event.delta.pixel_delta(line_height).y) / f32::from(line_height);
+        self.scroll_accum +=
+            f32::from(event.delta.pixel_delta(line_height).y) / f32::from(line_height);
         let lines = self.scroll_accum.trunc() as i32;
         if lines == 0 {
             return;
@@ -263,13 +269,16 @@ impl Render for TerminalView {
                     cx.notify();
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
-                if this.selecting && event.dragging() {
-                    let position = event.position;
-                    this.terminal.update(cx, |term, _| term.update_selection(position));
-                    cx.notify();
-                }
-            }))
+            .on_mouse_move(
+                cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
+                    if this.selecting && event.dragging() {
+                        let position = event.position;
+                        this.terminal
+                            .update(cx, |term, _| term.update_selection(position));
+                        cx.notify();
+                    }
+                }),
+            )
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _event, window, cx| {
@@ -317,9 +326,10 @@ fn prepaint_terminal(
         underline: None,
         strikethrough: None,
     };
-    let probe = window
-        .text_system()
-        .shape_line(SharedString::from("█"), font_size, &[probe_run], None);
+    let probe =
+        window
+            .text_system()
+            .shape_line(SharedString::from("█"), font_size, &[probe_run], None);
     let cell_width = probe.width;
 
     // Resize the PTY grid if the pane geometry changed.
@@ -336,7 +346,8 @@ fn prepaint_terminal(
     terminal.read(cx).with_term(|term| {
         let content = term.renderable_content();
         let display_offset = content.display_offset as i32;
-        let show_cursor = content.cursor.shape != alacritty_terminal::vte::ansi::CursorShape::Hidden
+        let show_cursor = content.cursor.shape
+            != alacritty_terminal::vte::ansi::CursorShape::Hidden
             && display_offset == 0;
 
         // Batch cells by (line, contiguous run, style).
@@ -385,10 +396,7 @@ fn prepaint_terminal(
                 fg = bg.unwrap_or(SeancePalette::bg());
                 bg = Some(old_fg);
             }
-            if content
-                .selection
-                .is_some_and(|s| s.contains(grid_point))
-            {
+            if content.selection.is_some_and(|s| s.contains(grid_point)) {
                 bg = Some(SeancePalette::violet_dim());
                 fg = SeancePalette::text();
             }
@@ -432,13 +440,13 @@ fn prepaint_terminal(
                     color: Some(fg),
                     wavy: cell.flags.contains(Flags::UNDERCURL),
                 });
-            let strikethrough = cell
-                .flags
-                .contains(Flags::STRIKEOUT)
-                .then(|| gpui::StrikethroughStyle {
-                    thickness: px(1.),
-                    color: Some(fg),
-                });
+            let strikethrough =
+                cell.flags
+                    .contains(Flags::STRIKEOUT)
+                    .then(|| gpui::StrikethroughStyle {
+                        thickness: px(1.),
+                        color: Some(fg),
+                    });
 
             let mut cell_font = base_font.clone();
             cell_font.weight = weight;
@@ -556,7 +564,10 @@ fn prepaint_terminal(
         let banner_text = format!(
             "💭 {} proposes{} — enter/tab run · esc dismiss · type to override",
             g.from,
-            g.reason.as_deref().map(|r| format!(" ({r})")).unwrap_or_default()
+            g.reason
+                .as_deref()
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default()
         );
         let mut banner_color = SeancePalette::violet_dim();
         banner_color.a = 0.9;
@@ -621,10 +632,7 @@ fn paint_terminal(layout: FrameLayout, window: &mut Window, cx: &mut App) {
         } else {
             // Unfocused or beam: hollow-ish underline bar.
             window.paint_quad(fill(
-                Bounds::new(
-                    point(pos.x, pos.y + lh - px(2.)),
-                    gpui::size(cw, px(2.)),
-                ),
+                Bounds::new(point(pos.x, pos.y + lh - px(2.)), gpui::size(cw, px(2.))),
                 cursor.color,
             ));
         }
@@ -670,7 +678,9 @@ fn paint_terminal(layout: FrameLayout, window: &mut Window, cx: &mut App) {
             origin.x + cw * (ghost.col as f32 + 1.0),
             origin.y + lh * ghost.line as f32,
         );
-        let _ = ghost.shaped.paint(pos, lh, gpui::TextAlign::Left, None, window, cx);
+        let _ = ghost
+            .shaped
+            .paint(pos, lh, gpui::TextAlign::Left, None, window, cx);
         if let Some(banner) = &ghost.banner {
             let bpos = point(
                 origin.x + cw,

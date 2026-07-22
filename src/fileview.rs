@@ -40,8 +40,8 @@ use std::time::{Duration, SystemTime};
 use std::sync::Arc;
 
 use gpui::{
-    div, list, prelude::*, px, rems, ListAlignment, ListState, SharedString, StyleRefinement,
-    Task, WeakEntity, Window,
+    div, list, prelude::*, px, rems, ListAlignment, ListState, SharedString, StyleRefinement, Task,
+    WeakEntity, Window,
 };
 use gpui_component::{
     highlighter::HighlightTheme,
@@ -85,7 +85,9 @@ fn split_frontmatter(source: &str) -> (Option<Vec<(String, String)>>, &str) {
     let s = source;
     // Must start with --- on its own line (optional BOM / whitespace).
     let rest = s.strip_prefix('\u{feff}').unwrap_or(s);
-    let rest = rest.strip_prefix("---\n").or_else(|| rest.strip_prefix("---\r\n"));
+    let rest = rest
+        .strip_prefix("---\n")
+        .or_else(|| rest.strip_prefix("---\r\n"));
     let Some(rest) = rest else {
         return (None, source);
     };
@@ -129,7 +131,11 @@ fn parse_frontmatter_fields(yaml: &str) -> Vec<(String, String)> {
         // Skip nested list items (we flatten simple arrays on the key line).
         if line.starts_with('-') {
             if let Some((_, last_val)) = out.last_mut() {
-                let item = line.trim_start_matches('-').trim().trim_matches('"').trim_matches('\'');
+                let item = line
+                    .trim_start_matches('-')
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
                 if !last_val.is_empty() {
                     last_val.push_str(", ");
                 }
@@ -617,8 +623,10 @@ impl FileView {
                     SeancePalette::text_faint()
                 })
                 .when(enabled, |d| {
-                    d.cursor_pointer()
-                        .hover(|s| s.text_color(SeancePalette::flame()).bg(SeancePalette::surface()))
+                    d.cursor_pointer().hover(|s| {
+                        s.text_color(SeancePalette::flame())
+                            .bg(SeancePalette::surface())
+                    })
                 })
                 .child(glyph.to_string())
         };
@@ -682,9 +690,8 @@ impl FileView {
             )
             // ◀ N/M ▶
             .child(
-                btn("older", "◀", can_older).on_click(
-                    cx.listener(|this, _, _, cx| this.step_older(cx)),
-                ),
+                btn("older", "◀", can_older)
+                    .on_click(cx.listener(|this, _, _, cx| this.step_older(cx))),
             )
             .child(
                 div()
@@ -694,15 +701,13 @@ impl FileView {
                     .child(format!("{position}/{total}")),
             )
             .child(
-                btn("newer", "▶", can_newer).on_click(
-                    cx.listener(|this, _, _, cx| this.step_newer(cx)),
-                ),
+                btn("newer", "▶", can_newer)
+                    .on_click(cx.listener(|this, _, _, cx| this.step_newer(cx))),
             )
             // ⦿ live (jump back to tail)
             .child(
-                btn("golive", "⦿ live", !is_live).on_click(
-                    cx.listener(|this, _, _, cx| this.go_live(cx)),
-                ),
+                btn("golive", "⦿ live", !is_live)
+                    .on_click(cx.listener(|this, _, _, cx| this.go_live(cx))),
             )
     }
 
@@ -892,10 +897,7 @@ impl FileView {
                         if line.is_empty() {
                             div().h(px(14.)).into_any_element()
                         } else {
-                            div()
-                                .w_full()
-                                .child(line.to_string())
-                                .into_any_element()
+                            div().w_full().child(line.to_string()).into_any_element()
                         }
                     })
                     .size_full(),
@@ -922,7 +924,9 @@ impl FileView {
         let summary = if n_add == 0 && n_del == 0 {
             "diff vs. previous snapshot  ·  no line changes".to_string()
         } else if n_skip > 0 {
-            format!("diff vs. previous snapshot  ·  +{n_add}/-{n_del}  ·  {n_skip} unchanged hidden")
+            format!(
+                "diff vs. previous snapshot  ·  +{n_add}/-{n_del}  ·  {n_skip} unchanged hidden"
+            )
         } else {
             format!("diff vs. previous snapshot  ·  +{n_add}/-{n_del}")
         };
@@ -975,12 +979,9 @@ impl FileView {
                                 .into_any_element(),
                             other => {
                                 let (prefix, text, color, bg) = match other {
-                                    DiffLine::Context(t) => (
-                                        "  ",
-                                        t.as_str(),
-                                        SeancePalette::text_dim(),
-                                        None,
-                                    ),
+                                    DiffLine::Context(t) => {
+                                        ("  ", t.as_str(), SeancePalette::text_dim(), None)
+                                    }
                                     DiffLine::Added(t) => (
                                         "+ ",
                                         t.as_str(),
@@ -1084,10 +1085,7 @@ mod diff_tests {
         let d = unified_line_diff("a\n", "a\nb\n");
         assert_eq!(
             d,
-            vec![
-                DiffLine::Context("a".into()),
-                DiffLine::Added("b".into()),
-            ]
+            vec![DiffLine::Context("a".into()), DiffLine::Added("b".into()),]
         );
     }
 
@@ -1096,10 +1094,7 @@ mod diff_tests {
         let d = unified_line_diff("a\nb\n", "a\n");
         assert_eq!(
             d,
-            vec![
-                DiffLine::Context("a".into()),
-                DiffLine::Removed("b".into()),
-            ]
+            vec![DiffLine::Context("a".into()), DiffLine::Removed("b".into()),]
         );
     }
 
@@ -1144,10 +1139,7 @@ mod diff_tests {
                 _ => None,
             })
             .collect();
-        assert!(
-            !skips.is_empty(),
-            "expected at least one Skip, got {d:?}"
-        );
+        assert!(!skips.is_empty(), "expected at least one Skip, got {d:?}");
         // Full file is 20 context + 1 remove + 1 add raw; collapsed should be
         // far smaller than 20 context lines.
         let context_count = d

@@ -32,8 +32,9 @@ use gpui::{
     SharedString, Styled as _, Subscription, Task, WeakEntity,
 };
 use gpui_component::{
+    h_flex,
     input::{Input, InputEvent, InputState},
-    h_flex, v_flex, ActiveTheme as _,
+    v_flex, ActiveTheme as _,
 };
 
 /// How long we wait after the last keystroke before flushing to disk.
@@ -292,7 +293,10 @@ impl ScratchpadDrawer {
             Err(err) => {
                 // Non-fatal: keep dirty so the next debounce retries. Surface it
                 // for the integrator's logging rather than panicking the UI.
-                eprintln!("scratchpad: failed to save {}: {err:#}", self.path.display());
+                eprintln!(
+                    "scratchpad: failed to save {}: {err:#}",
+                    self.path.display()
+                );
             }
         }
     }
@@ -363,7 +367,11 @@ impl ScratchpadDrawer {
 }
 
 impl Render for ScratchpadDrawer {
-    fn render(&mut self, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let title: SharedString = self.title.clone().into();
         let path_hint: SharedString = self.path.display().to_string().into();
@@ -409,11 +417,7 @@ impl Render for ScratchpadDrawer {
                     .min_h_0()
                     .w_full()
                     .font_family(theme.mono_font_family.clone())
-                    .child(
-                        Input::new(&self.input)
-                            .h_full()
-                            .appearance(true),
-                    ),
+                    .child(Input::new(&self.input).h_full().appearance(true)),
             )
     }
 }
