@@ -287,11 +287,11 @@ fn serve_gui(
     let writer = Arc::new(Mutex::new(writer));
     let (tx, rx) = mpsc::channel::<GuiEvent>();
 
-    // Register for broadcasts.
-    {
+    // Register for broadcasts — one connection = one window.
+    let window_id = {
         let mut eng = engine.lock().unwrap();
-        eng.register_gui(tx.clone());
-    }
+        eng.register_gui(tx.clone())
+    };
 
     // Writer thread for push events.
     {
@@ -331,10 +331,19 @@ fn serve_gui(
                 continue;
             }
         };
-        let reply = engine.lock().unwrap().handle_gui(req);
+        let is_bye = matches!(req, GuiRequest::Bye);
+        let reply = engine.lock().unwrap().handle_gui(req, &window_id);
         if let Some(ev) = reply {
             let _ = tx.send(ev);
         }
+        if is_bye {
+            // Bye already ran unregister_gui; drop the connection.
+            break;
+        }
+    }
+    // Socket EOF (or post-Bye) — free / reassign if still registered.
+    if let Ok(mut eng) = engine.lock() {
+        eng.unregister_gui(&window_id);
     }
     Ok(())
 }

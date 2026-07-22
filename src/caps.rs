@@ -354,4 +354,92 @@ mod tests {
         assert!(s.check("cli", "kill", None).is_err());
         assert!(s.check("cli", "list", None).is_ok());
     }
+
+    #[test]
+    fn principal_of_shapes() {
+        assert_eq!(principal_of(&None), "cli");
+        assert_eq!(principal_of(&Some("w1".into())), "agent:w1");
+    }
+
+    #[test]
+    fn op_name_covers_hot_path() {
+        use crate::control::ControlRequest;
+        let send = ControlRequest::Send {
+            pane: "w".into(),
+            text: "x".into(),
+            submit: true,
+            force: false,
+            scope: None,
+            from: None,
+        };
+        assert_eq!(op_name(&send), "send");
+        assert_eq!(
+            op_name(&ControlRequest::List {
+                scope: None,
+                from: None
+            }),
+            "list"
+        );
+        assert_eq!(
+            op_name(&ControlRequest::Finish {
+                pane: None,
+                body: None,
+                append: true,
+                status: "done".into(),
+                status_note: None,
+                empty_ok: true,
+                task: None,
+                scope: None,
+                from: None,
+            }),
+            "finish"
+        );
+        assert_eq!(
+            op_name(&ControlRequest::Roster {
+                scope: None,
+                from: None
+            }),
+            "roster"
+        );
+    }
+
+    #[test]
+    fn grant_workspace_scope_and_wildcard() {
+        let mut s = CapStore {
+            default_policy: PolicyMode::ProposeRequired,
+            ..Default::default()
+        };
+        s.grant(Grant {
+            principal: "agent:w".into(),
+            cap: "send".into(),
+            workspace: Some("lab".into()),
+            expires_ms: None,
+        });
+        // Grant is workspace-scoped — other workspace still blocked.
+        assert!(s.check("agent:w", "send", Some("other")).is_err());
+        assert!(s.check("agent:w", "send", Some("lab")).is_ok());
+
+        s.grant(Grant {
+            principal: "agent:w".into(),
+            cap: "*".into(),
+            workspace: None,
+            expires_ms: None,
+        });
+        assert!(s.check("agent:w", "kill", Some("anywhere")).is_ok());
+    }
+
+    #[test]
+    fn expired_grant_does_not_apply() {
+        let mut s = CapStore {
+            default_policy: PolicyMode::ProposeRequired,
+            ..Default::default()
+        };
+        s.grant(Grant {
+            principal: "agent:w".into(),
+            cap: "send".into(),
+            workspace: None,
+            expires_ms: Some(1), // long expired
+        });
+        assert!(s.check("agent:w", "send", None).is_err());
+    }
 }

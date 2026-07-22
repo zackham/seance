@@ -641,10 +641,12 @@ impl Render for RemoteTerminalView {
                                 bounds,
                                 cell_w,
                                 line_h,
+                                font_size: px(FONT_SIZE),
                                 snap,
                                 ghost_text: ghost.map(|g| g.text),
                                 input_origin,
                                 selection,
+                                origin_gutter: true,
                             }
                         }
                     },
@@ -670,16 +672,131 @@ impl Render for RemoteTerminalView {
     }
 }
 
+/// Live terminal thumbnail for the workspace overview — paints the current
+/// grid scaled to fit, **never** resizes the PTY.
+pub struct OverviewThumb {
+    terminal: gpui::Entity<RemoteTerminal>,
+}
+
+impl OverviewThumb {
+    pub fn new(terminal: gpui::Entity<RemoteTerminal>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&terminal, |_, _, cx| cx.notify()).detach();
+        Self { terminal }
+    }
+}
+
+impl Render for OverviewThumb {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let term = self.terminal.clone();
+        div()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .bg(term_default_bg())
+            .child(
+                canvas(
+                    move |bounds, window, cx| {
+                        let (native_cw, native_lh) = cell_metrics(window);
+                        let snap = Arc::clone(&term.read(cx).snapshot);
+                        let ghost = term.read(cx).ghost.clone();
+                        let slug = term.read(cx).slug.clone();
+                        let input_origin = term.read(cx).last_input_origin.clone();
+
+                        let cols = snap.cols.max(1) as f32;
+                        let rows = snap.rows.max(1) as f32;
+                        let bw = f32::from(bounds.size.width).max(1.);
+                        let bh = f32::from(bounds.size.height).max(1.);
+                        let ncw = f32::from(native_cw).max(1.);
+                        let nlh = f32::from(native_lh).max(1.);
+                        let fit = (bw / (cols * ncw)).min(bh / (rows * nlh));
+
+                        // Never shrink past ~readable. If the whole grid won't
+                        // fit at that scale, crop (viewport) instead of micro-
+                        // text. That's why most cards looked pure black: fit
+                        // scale was ~0.1 and glyphs vanished into the bg.
+                        // Target ~8px font when crop is required.
+                        const MIN_READABLE: f32 = 0.42;
+                        let (scale, scroll_x, scroll_y) = if fit >= MIN_READABLE {
+                            // Whole grid fits — letterbox centered.
+                            let scale = fit.min(1.0);
+                            let grid_w = cols * ncw * scale;
+                            let grid_h = rows * nlh * scale;
+                            (
+                                scale,
+                                -((bw - grid_w) * 0.5),
+                                -((bh - grid_h) * 0.5),
+                            )
+                        } else {
+                            let scale = MIN_READABLE;
+                            let cell_w = ncw * scale;
+                            let line_h = nlh * scale;
+                            let grid_w = cols * cell_w;
+                            let grid_h = rows * line_h;
+                            let max_sx = (grid_w - bw).max(0.0);
+                            let max_sy = (grid_h - bh).max(0.0);
+                            // Bias viewport toward the cursor so active TUIs
+                            // show the interesting region, not blank top.
+                            let cx_px = (snap.cursor_col as f32 + 0.5) * cell_w;
+                            let cy_px = (snap.cursor_row as f32 + 0.5) * line_h;
+                            let sx = (cx_px - bw * 0.45).clamp(0.0, max_sx);
+                            let sy = (cy_px - bh * 0.55).clamp(0.0, max_sy);
+                            (scale, sx, sy)
+                        };
+
+                        let cell_w = px(ncw * scale);
+                        let line_h = px(nlh * scale);
+                        let grid_w = f32::from(cell_w) * cols;
+                        let grid_h = f32::from(line_h) * rows;
+                        let paint_bounds = Bounds {
+                            origin: point(
+                                bounds.origin.x - px(scroll_x),
+                                bounds.origin.y - px(scroll_y),
+                            ),
+                            size: gpui::size(px(grid_w), px(grid_h)),
+                        };
+                        // Font tracks scale so glyphs stay inside cells.
+                        let font_size = px((FONT_SIZE * scale).clamp(6.0, FONT_SIZE));
+                        Layout {
+                            // Separate cache key from the live full-size view.
+                            // Include scale+scroll so crop pans invalidate cache.
+                            slug: format!(
+                                "ov:{slug}:{:.2}:{:.0}:{:.0}",
+                                scale, scroll_x, scroll_y
+                            ),
+                            bounds: paint_bounds,
+                            cell_w,
+                            line_h,
+                            font_size,
+                            snap,
+                            ghost_text: ghost.map(|g| g.text),
+                            input_origin,
+                            selection: None,
+                            origin_gutter: false,
+                        }
+                    },
+                    |_bounds, layout: Layout, window, cx| {
+                        paint_grid(&layout, window, cx);
+                    },
+                )
+                .size_full(),
+            )
+    }
+}
+
 struct Layout {
     slug: String,
     bounds: Bounds<Pixels>,
     cell_w: Pixels,
     line_h: Pixels,
+    font_size: Pixels,
     snap: Arc<crate::runtime::snapshot::GridSnapshot>,
     ghost_text: Option<String>,
     /// Causal tint: who last wrote stdin.
     input_origin: Option<String>,
     selection: Option<TermSelection>,
+    /// Left-edge origin rail (full terminal only — thumbs skip it).
+    origin_gutter: bool,
 }
 
 /// Metrics side-channel: paint runs outside Entity update, so mouse handlers
@@ -717,6 +834,7 @@ struct ShapedPaintCache {
     height: f32,
     cell_w: f32,
     line_h: f32,
+    font_size: f32,
     ghost: Option<String>,
     input_origin: Option<String>,
     /// (start_row, start_col, end_row, end_col) or None.
@@ -801,6 +919,7 @@ fn cache_matches(c: &ShapedPaintCache, layout: &Layout) -> bool {
         && c.height == f32::from(layout.bounds.size.height)
         && c.cell_w == f32::from(layout.cell_w)
         && c.line_h == f32::from(layout.line_h)
+        && c.font_size == f32::from(layout.font_size)
         && c.ghost == layout.ghost_text
         && c.input_origin == layout.input_origin
         && c.selection_key
@@ -922,7 +1041,9 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
                 let c = c.clone();
                 drop(guard);
                 replay_shaped_paint(&c, window, cx);
-                paint_origin_gutter(layout, window);
+                if layout.origin_gutter {
+                    paint_origin_gutter(layout, window);
+                }
                 return;
             }
         }
@@ -1062,7 +1183,7 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
 
     // Shape + paint text runs. force_width = cell width snaps glyphs to the
     // grid (box-drawing / logo stay column-aligned without per-cell shaping).
-    let font_size = px(FONT_SIZE);
+    let font_size = layout.font_size;
     let mut cache_texts: Vec<(f32, f32, ShapedLine)> = Vec::with_capacity(batches.len());
     for b in &batches {
         let font = if b.style.bold {
@@ -1123,6 +1244,10 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
         let _ = shaped.paint(pos, layout.line_h, gpui::TextAlign::Left, None, window, cx);
     }
 
+    if layout.origin_gutter {
+        paint_origin_gutter(layout, window);
+    }
+
     if let Ok(mut guard) = shaped_paint_caches().lock() {
         guard.insert(
             layout.slug.clone(),
@@ -1134,6 +1259,7 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
                 height: f32::from(layout.bounds.size.height),
                 cell_w: f32::from(layout.cell_w),
                 line_h: f32::from(layout.line_h),
+                font_size: f32::from(layout.font_size),
                 ghost: layout.ghost_text.clone(),
                 input_origin: layout.input_origin.clone(),
                 selection_key: selection_key(

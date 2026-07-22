@@ -284,14 +284,22 @@ pub fn unique_slug(name: &str, taken: &[&str]) -> String {
     }
 }
 
+/// Process-global lock for `SEANCE_STATE_DIR` mutations (tests only).
+/// Shared by `state` and `engine` tests so parallel env writes cannot race.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
-
-    // `set_var`/`remove_var` are process-global; serialize env-mutating tests so
-    // they don't race each other.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use std::sync::MutexGuard;
 
     /// RAII guard that points `SEANCE_STATE_DIR` at a unique temp dir for the
     /// duration of a test, restores the previous value, and cleans up.
@@ -303,7 +311,7 @@ mod tests {
 
     impl StateDirGuard {
         fn new(tag: &str) -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = test_env_lock();
             let prev = std::env::var("SEANCE_STATE_DIR").ok();
 
             let mut dir = std::env::temp_dir();

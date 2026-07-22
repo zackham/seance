@@ -19,11 +19,16 @@ pub struct Hello {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum GuiRequest {
     /// Full attach: daemon replies with State then streams grids.
+    /// `empty: true` = new/second window that claims no existing workspaces
+    /// (unless this is the only GUI, in which case orphans are always claimed).
     Attach {
         #[serde(default)]
         selected_workspace: Option<String>,
         #[serde(default)]
         focused_pane: Option<String>,
+        /// Prefer an empty window (second process / "new window").
+        #[serde(default)]
+        empty: bool,
     },
     Input {
         pane: String,
@@ -115,6 +120,23 @@ pub enum GuiRequest {
         #[serde(default)]
         workspace: Option<String>,
     },
+    /// Live multi-workspace grid streaming for the overview (ctrl+shift+space).
+    /// When enabled, non-selected workspaces push at a reduced rate so thumbs
+    /// stay live without thrashing the GUI.
+    SetOverview {
+        enabled: bool,
+    },
+    /// Force a FULL grid frame for one pane (GUI resync after damage desync).
+    RefreshGrid {
+        pane: String,
+    },
+    /// Move a workspace to another GUI window (exclusive ownership).
+    TransferWorkspace {
+        workspace: String,
+        to_window: String,
+    },
+    /// Pull every workspace into this window (other windows go empty).
+    CollectAll,
     AnswerAsk {
         id: String,
         answer: String,
@@ -122,10 +144,29 @@ pub enum GuiRequest {
     /// Classic control plane ops from the GUI (status-set, etc.).
     Ctl(ControlRequest),
     Ping,
+    /// Window is closing — reassign workspaces and drop this connection.
+    Bye,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// One GUI window connected to the daemon.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WindowInfo {
+    pub id: String,
+    /// e.g. `cadence +2` or `(empty)`.
+    pub label: String,
+    pub workspace_count: usize,
+}
+
+/// Workspace living on another window (for pull-to-here menus).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForeignWorkspace {
+    pub workspace: String,
+    pub window_id: String,
+    pub window_label: String,
 }
 
 /// Daemon → GUI push messages.
@@ -140,6 +181,15 @@ pub enum GuiEvent {
         workspace_order: Vec<String>,
         asks: Vec<AskInfo>,
         statuses: Vec<StatusInfo>,
+        /// This GUI connection's window id (multi-window).
+        #[serde(default)]
+        window_id: Option<String>,
+        /// All live windows (for transfer menus). Label = first ws + "+N".
+        #[serde(default)]
+        windows: Vec<WindowInfo>,
+        /// Workspaces owned by *other* windows (empty-sidebar pull menu).
+        #[serde(default)]
+        foreign_workspaces: Vec<ForeignWorkspace>,
     },
     /// Legacy JSON grid (debug / fallback). Live path prefers [`Self::GridBin`].
     Grid(GridSnapshot),

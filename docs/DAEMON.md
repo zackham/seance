@@ -8,7 +8,7 @@ window is a disposable client. That is the use→develop→use loop.
 | process | owns | dies when |
 |---------|------|-----------|
 | `seance daemon` | PTYs, alacritty `Term` grids, control plane, pane metadata | rare; graceful upgrade keeps sessions |
-| `seance` (GUI) | window, chrome, notes flip, whisper UI, rendering | any rebuild — reconnects |
+| `seance` (GUI) | window, chrome, notes flip, rendering | any rebuild — reconnects |
 | `seance ctl` | nothing (client) | n/a |
 
 ## Sockets
@@ -41,11 +41,17 @@ still subscribed to a dead connection.
 `seance daemon upgrade` (or auto when GUI starts a newer binary):
 
 1. Spawn new daemon with `--takeover <handoff-sock>`.
-2. Old daemon shuts down I/O threads without SIGHUP (dup master FDs,
-   `ManuallyDrop` / forget alacritty Pty path — we use our own PTY owner).
+2. Old daemon shuts down I/O threads without SIGHUP: each PTY I/O thread
+   transfers the master FD via `into_raw_fd` (no close), signals release;
+   `prepare_handoff` takes that FD once (no concurrent close/dup race).
 3. Pass per-pane: metadata, grid snapshot, master FD via `SCM_RIGHTS`, child pid.
-4. New daemon adopts FDs, rebuilds I/O, binds `seance.sock`.
-5. Old process exits. Children never saw SIGHUP.
+4. New daemon **adopts** FDs only — it does **not** respawn a shell if handoff
+   fails (respawn used to hide dead children and look like “only claude survived”).
+5. Old process exits. Children never saw SIGHUP when step 2 succeeded.
+
+If you see a shell die across upgrade while an agent pane lives, check
+`~/.local/share/seance/daemon-upgrade.log` for `handoff prepare failed` /
+`not respawning` lines — that is a failed FD transfer, not intentional.
 
 ## Wire (GUI, summary)
 
@@ -77,7 +83,7 @@ session. GUI death is free; daemon death is not.
 ```bash
 cargo build --release
 
-# GUI chrome only (flip/whisper/help/render) — sessions LIVE:
+# GUI chrome only (flip/help/render) — sessions LIVE:
 #   close the window, or kill the non-daemon process only, then:
 seance                         # reconnects to existing daemon
 

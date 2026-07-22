@@ -19,7 +19,7 @@ First compile of GPUI is slow (~10 min). Incremental builds are fine.
 ## Layout
 
 - `src/daemon/` + `src/runtime/` — long-lived session runtime (PTYs, grids)
-- `src/app.rs` — shared-space UI (sidebar, tiling, ask/whisper/arm)
+- `src/app.rs` — shared-space UI (sidebar, tiling, ask/arm)
 - `src/remote_term*.rs` — GUI terminal paint path
 - `src/fileview.rs` — co-editing file panes
 - `src/ctl.rs` — `seance ctl` + `skill` text (canonical agent protocol)

@@ -64,6 +64,11 @@ impl ScratchpadStore {
     /// Create the store, ensuring `~/.local/share/seance/scratch/` exists.
     pub fn new() -> Result<Self> {
         let dir = PathBuf::from(shellexpand::tilde("~/.local/share/seance/scratch").into_owned());
+        Self::with_dir(dir)
+    }
+
+    /// Store backed by an explicit directory (tests, isolated profiles).
+    pub fn with_dir(dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating scratchpad dir {}", dir.display()))?;
         Ok(Self { dir })
@@ -104,6 +109,42 @@ fn sanitize_slug(slug: &str) -> String {
         "scratch".to_string()
     } else {
         cleaned
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_slug_replaces_hostile_chars() {
+        assert_eq!(sanitize_slug("a/b c"), "a-b-c");
+        assert_eq!(sanitize_slug("ok-slug_1.md"), "ok-slug_1.md");
+        assert_eq!(sanitize_slug(""), "scratch");
+        assert_eq!(sanitize_slug("!!!"), "---");
+    }
+
+    #[test]
+    fn with_dir_path_for_creates_header() {
+        let dir = std::env::temp_dir().join(format!(
+            "seance-scratch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        let store = ScratchpadStore::with_dir(dir.clone()).unwrap();
+        let path = store.path_for("worker-1");
+        assert!(path.exists());
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("worker-1"));
+        assert!(body.contains("scratchpad"));
+        // second call leaves existing content
+        std::fs::write(&path, "custom\n").unwrap();
+        let path2 = store.path_for("worker-1");
+        assert_eq!(std::fs::read_to_string(&path2).unwrap(), "custom\n");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

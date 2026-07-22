@@ -24,7 +24,10 @@ const RECONNECT_BACKOFF: Duration = Duration::from_millis(400);
 const WRITE_POLL: Duration = Duration::from_millis(200);
 
 pub struct GuiClient {
-    tx: Mutex<Sender<GuiRequest>>,
+    /// None after intentional disconnect (window closed) — stops supervisor reconnect.
+    tx: Mutex<Option<Sender<GuiRequest>>>,
+    /// Shared with supervisor: once set, never open a new socket.
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GuiClient {
@@ -35,6 +38,19 @@ impl GuiClient {
     /// (daemon upgrade, brief socket blip, etc.) and re-sends `Attach` so the
     /// GUI re-syncs full state + grids.
     pub fn connect() -> Result<(Arc<Self>, Receiver<GuiEvent>)> {
+        // Second process: `seance` while another GUI is up → empty window.
+        // Same-process new window uses connect_empty().
+        let empty = std::env::var("SEANCE_EMPTY_WINDOW").ok().as_deref() == Some("1")
+            || other_gui_running();
+        Self::connect_opts(empty)
+    }
+
+    /// Attach as an empty window (claims no existing workspaces).
+    pub fn connect_empty() -> Result<(Arc<Self>, Receiver<GuiEvent>)> {
+        Self::connect_opts(true)
+    }
+
+    fn connect_opts(empty: bool) -> Result<(Arc<Self>, Receiver<GuiEvent>)> {
         let path = socket_path();
         // Probe: fail fast if nothing is listening.
         let probe = UnixStream::connect(&path)
@@ -43,22 +59,39 @@ impl GuiClient {
 
         let (req_tx, req_rx) = mpsc::channel::<GuiRequest>();
         let (ev_tx, ev_rx) = mpsc::channel::<GuiEvent>();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_sup = Arc::clone(&stop);
 
         thread::Builder::new()
             .name("seance-gui-conn".into())
-            .spawn(move || connection_supervisor(req_rx, ev_tx))
+            .spawn(move || connection_supervisor(req_rx, ev_tx, empty, stop_sup))
             .context("spawn gui connection supervisor")?;
 
         let client = Arc::new(Self {
-            tx: Mutex::new(req_tx),
+            tx: Mutex::new(Some(req_tx)),
+            stop,
         });
         Ok((client, ev_rx))
+    }
+
+    /// Tell the daemon this window is gone, then kill the supervisor (no reconnect).
+    pub fn disconnect(&self) {
+        // Best-effort Bye so workspaces reassign before the socket dies.
+        if let Some(tx) = self.tx.lock().unwrap().as_ref() {
+            let _ = tx.send(GuiRequest::Bye);
+        }
+        self.stop
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Drop sender → supervisor sees Disconnected and exits.
+        *self.tx.lock().unwrap() = None;
     }
 
     pub fn send(&self, req: GuiRequest) -> Result<()> {
         self.tx
             .lock()
             .unwrap()
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("gui client disconnected"))?
             .send(req)
             .map_err(|_| anyhow::anyhow!("gui client disconnected"))
     }
@@ -146,6 +179,29 @@ impl GuiClient {
         self.send(GuiRequest::SetFocus { pane, workspace })
     }
 
+    /// Enable/disable multi-workspace live grid streaming (overview mode).
+    pub fn set_overview(&self, enabled: bool) -> Result<()> {
+        self.send(GuiRequest::SetOverview { enabled })
+    }
+
+    /// Request a FULL grid frame for one pane (repair after damage desync).
+    pub fn refresh_grid(&self, pane: &str) -> Result<()> {
+        self.send(GuiRequest::RefreshGrid {
+            pane: pane.to_string(),
+        })
+    }
+
+    pub fn transfer_workspace(&self, workspace: &str, to_window: &str) -> Result<()> {
+        self.send(GuiRequest::TransferWorkspace {
+            workspace: workspace.to_string(),
+            to_window: to_window.to_string(),
+        })
+    }
+
+    pub fn collect_all(&self) -> Result<()> {
+        self.send(GuiRequest::CollectAll)
+    }
+
     pub fn kill_workspace(&self, workspace: &str) -> Result<()> {
         self.send(GuiRequest::KillWorkspace {
             workspace: workspace.to_string(),
@@ -219,13 +275,47 @@ pub type PaneList = Vec<PaneInfo>;
 /// Owns the socket lifecycle: connect → hello → attach → pump requests +
 /// events → on drop, backoff and retry. `req_rx` is the app's outbound queue;
 /// `ev_tx` feeds the GUI event bridge.
-fn connection_supervisor(req_rx: Receiver<GuiRequest>, ev_tx: Sender<GuiEvent>) {
+/// True if another non-daemon seance process is already running.
+fn other_gui_running() -> bool {
+    let self_pid = std::process::id();
+    let Ok(out) = std::process::Command::new("pgrep").args(["-x", "seance"]).output() else {
+        return false;
+    };
+    for pid_s in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+        let Ok(pid) = pid_s.parse::<u32>() else { continue };
+        if pid == self_pid {
+            continue;
+        }
+        let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+            .unwrap_or_default()
+            .replace('\0', " ");
+        if cmdline.contains("daemon") {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn connection_supervisor(
+    req_rx: Receiver<GuiRequest>,
+    ev_tx: Sender<GuiEvent>,
+    empty: bool,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
     let mut pending: Option<GuiRequest> = None;
     let mut first = true;
     loop {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
         let stream = match open_gui_stream() {
             Ok(s) => s,
             Err(e) => {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
                 if first {
                     // connect() already probed successfully; this is a race.
                     eprintln!("[seance gui] connect failed: {e:#}; retrying…");
@@ -283,6 +373,7 @@ fn connection_supervisor(req_rx: Receiver<GuiRequest>, ev_tx: Sender<GuiEvent>) 
             &GuiRequest::Attach {
                 selected_workspace: None,
                 focused_pane: None,
+                empty,
             },
         )
         .is_err()
@@ -303,11 +394,23 @@ fn connection_supervisor(req_rx: Receiver<GuiRequest>, ev_tx: Sender<GuiEvent>) 
 
         // Pump outbound requests until the reader dies or the app drops us.
         let mut alive = true;
+        let mut intentional = false;
         while alive {
+            if stop.load(Ordering::SeqCst) {
+                intentional = true;
+                break;
+            }
             match req_rx.recv_timeout(WRITE_POLL) {
                 Ok(req) => {
+                    let is_bye = matches!(req, GuiRequest::Bye);
                     if write_request(&mut writer, &req).is_err() {
-                        pending = Some(req);
+                        if !is_bye {
+                            pending = Some(req);
+                        }
+                        alive = false;
+                    } else if is_bye {
+                        // Daemon reassigns workspaces; do not reconnect.
+                        intentional = true;
                         alive = false;
                     }
                 }
@@ -321,6 +424,9 @@ fn connection_supervisor(req_rx: Receiver<GuiRequest>, ev_tx: Sender<GuiEvent>) 
                     return;
                 }
             }
+        }
+        if intentional || stop.load(Ordering::SeqCst) {
+            return;
         }
         eprintln!("[seance gui] disconnected from daemon; reconnecting…");
         // Give the old reader a moment to exit before we open a new socket.

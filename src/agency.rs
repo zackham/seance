@@ -295,4 +295,66 @@ mod tests {
         assert!(a.may_inject("agent:w2", false).is_err());
         assert!(a.may_inject("cli", false).is_ok()); // orchestrator
     }
+
+    #[test]
+    fn owner_parse_and_as_str_roundtrip() {
+        assert_eq!(Owner::parse("none"), Owner::None);
+        assert_eq!(Owner::parse("human"), Owner::Human);
+        assert_eq!(Owner::parse("you"), Owner::Human);
+        assert_eq!(Owner::parse("cli"), Owner::Agent("cli".into()));
+        assert_eq!(Owner::parse("agent:w1"), Owner::Agent("w1".into()));
+        assert_eq!(Owner::parse("w1"), Owner::Agent("w1".into()));
+        assert_eq!(Owner::None.as_str(), "none");
+        assert_eq!(Owner::Human.as_str(), "human");
+        assert_eq!(Owner::Agent("cli".into()).as_str(), "cli");
+        assert_eq!(Owner::Agent("w1".into()).as_str(), "agent:w1");
+    }
+
+    #[test]
+    fn drive_mode_parse_aliases() {
+        assert_eq!(DriveMode::parse("pair"), Some(DriveMode::Pair));
+        assert_eq!(DriveMode::parse("free"), Some(DriveMode::Pair));
+        assert_eq!(DriveMode::parse("locked"), Some(DriveMode::LockedHuman));
+        assert_eq!(DriveMode::parse("agent"), Some(DriveMode::AgentLed));
+        assert_eq!(DriveMode::parse("nope"), None);
+        assert_eq!(DriveMode::Pair.as_str(), "pair");
+        assert_eq!(DriveMode::LockedHuman.as_str(), "locked_human");
+    }
+
+    #[test]
+    fn exited_pane_blocks_inject() {
+        let mut a = Agency::default();
+        a.mark_exited(Some(1));
+        assert!(a.exited);
+        assert!(a.owner.is_none());
+        assert!(a.may_inject("cli", false).is_err());
+        assert!(a.may_inject("cli", true).is_ok()); // force still ok
+    }
+
+    #[test]
+    fn release_clears_owner() {
+        let mut a = Agency::default();
+        a.human_steal();
+        assert!(a.owner.is_human());
+        a.release();
+        assert!(a.owner.is_none());
+        assert!(a.may_inject("agent:w", false).is_ok());
+    }
+
+    #[test]
+    fn snap_roundtrip_resets_timers() {
+        let mut a = Agency::default();
+        a.human_steal();
+        a.drive_mode = DriveMode::AgentLed;
+        a.mark_exited(Some(42));
+        let snap = a.to_snap();
+        let restored = Agency::from_snap(&snap);
+        assert!(restored.exited);
+        assert_eq!(restored.exit_code, Some(42));
+        assert_eq!(restored.drive_mode, DriveMode::AgentLed);
+        // Timers reset → human_idle true even if owner was human pre-exit
+        // (mark_exited cleared owner to None).
+        assert!(restored.human_idle());
+        assert!(restored.owner.is_none());
+    }
 }

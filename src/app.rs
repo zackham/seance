@@ -573,6 +573,9 @@ impl SeanceApp {
                 workspace_order,
                 asks,
                 statuses,
+                window_id: _,
+                windows: _,
+                foreign_workspaces: _,
             } => {
                 self.selected_workspace = selected_workspace;
                 self.active_slug = focused_pane;
@@ -693,6 +696,7 @@ impl SeanceApp {
                                 rt.update(cx, |t, cx| t.clear_for_resync(cx));
                             }
                             let _ = self.client.send(crate::runtime::protocol::GuiRequest::Attach {
+                                empty: false,
                                 selected_workspace: self.selected_workspace.clone(),
                                 focused_pane: self.active_slug.clone(),
                             });

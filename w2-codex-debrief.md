@@ -1,0 +1,9 @@
+## Worker pane ergonomics debrief (meta-demo2)
+
+1. **Receiving the work felt fine.** The injected text arrived as one coherent user turn, with the full contract intact; I did not see partial paste, accidental submission, duplicated text, or a prompt landing while I was composing. Nothing interrupted the work. From inside the TUI it was largely indistinguishable from a human-entered prompt, which is good operationally, though a small persistent “injected by master pane X” marker would improve provenance after the transient cue disappears.
+
+2. **The task contract was unusually clear.** The exact output location, completion command, word range, and “do not kill panes” instruction removed ambiguity. Producing the answer was easy. Finishing was impossible in this worker’s actual security envelope: the requested scratchpad lived outside the workspace-write sandbox. The patch operation rejected it as outside the project, and a direct copy failed with “Read-only file system.” I preserved the answer in the repository, but that did not satisfy the durable contract.
+
+3. **The `SEANCE_*` environment was present and useful.** `$SEANCE_SCRATCHPAD` resolved to the expected per-pane path and was readable. It simply was not writable by the agent tool sandbox. Likewise, `seance ctl status-set` found the expected socket path, but connecting to `/run/user/1000/seance.sock` failed with “Operation not permitted.” I noticed no ownership contention or co-presence conflict; the obstacle was capability plumbing between Seance and the sandboxed worker, not pane ownership.
+
+4. **One change:** provide a narrow, capability-checked worker completion bridge, ideally `seance ctl finish --scratchpad-stdin --note "…"`. It should atomically write only that pane’s scratchpad and set its status, without granting general access to the state directory or runtime socket. Then the safest sandbox profile can still fulfill Seance’s standard worker contract reliably.

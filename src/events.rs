@@ -54,7 +54,7 @@ pub struct Event {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<String>,
     /// Provenance of an input/mutation: human_keystroke | ctl_send |
-    /// ctl_send_raw | propose_accepted | whisper | inject | shell_hook | …
+    /// ctl_send_raw | propose_accepted | inject | arm | shell_hook | …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
 }

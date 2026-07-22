@@ -40,6 +40,8 @@ pub enum SessionEvent {
     /// Delayed re-attempt after a throttled grid push (so the final frame
     /// after a spinner burst still lands).
     FlushGrid { slug: String },
+    /// Guaranteed FULL frame (post-kick repaint, damage desync recovery).
+    ForceFullGrid { slug: String },
     Title { slug: String, title: Option<String> },
     Exited { slug: String, code: Option<i32> },
 }
@@ -170,6 +172,8 @@ pub struct PtySession {
     rows: Arc<Mutex<u16>>,
     /// When true, Drop will not SIGHUP (upgrade handoff took the FD).
     handoff_release: AtomicBool,
+    /// I/O thread has finished handoff transfer (master FD is solely in `master_fd`).
+    io_released: Arc<AtomicBool>,
 }
 
 impl PtySession {
@@ -239,17 +243,44 @@ impl PtySession {
     ) -> Result<Self> {
         let master_raw = adopted.master_fd.as_raw_fd();
         set_nonblocking(master_raw)?;
-        Self::from_parts(
+        let cols = adopted.cols.max(2);
+        let rows = adopted.rows.max(2);
+        let session = Self::from_parts(
             slug,
             adopted.master_fd,
             None, // child handle lost across upgrade; we track pid only
             Some(adopted.child_pid),
-            adopted.cols.max(2),
-            adopted.rows.max(2),
+            cols,
+            rows,
             adopted.title,
             adopted.ghost,
             event_tx,
-        )
+        )?;
+        // Fresh alacritty Term is empty; the child PTY still has its TUI state
+        // but will not repaint until SIGWINCH. Bounce winsize so Claude/etc
+        // redraw into the new emulator (otherwise GUI stays black until the
+        // human manually resizes a pane).
+        session.kick_redraw();
+        Ok(session)
+    }
+
+    /// Force the child process group to repaint (SIGWINCH via TIOCSWINSZ bounce).
+    /// Safe to call anytime; used after handoff adopt and GUI re-attach.
+    pub fn kick_redraw(&self) {
+        let (cols, rows) = self.size();
+        let cols = cols.max(2);
+        let rows = rows.max(2);
+        // Same-size ioctl is often a no-op for SIGWINCH — bounce row count.
+        let alt = if rows > 2 { rows - 1 } else { rows + 1 };
+        self.resize(cols, alt);
+        let io_tx = self.io_tx.clone();
+        let cols = cols;
+        let rows = rows;
+        thread::spawn(move || {
+            // Let the I/O thread apply the bounce before restoring.
+            thread::sleep(Duration::from_millis(30));
+            let _ = io_tx.send(IoMsg::Resize { cols, rows });
+        });
     }
 
     fn from_parts(
@@ -291,6 +322,7 @@ impl PtySession {
         let child = Arc::new(Mutex::new(child));
         let child_pid = Arc::new(Mutex::new(child_pid));
         let exited = Arc::new(AtomicBool::new(false));
+        let io_released = Arc::new(AtomicBool::new(false));
         let cols_a = Arc::new(Mutex::new(cols));
         let rows_a = Arc::new(Mutex::new(rows));
 
@@ -298,6 +330,7 @@ impl PtySession {
         let child_io = Arc::clone(&child);
         let child_pid_io = Arc::clone(&child_pid);
         let exited_io = Arc::clone(&exited);
+        let io_released_io = Arc::clone(&io_released);
         let slug_io = slug.clone();
         let event_tx_io = event_tx;
         let master_fd_slot_io = Arc::clone(&master_fd_slot);
@@ -315,6 +348,7 @@ impl PtySession {
                     child_io,
                     child_pid_io,
                     exited_io,
+                    io_released_io,
                     slug_io,
                     event_tx_io,
                     cols_io,
@@ -339,6 +373,7 @@ impl PtySession {
             cols: cols_a,
             rows: rows_a,
             handoff_release: AtomicBool::new(false),
+            io_released,
         })
     }
 
@@ -580,37 +615,42 @@ impl PtySession {
     }
 
     /// Prepare for handoff: stop I/O without killing the child; return the
-    /// master FD (dup) for SCM_RIGHTS. After this, the session is inert.
+    /// master FD for SCM_RIGHTS. After this, the session is inert.
+    ///
+    /// Ownership transfer: I/O thread moves the master out of its `File` via
+    /// `into_raw_fd` (no close), parks the raw fd in `master_fd`, sets
+    /// `io_released`. We then take that fd once — **no** concurrent close/dup
+    /// race that used to SIGHUP idle shells while busy Claude panes survived.
     pub fn prepare_handoff(&self) -> Result<(OwnedFd, u32)> {
         self.handoff_release.store(true, Ordering::SeqCst);
+        self.io_released.store(false, Ordering::SeqCst);
         let _ = self.io_tx.send(IoMsg::Shutdown { kill_child: false });
-        // Wait briefly for the I/O thread to release the FD.
-        for _ in 0..50 {
-            if self.master_fd.lock().unwrap().is_none() {
+        // Wait until I/O thread has transferred the FD (not merely "slot empty",
+        // which never happened on the old handoff path and burned 1s/pane).
+        for _ in 0..200 {
+            if self.io_released.load(Ordering::SeqCst) {
                 break;
             }
-            thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(5));
+        }
+        if !self.io_released.load(Ordering::SeqCst) {
+            bail!("pty I/O thread did not release master fd for handoff in time");
         }
         let raw = self
             .master_fd
             .lock()
             .unwrap()
             .take()
-            .context("master fd already taken")?;
-        // The I/O thread should have forgotten the File; we re-own via dup of
-        // whatever is left. Actually the thread transfers ownership back by
-        // writing into master_fd... see io_loop. If take() got None, the
-        // thread still holds it and put it back as None after close.
-        // Simpler path: thread on kill_child=false dups FD into a global channel.
-        // For reliability, dup from the raw we stored.
-        let owned = unsafe { OwnedFd::from_raw_fd(libc::dup(raw)) };
-        if owned.as_raw_fd() < 0 {
-            bail!("dup master fd failed");
+            .context("master fd missing after I/O release")?;
+        if raw < 0 {
+            bail!("invalid master fd after handoff release");
         }
-        // Close the original raw if still open (thread may have closed).
-        let _ = unsafe { libc::close(raw) };
-
-        let pid = self.child_pid().context("no child pid for handoff")?;
+        // Sole owner now — wrap without dup/close.
+        let owned = unsafe { OwnedFd::from_raw_fd(raw) };
+        let pid = self
+            .child_pid()
+            .filter(|p| *p > 0)
+            .context("no valid child pid for handoff")?;
         Ok((owned, pid))
     }
 }
@@ -637,6 +677,7 @@ fn io_loop(
     child: Arc<Mutex<Option<Child>>>,
     child_pid: Arc<Mutex<Option<u32>>>,
     exited: Arc<AtomicBool>,
+    io_released: Arc<AtomicBool>,
     slug: String,
     event_tx: Sender<SessionEvent>,
     cols: Arc<Mutex<u16>>,
@@ -647,14 +688,73 @@ fn io_loop(
     *master_fd_slot.lock().unwrap() = Some(master.as_raw_fd());
 
     loop {
-        if UPGRADE_IN_PROGRESS.load(Ordering::SeqCst) {
-            // Drain pending writes then wait for Shutdown.
+        // Prefer control messages (esp. handoff Shutdown) over PTY reads so
+        // upgrade never waits behind a busy Claude spinner paint storm.
+        loop {
+            match io_rx.try_recv() {
+                Ok(IoMsg::Write(bytes)) => {
+                    let _ = master.write_all(&bytes);
+                }
+                Ok(IoMsg::Resize { cols: c, rows: r }) => {
+                    *cols.lock().unwrap() = c;
+                    *rows.lock().unwrap() = r;
+                    let ws = libc::winsize {
+                        ws_row: r,
+                        ws_col: c,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    unsafe {
+                        libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws);
+                        // Belt-and-suspenders: some kernels skip SIGWINCH when
+                        // the winsize is unchanged; always poke the fg pgrp.
+                        let pg = libc::tcgetpgrp(master.as_raw_fd());
+                        if pg > 0 {
+                            let _ = libc::kill(-pg, libc::SIGWINCH);
+                        }
+                    }
+                    let dims = Dims { cols: c, rows: r };
+                    term.lock().resize(dims);
+                    let _ = event_tx.send(SessionEvent::Wakeup {
+                        slug: slug.clone(),
+                    });
+                }
+                Ok(IoMsg::Shutdown { kill_child }) => {
+                    if kill_child {
+                        if let Some(mut ch) = child.lock().unwrap().take() {
+                            let _ = ch.kill();
+                            let _ = ch.wait();
+                        } else if let Some(pid) = child_pid.lock().unwrap().take() {
+                            unsafe {
+                                libc::kill(pid as i32, libc::SIGHUP);
+                            }
+                        }
+                        *master_fd_slot.lock().unwrap() = None;
+                        // Drop closes master — intentional for kill path.
+                        drop(master);
+                        return;
+                    }
+                    // Handoff: move FD out of File without closing (into_raw_fd),
+                    // park in slot for prepare_handoff. Child keeps running.
+                    let raw = master.into_raw_fd();
+                    *master_fd_slot.lock().unwrap() = Some(raw);
+                    io_released.store(true, Ordering::SeqCst);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if let Some(mut ch) = child.lock().unwrap().take() {
+                        let _ = ch.kill();
+                        let _ = ch.wait();
+                    }
+                    return;
+                }
+            }
         }
 
         // Non-blocking read from PTY.
         match master.read(&mut buf) {
             Ok(0) => {
-                // EOF
                 if !exited.swap(true, Ordering::SeqCst) {
                     let _ = event_tx.send(SessionEvent::Exited {
                         slug: slug.clone(),
@@ -678,65 +778,6 @@ fn io_loop(
                         slug: slug.clone(),
                         code: None,
                     });
-                }
-            }
-        }
-
-        // Process control messages (non-blocking).
-        loop {
-            match io_rx.try_recv() {
-                Ok(IoMsg::Write(bytes)) => {
-                    let _ = master.write_all(&bytes);
-                }
-                Ok(IoMsg::Resize { cols: c, rows: r }) => {
-                    *cols.lock().unwrap() = c;
-                    *rows.lock().unwrap() = r;
-                    let ws = libc::winsize {
-                        ws_row: r,
-                        ws_col: c,
-                        ws_xpixel: 0,
-                        ws_ypixel: 0,
-                    };
-                    unsafe {
-                        libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws);
-                    }
-                    let dims = Dims { cols: c, rows: r };
-                    term.lock().resize(dims);
-                    let _ = event_tx.send(SessionEvent::Wakeup {
-                        slug: slug.clone(),
-                    });
-                }
-                Ok(IoMsg::Shutdown { kill_child }) => {
-                    if kill_child {
-                        if let Some(mut ch) = child.lock().unwrap().take() {
-                            let _ = ch.kill();
-                            let _ = ch.wait();
-                        } else if let Some(pid) = child_pid.lock().unwrap().take() {
-                            unsafe {
-                                libc::kill(pid as i32, libc::SIGHUP);
-                            }
-                        }
-                    } else {
-                        // Handoff: leave child alive; release FD ownership.
-                        // Dup is done by prepare_handoff; just drop File without kill.
-                        *master_fd_slot.lock().unwrap() = Some(master.as_raw_fd());
-                        // Leak the file by forgetting after taking raw ownership
-                        // so Drop doesn't close before handoff dups.
-                        let raw = master.as_raw_fd();
-                        std::mem::forget(master);
-                        *master_fd_slot.lock().unwrap() = Some(raw);
-                        return;
-                    }
-                    *master_fd_slot.lock().unwrap() = None;
-                    return;
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    if let Some(mut ch) = child.lock().unwrap().take() {
-                        let _ = ch.kill();
-                        let _ = ch.wait();
-                    }
-                    return;
                 }
             }
         }

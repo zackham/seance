@@ -37,13 +37,42 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use gpui::{div, list, prelude::*, px, ListAlignment, ListState, SharedString, Task, WeakEntity, Window};
+use std::sync::Arc;
+
+use gpui::{
+    div, list, prelude::*, px, rems, ListAlignment, ListState, SharedString, StyleRefinement,
+    Task, WeakEntity, Window,
+};
 use gpui_component::{
-    text::{markdown, markdown_ast, MarkdownNode},
+    highlighter::HighlightTheme,
+    text::{markdown, markdown_ast, MarkdownNode, TextViewStyle},
     ActiveTheme as _, StyledExt as _,
 };
 
 use crate::theme::SeancePalette;
+
+/// Candlelit markdown style — dark highlight theme, compact headings, surface
+/// code blocks. Default TextViewStyle is light-themed and reads as "GitHub
+/// paper" on seance grounds.
+fn candlelit_markdown_style() -> TextViewStyle {
+    let mut code = StyleRefinement::default();
+    code.background = Some(SeancePalette::surface().into());
+    TextViewStyle {
+        paragraph_gap: rems(0.55),
+        heading_base_font_size: px(15.),
+        heading_font_size: Some(Arc::new(|level, base| match level {
+            1 => px(22.),
+            2 => px(18.),
+            3 => px(16.),
+            _ => base,
+        })),
+        highlight_theme: HighlightTheme::default_dark(),
+        code_block: code,
+        table: StyleRefinement::default(),
+        table_cell: StyleRefinement::default(),
+        is_dark: true,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // YAML frontmatter — GH-style box
@@ -801,6 +830,7 @@ impl FileView {
             };
 
             let md = markdown(source)
+                .style(candlelit_markdown_style())
                 .selectable(true)
                 .scrollable(true)
                 .markdown_block_parser(|node, _cx| {
@@ -826,7 +856,8 @@ impl FileView {
                 })
                 .w_full()
                 .h_full()
-                .min_w_0();
+                .min_w_0()
+                .text_color(SeancePalette::text());
 
             // Fixed-height parent required by scrollable TextView (list + scrollbar).
             div()
@@ -835,6 +866,8 @@ impl FileView {
                 .min_h_0()
                 .min_w_0()
                 .p_3()
+                .bg(SeancePalette::bg())
+                .text_color(SeancePalette::text())
                 .child(md)
                 .into_any_element()
         } else {

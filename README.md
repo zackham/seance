@@ -101,7 +101,6 @@ Upgrade load test: `./scripts/upgrade-load-test.sh` (upgrades live daemon)
 | ⚡ | arm agent (`ctl skill` orientation) |
 | ☎ | phone pane (telegram stage card) |
 | ▤ | pad drawer |
-| 💬 | whisper — compose a steer into the pane |
 | sash drag | resize 2-pane ratio or multi-pane weights |
 
 ## Architecture (short)

@@ -198,9 +198,14 @@ impl RemoteTerminal {
         let _ = self.client.inject(&self.slug, &text, submit);
     }
 
-    /// Request a PTY resize. Ignores single-frame jitter (needs 2 stable
-    /// consecutive measurements) so cell-width float noise can't flip
-    /// cols 120↔121 forever and pin the GUI at 100% CPU.
+    /// Request a PTY resize.
+    ///
+    /// - **Large reflows** (pane kill auto-close, sash, window resize — any
+    ///   change of more than 1 col/row): send immediately on first measure.
+    ///   Waiting for a second stable frame used to leave siblings stuck for
+    ///   seconds when nothing else was painting (idle shells after a kill).
+    /// - **±1 cell jitter**: still needs 2 consecutive matching frames so
+    ///   float cell-width noise can't thrash 120↔121 forever.
     pub fn resize_cells(&self, cols: u16, rows: u16) {
         let cols = cols.max(2);
         let rows = rows.max(2);
@@ -212,8 +217,16 @@ impl RemoteTerminal {
                 false
             } else if g.seen != (cols, rows) {
                 g.seen = (cols, rows);
-                g.stable = 1;
-                false
+                let big = cols.abs_diff(g.sent.0) > 1 || rows.abs_diff(g.sent.1) > 1;
+                if big || g.sent == (0, 0) {
+                    // Real reflow or first layout — don't wait for another paint.
+                    g.sent = (cols, rows);
+                    g.stable = 2;
+                    true
+                } else {
+                    g.stable = 1;
+                    false
+                }
             } else {
                 g.stable = g.stable.saturating_add(1);
                 if g.stable >= 2 {
@@ -227,6 +240,17 @@ impl RemoteTerminal {
         if should_send {
             let _ = self.client.resize(&self.slug, cols, rows);
         }
+    }
+
+    /// After tile reflow (pane auto-closed, etc.): forget last sent size so the
+    /// next layout measure is treated as a first-layout / big reflow and
+    /// resizes immediately. Also open the rev gate for the FULL that follows.
+    pub fn invalidate_layout_size(&mut self) {
+        self.rev = 0;
+        let mut g = self.resize.lock().unwrap();
+        g.sent = (0, 0);
+        g.seen = (0, 0);
+        g.stable = 0;
     }
 
     pub fn scroll_lines(&self, delta: i32) {

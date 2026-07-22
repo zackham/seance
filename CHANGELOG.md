@@ -19,7 +19,67 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
-_Nothing staged._
+### Changed
+
+- Split oversized modules for maintainability (no protocol break):
+  - `runtime/engine` → `engine/{mod,control,helpers,tests}.rs`
+  - `ctl` → `ctl/{mod,parse,wait,print,phone}.rs`
+- Expanded unit/integration tests (~76 → 123), including hermetic engine control-plane tests
+- Refactor handoff for remaining work: `docs/HANDOFF_REFACTOR.md`
+
+### Known gap
+
+- Multi-window / overview: **protocol + engine + gui_client** APIs exist; **app UI not fully wired** (see handoff). Do not advertise as done until app surfaces transfer/overview/empty-window.
+
+
+### Fixed
+
+- Sidebar **working** badge uses *observed* TUI title spinners (Claude braille),
+  not sticky `status-set working` — stale inject/open-task no longer marks
+  idle circles; live agents without status-set now light up. Daemon also
+  forwards title-only OSC changes (was skipped when cells unchanged).
+
+### Added
+
+- Sidebar: inactive workspaces show **working** / **needs** / **done** when panes
+  are active or finished since last visit (collapsed circles stay scannable)
+- Tile **row sashes** (vertical split resize) + layout.json `row_weights`
+- **Minimize shelf** — only when the selected circle has shelved panes; chips
+  only (no label). Hidden entirely when nothing is minimized
+- Pane **right-click menu** — minimize, notes, rename, popout, move, banish
+- **Overview** (`ctrl+shift+space`) — full-window live map of every workspace
+  with scaled terminal grids (daemon streams non-selected circles while open)
+- **Multi-window** — a workspace lives in exactly one window. Right-click a
+  circle: send to new window / send to `name +N` / collect all here. Second
+  `seance` process opens an empty window (right-click empty sidebar to pull).
+
+### Removed
+
+- **Whisper** UI (💬 compose bar / mid-flight inject chrome) — steer via the
+  agent TUI, `ctl send`, or notes flip; ⚡ arm remains
+- **Run in pane** agent launch bar (claude/codex/grok chips) — reclaim chrome;
+  run profiles manually
+- Sidebar **pane rows** and workspace **manual drag-reorder**
+
+### Changed
+
+- Pane chrome design pass: owner accent rail, shorter titles, quieter action
+  cluster, higher inactive opacity (see `docs/DESIGN_PASS_2026-07-21.md`)
+- Workspace list **auto-sorts**: working → needs → done-unread → rest, each band
+  by activity recency (input / inject / status), not click-to-select or PTY paint
+
+### Fixed
+
+- Daemon upgrade handoff: stop closing/dup-racing the PTY master FD (idle shells
+  were SIGHUP'd while busy Claude panes often survived); wait on I/O release
+  flag; never respawn a fresh shell when SCM_RIGHTS adopt fails
+- Pane sash resize: use GPUI `on_drag` / `on_drag_move` so resize works over
+  markdown/file panes and across multi-row grids (was broken once the pointer
+  left the 5px divider onto a selectable viewer)
+- Notes flip: focus the notes editor after mount; re-steal if the terminal
+  face FocusHandle still holds keyboard (could not type in notes)
+- Host claude switcher: collapsed to active account only; click expands list
+  (height slide down/up), pick collapses again
 
 ---
 

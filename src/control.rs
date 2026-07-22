@@ -990,4 +990,137 @@ mod tests {
         let p = socket_path();
         assert!(p.to_string_lossy().ends_with("seance.sock"));
     }
+
+    #[test]
+    fn session_alias_accepts_legacy_key() {
+        let req: ControlRequest =
+            serde_json::from_str(r#"{"op":"kill","session":"worker-1"}"#).unwrap();
+        match req {
+            ControlRequest::Kill { pane, .. } => assert_eq!(pane, "worker-1"),
+            _ => panic!("expected kill"),
+        }
+    }
+
+    #[test]
+    fn finish_and_note_roundtrip() {
+        let finish = ControlRequest::Finish {
+            pane: Some("w".into()),
+            body: Some("done body".into()),
+            append: true,
+            status: "done".into(),
+            status_note: Some("ok".into()),
+            empty_ok: false,
+            task: Some("t1".into()),
+            scope: Some("lab".into()),
+            from: Some("w".into()),
+        };
+        let s = serde_json::to_string(&finish).unwrap();
+        let back: ControlRequest = serde_json::from_str(&s).unwrap();
+        match back {
+            ControlRequest::Finish {
+                pane,
+                body,
+                status,
+                task,
+                empty_ok,
+                ..
+            } => {
+                assert_eq!(pane.as_deref(), Some("w"));
+                assert_eq!(body.as_deref(), Some("done body"));
+                assert_eq!(status, "done");
+                assert_eq!(task.as_deref(), Some("t1"));
+                assert!(!empty_ok);
+            }
+            _ => panic!("expected finish"),
+        }
+
+        let note = ControlRequest::Note {
+            pane: None,
+            text: "hi".into(),
+            append: false,
+            scope: None,
+            from: None,
+        };
+        let s = serde_json::to_string(&note).unwrap();
+        assert!(s.contains(r#""op":"note""#));
+        let back: ControlRequest = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, ControlRequest::Note { append: false, .. }));
+    }
+
+    #[test]
+    fn status_set_and_seize_wire() {
+        let req: ControlRequest = serde_json::from_str(
+            r#"{"op":"status_set","state":"working","note":"busy","pane":"w"}"#,
+        )
+        .unwrap();
+        match req {
+            ControlRequest::StatusSet {
+                state, note, pane, ..
+            } => {
+                assert_eq!(state, "working");
+                assert_eq!(note.as_deref(), Some("busy"));
+                assert_eq!(pane.as_deref(), Some("w"));
+            }
+            _ => panic!("expected status_set"),
+        }
+
+        let seize: ControlRequest =
+            serde_json::from_str(r#"{"op":"seize","pane":"w","as_owner":"human"}"#).unwrap();
+        match seize {
+            ControlRequest::Seize { pane, as_owner, .. } => {
+                assert_eq!(pane, "w");
+                assert_eq!(as_owner.as_deref(), Some("human"));
+            }
+            _ => panic!("expected seize"),
+        }
+    }
+
+    #[test]
+    fn watch_defaults_catch_up_true() {
+        let req: ControlRequest = serde_json::from_str(r#"{"op":"watch"}"#).unwrap();
+        match req {
+            ControlRequest::Watch { catch_up, .. } => assert!(catch_up),
+            _ => panic!("expected watch"),
+        }
+    }
+
+    #[test]
+    fn from_field_and_workspace_hint() {
+        let req = ControlRequest::Send {
+            pane: "w".into(),
+            text: "x".into(),
+            submit: true,
+            force: false,
+            scope: Some("lab".into()),
+            from: Some("orch".into()),
+        };
+        assert_eq!(req.from_field().as_deref(), Some("orch"));
+        assert_eq!(req.workspace_hint(), Some("lab"));
+
+        let list = ControlRequest::List {
+            scope: None,
+            from: None,
+        };
+        assert!(list.from_field().is_none());
+        assert!(list.workspace_hint().is_none());
+    }
+
+    #[test]
+    fn task_and_roster_ops() {
+        let task: ControlRequest =
+            serde_json::from_str(r#"{"op":"task","pane":"w","id":"t9"}"#).unwrap();
+        match task {
+            ControlRequest::Task { pane, id, .. } => {
+                assert_eq!(pane.as_deref(), Some("w"));
+                assert_eq!(id.as_deref(), Some("t9"));
+            }
+            _ => panic!("expected task"),
+        }
+        let roster: ControlRequest = serde_json::from_str(r#"{"op":"roster"}"#).unwrap();
+        assert!(matches!(roster, ControlRequest::Roster { .. }));
+        let brief: ControlRequest = serde_json::from_str(r#"{"op":"brief"}"#).unwrap();
+        assert!(matches!(brief, ControlRequest::Brief { .. }));
+        let doctor: ControlRequest = serde_json::from_str(r#"{"op":"doctor"}"#).unwrap();
+        assert!(matches!(doctor, ControlRequest::Doctor { .. }));
+    }
 }
