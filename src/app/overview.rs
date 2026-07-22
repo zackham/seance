@@ -39,6 +39,9 @@ impl SeanceApp {
             .flex()
             .flex_col()
             .bg(SeancePalette::bg())
+            // Block mouse events from leaking to the tiles underneath
+            // (dead-space clicks were silently focusing hidden panes).
+            .occlude()
             .child(
                 div()
                     .flex_none()

@@ -19,6 +19,22 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.9.20] — 2026-07-22
+
+### Fixed
+
+- **Quicklaunch modal inputs are clickable** — mouse events were falling
+  through the overlay to the terminal underneath, which stole focus on
+  mouse-down (`.occlude()` on the overlay). Same fix applied to the overview
+  root, where dead-space clicks silently focused hidden panes.
+
+### Changed
+
+- **Quicklaunch always opens a fresh workspace** named after the entry
+  (uniquified: vita, vita-2, …) with a single pane and no rename prompt.
+  The `workspace` config field and modal input are gone; a legacy
+  `"workspace"` key in the JSON still parses and is ignored.
+
 ## [0.9.19] — 2026-07-22
 
 ### Added

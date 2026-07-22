@@ -8,10 +8,12 @@
 //!   {"name": "scratch", "cwd": "~"}
 //! ]
 //! ```
-//! `command` omitted/empty = plain shell in `cwd`. Optional `"workspace"`
-//! spawns into (and implicitly creates) that workspace instead of the
-//! selected one. The file is mtime-watched with a 2s throttle — edits show
-//! up without restarting the GUI; a parse error keeps the previous entries.
+//! `command` omitted/empty = plain shell in `cwd`. Every launch opens a
+//! FRESH workspace named after the entry (uniquified: vita, vita-2, …) with
+//! a single pane — no rename prompt. A legacy `"workspace"` key in the JSON
+//! still parses but is ignored. The file is mtime-watched with a 2s throttle
+//! — edits show up without restarting the GUI; a parse error keeps the
+//! previous entries.
 //!
 //! Management (right-click a chip → edit/remove, drag to reorder, the `+`
 //! button to add) round-trips the config through serde. NOTE: a UI edit
@@ -41,8 +43,6 @@ pub(super) struct QuickLaunchEntry {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<String>,
 }
 
 /// Live state for the quicklaunch create/edit modal. `original` is `None` for a
@@ -53,7 +53,6 @@ pub(super) struct QuickLaunchEditor {
     pub name: Entity<InputState>,
     pub cwd: Entity<InputState>,
     pub command: Entity<InputState>,
-    pub workspace: Entity<InputState>,
 }
 
 fn quicklaunch_path() -> std::path::PathBuf {
@@ -228,14 +227,9 @@ impl SeanceApp {
     ) {
         let existing = edit.and_then(|n| self.quicklaunch.iter().find(|e| e.name == n).cloned());
         let opt = |s: Option<String>| s.unwrap_or_default();
-        let (name0, cwd0, cmd0, ws0) = match &existing {
-            Some(e) => (
-                e.name.clone(),
-                opt(e.cwd.clone()),
-                opt(e.command.clone()),
-                opt(e.workspace.clone()),
-            ),
-            None => (String::new(), String::new(), String::new(), String::new()),
+        let (name0, cwd0, cmd0) = match &existing {
+            Some(e) => (e.name.clone(), opt(e.cwd.clone()), opt(e.command.clone())),
+            None => (String::new(), String::new(), String::new()),
         };
         let field = |window: &mut Window,
                      cx: &mut Context<Self>,
@@ -250,9 +244,8 @@ impl SeanceApp {
         let name = field(window, cx, "vita", name0);
         let cwd = field(window, cx, "~/work/vita", cwd0);
         let command = field(window, cx, "claude (empty = plain shell)", cmd0);
-        let workspace = field(window, cx, "(empty = current circle)", ws0);
         // Enter in any field commits; Blur is ignored (cancel is Esc / button).
-        for input in [&name, &cwd, &command, &workspace] {
+        for input in [&name, &cwd, &command] {
             cx.subscribe_in(
                 input,
                 window,
@@ -270,7 +263,6 @@ impl SeanceApp {
             name,
             cwd,
             command,
-            workspace,
         });
         window.focus(&focus, cx);
         cx.notify();
@@ -309,7 +301,6 @@ impl SeanceApp {
             name,
             cwd: norm(&ed.cwd),
             command: norm(&ed.command),
-            workspace: norm(&ed.workspace),
         };
         let original = ed.original.clone();
         upsert_entry(&mut self.quicklaunch, original.as_deref(), entry);
@@ -359,6 +350,10 @@ impl SeanceApp {
                 .items_center()
                 .justify_center()
                 .bg(gpui::black().opacity(0.5))
+                // Block mouse events from reaching the panes underneath —
+                // without this, mouse-down passes through and the terminal
+                // steals focus from the modal inputs.
+                .occlude()
                 // Click the dim backdrop to cancel.
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.cancel_quicklaunch_editor(cx);
@@ -393,7 +388,6 @@ impl SeanceApp {
                         )
                         .child(field_row("cwd", &ed.cwd))
                         .child(field_row("command", &ed.command))
-                        .child(field_row("workspace", &ed.workspace))
                         .child(
                             div()
                                 .flex()
@@ -537,12 +531,19 @@ impl SeanceApp {
                     .as_ref()
                     .map(|c| shellexpand::tilde(c).into_owned());
                 let command = entry.command.clone().filter(|c| !c.trim().is_empty());
+                // Always a FRESH workspace named after the entry (uniquified
+                // against every window's workspaces), single pane, no rename
+                // prompt — the quicklaunch name IS the name.
+                let mut taken: Vec<String> = this.workspaces();
+                taken.extend(this.foreign_workspaces.iter().map(|f| f.workspace.clone()));
+                let taken_refs: Vec<&str> = taken.iter().map(|s| s.as_str()).collect();
+                let ws = crate::state::unique_slug(&entry.name, &taken_refs);
                 this.spawn_internal(
                     SpawnRequest {
                         name: entry.name.clone(),
                         cwd,
                         command,
-                        workspace: entry.workspace.clone(),
+                        workspace: Some(ws),
                         file: None,
                     },
                     cx,
@@ -563,6 +564,7 @@ mod tests {
 
     #[test]
     fn parse_full_entry() {
+        // Legacy "workspace" key must still parse (ignored since 0.9.20).
         let v = parse_quicklaunch(
             r#"[{"name":"vita","cwd":"~/work/vita","command":"claude","workspace":"vita"}]"#,
         )
@@ -571,14 +573,13 @@ mod tests {
         assert_eq!(v[0].name, "vita");
         assert_eq!(v[0].cwd.as_deref(), Some("~/work/vita"));
         assert_eq!(v[0].command.as_deref(), Some("claude"));
-        assert_eq!(v[0].workspace.as_deref(), Some("vita"));
     }
 
     #[test]
     fn parse_name_only_defaults_rest() {
         let v = parse_quicklaunch(r#"[{"name":"scratch"}]"#).unwrap();
         assert_eq!(v[0].name, "scratch");
-        assert!(v[0].cwd.is_none() && v[0].command.is_none() && v[0].workspace.is_none());
+        assert!(v[0].cwd.is_none() && v[0].command.is_none());
     }
 
     #[test]
@@ -599,7 +600,6 @@ mod tests {
             name: name.into(),
             cwd: None,
             command: None,
-            workspace: None,
         }
     }
 
@@ -622,7 +622,6 @@ mod tests {
             name: "b2".into(),
             cwd: Some("~/x".into()),
             command: None,
-            workspace: None,
         };
         upsert_entry(&mut v, Some("b"), updated);
         assert_eq!(names(&v), ["a", "b2", "c"]);
@@ -702,7 +701,6 @@ mod tests {
                 name: "vita".into(),
                 cwd: Some("~/work/vita".into()),
                 command: Some("claude".into()),
-                workspace: Some("vita".into()),
             },
             entry("scratch"),
         ];
