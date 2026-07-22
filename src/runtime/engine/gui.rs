@@ -433,7 +433,8 @@ impl Engine {
         None
     }
 
-    #[allow(dead_code)] // multi-window API — protocol-ready grid broadcast, awaiting UI wiring
+    /// FULL frame for every live pane — used when one window takes over
+    /// everything (CollectAll) and per-workspace flushes would be noise.
     fn flush_all_grids(&mut self) {
         let slugs: Vec<String> = self
             .panes
@@ -589,48 +590,6 @@ impl Engine {
             .iter()
             .find(|p| p.slug == slug)
             .and_then(|p| p.session.as_ref().map(|s| s.snapshot()))
-    }
-
-    /// Legacy whole-state (ctl / first-window fallback). Prefer `state_for_window`.
-    #[allow(dead_code)] // multi-window API — whole-state fallback, awaiting UI wiring
-    pub fn full_state_event(&self) -> GuiEvent {
-        let wid = self.gui_conns.first().map(|c| c.id.clone());
-        if let Some(id) = wid {
-            return self.state_for_window(&id);
-        }
-        GuiEvent::State {
-            panes: self.pane_infos(),
-            selected_workspace: self.selected_workspace.clone(),
-            focused_pane: self.focused_pane.clone(),
-            extra_workspaces: self.extra_workspaces.clone(),
-            workspace_order: self.workspace_order.clone(),
-            asks: self
-                .asks
-                .iter()
-                .filter(|a| a.answer.is_none())
-                .map(|a| AskInfo {
-                    id: a.id.clone(),
-                    from: a.from.clone(),
-                    workspace: a.workspace.clone(),
-                    question: a.question.clone(),
-                    choices: a.choices.clone(),
-                    answer: a.answer.clone(),
-                })
-                .collect(),
-            statuses: self
-                .statuses
-                .iter()
-                .map(|(slug, (state, note))| StatusInfo {
-                    slug: slug.clone(),
-                    state: state.clone(),
-                    note: note.clone(),
-                    pad_rev: self.pad_revs.get(slug).copied().unwrap_or(0),
-                })
-                .collect(),
-            window_id: None,
-            windows: self.window_infos(),
-            foreign_workspaces: Vec::new(),
-        }
     }
 
     /// Dense one-row summary for orchestrators (`list` / `brief` / `roster`).
@@ -1365,15 +1324,7 @@ impl Engine {
                     }
                 }
                 self.push_state_to_all();
-                let slugs: Vec<String> = self
-                    .panes
-                    .iter()
-                    .filter(|p| p.session.is_some())
-                    .map(|p| p.slug.clone())
-                    .collect();
-                for slug in slugs {
-                    self.push_grid_full(&slug);
-                }
+                self.flush_all_grids();
                 Some(GuiEvent::Ack {
                     ok: true,
                     data: Some(json!({"window": window_id})),

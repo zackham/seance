@@ -19,6 +19,36 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.9.15] — 2026-07-22
+
+Multi-window completion + overview that actually fills the screen.
+
+### Changed
+
+- **Overview (`ctrl+shift+space`) fills the viewport**: workspace cards split
+  the window into an equal grid (spacer-padded rows, equal card widths); pane
+  thumbnails letterbox up to but never above **1× native resolution**. No more
+  postage stamps huddled in the corner.
+- Grid damage-decode failure now repairs with a **targeted per-pane FULL
+  frame** (`refresh_grid`) instead of re-attaching the whole window.
+
+### Added
+
+- New remote panes request their first FULL frame on mount — workspaces
+  arriving via **transfer / pull / collect** paint immediately instead of
+  waiting for the daemon's delayed flush.
+- **Empty second window** shows pull instructions on the stage (right-click
+  sidebar to pull / send from another window) instead of the summon hint.
+- **Drive-mode chip** in the pane header when a pane isn't in default pair
+  mode: `⛔ locked` (agents can't inject) / `⚡ led` (agent drives).
+
+### Removed
+
+- `Engine::full_state_event` (superseded by per-window state) — the last of
+  the "protocol-ready, awaiting UI wiring" allows is gone; every multi-window
+  API is now wired (`refresh_grid`, `flush_all_grids` via CollectAll,
+  `empty_window` read-side).
+
 ## [0.9.14] — 2026-07-22
 
 Codebase-health release: the full modular refactor the 0.9.13 handoff called

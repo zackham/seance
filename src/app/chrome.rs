@@ -334,6 +334,15 @@ pub(super) fn render_pane(
     // Daemon-backed terminal panes get arm/phone chrome.
     let has_terminal = pane.remote_terminal().is_some();
     let exited = owner.map(|o| o.exited).unwrap_or(false);
+    // Drive mode is only chrome-worthy when it's NOT the default pair mode:
+    // locked_human = agents blocked from injecting; agent_led = agent drives.
+    let drive_label = owner
+        .filter(|o| !o.exited)
+        .and_then(|o| match o.drive_mode.as_str() {
+            "locked_human" => Some(("⛔ locked", SeancePalette::flame())),
+            "agent_led" => Some(("⚡ led", SeancePalette::violet())),
+            _ => None,
+        });
     let owner_label = owner.map(|o| {
         if o.exited {
             match o.exit_code {
@@ -460,6 +469,22 @@ pub(super) fn render_pane(
                             .child("⛶"),
                     )
                 })
+                .children(drive_label.map(|(lab, color)| {
+                    div()
+                        .id(SharedString::from(format!("drive-{slug}")))
+                        .flex_none()
+                        .text_xs()
+                        .whitespace_nowrap()
+                        .text_color(if is_active {
+                            color
+                        } else {
+                            SeancePalette::text_faint()
+                        })
+                        .tooltip(tip(
+                            "drive mode: locked = agents can't inject · led = agent drives",
+                        ))
+                        .child(lab)
+                }))
                 .children(owner_label.map(|lab| {
                     div()
                         .flex_none()

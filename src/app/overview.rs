@@ -70,12 +70,15 @@ impl SeanceApp {
                     ),
             )
             .child(
+                // Fill the viewport: rows split the height equally, cards split
+                // each row equally. Thumbs letterbox at ≤1x native inside that
+                // space (OverviewThumb clamps scale), so cards grow to fill but
+                // pane content never renders above 1x resolution.
                 div()
-                    .id("overview-scroll")
+                    .id("overview-grid")
                     .flex_1()
                     .min_h_0()
                     .p_3()
-                    .overflow_y_scroll()
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -110,7 +113,8 @@ impl SeanceApp {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .min_h(px(80.))
+                            .min_h_0()
+                            .h_full()
                             .border_1()
                             .border_color(sc)
                             .rounded_md()
@@ -133,6 +137,9 @@ impl SeanceApp {
             cards.push(
                 div()
                     .id(SharedString::from(format!("ov-card-{ws}")))
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -152,6 +159,7 @@ impl SeanceApp {
                     }))
                     .child(
                         div()
+                            .flex_none()
                             .flex()
                             .items_center()
                             .gap_2()
@@ -165,9 +173,13 @@ impl SeanceApp {
                             )
                             .children(badge),
                     )
-                    .child(div().flex().flex_row().gap_1().min_h(px(100.)).children(
+                    .child(div().flex_1().min_h_0().flex().flex_row().gap_1().children(
                         if thumbs.is_empty() {
                             vec![div()
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .text_xs()
                                 .text_color(SeancePalette::text_faint())
                                 .child("(empty)")
@@ -179,7 +191,8 @@ impl SeanceApp {
                     .into_any_element(),
             );
         }
-        // Pack into rows of `cols`.
+        // Pack into rows of `cols`; every row is an equal-height flex band and
+        // short rows get invisible spacers so cards stay the same width.
         let mut rows = Vec::new();
         let mut it = cards.into_iter();
         loop {
@@ -192,8 +205,13 @@ impl SeanceApp {
             if row_kids.is_empty() {
                 break;
             }
+            while row_kids.len() < cols {
+                row_kids.push(div().flex_1().min_w_0().into_any_element());
+            }
             rows.push(
                 div()
+                    .flex_1()
+                    .min_h_0()
                     .flex()
                     .flex_row()
                     .gap_2()

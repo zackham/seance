@@ -195,10 +195,18 @@ impl SeanceApp {
         };
 
         if n == 0 {
-            let ws = self
-                .selected_workspace
-                .clone()
-                .unwrap_or_else(|| "this workspace".into());
+            // A pulled-open second window with no workspaces yet gets pull
+            // instructions, not the summon hint (empty_window is sticky for
+            // the window's life; once a workspace arrives the normal path wins).
+            let hint = if self.empty_window && self.workspaces().is_empty() {
+                "empty window — right-click the sidebar to pull a workspace here,\nor right-click a workspace in another window and send it over".to_string()
+            } else {
+                let ws = self
+                    .selected_workspace
+                    .clone()
+                    .unwrap_or_else(|| "this workspace".into());
+                format!("{ws} is empty — summon a spirit (ctrl+shift+n)")
+            };
             return div()
                 .flex_1()
                 .h_full()
@@ -221,7 +229,8 @@ impl SeanceApp {
                             div()
                                 .text_color(SeancePalette::text_faint())
                                 .text_sm()
-                                .child(format!("{ws} is empty — summon a spirit (ctrl+shift+n)")),
+                                .text_center()
+                                .child(hint),
                         ),
                 )
                 .into_any_element();

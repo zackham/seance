@@ -184,7 +184,6 @@ impl GuiClient {
     }
 
     /// Request a FULL grid frame for one pane (repair after damage desync).
-    #[allow(dead_code)] // multi-window API — protocol-ready, awaiting UI wiring
     pub fn refresh_grid(&self, pane: &str) -> Result<()> {
         self.send(GuiRequest::RefreshGrid {
             pane: pane.to_string(),

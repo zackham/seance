@@ -162,7 +162,6 @@ pub struct SeanceApp {
     /// Workspace waiting to move into a newly-opened empty window.
     pending_transfer: Option<String>,
     /// This window attached as empty (second process / new-window transfer target).
-    #[allow(dead_code)] // multi-window API — protocol-ready, awaiting empty-window UI wiring
     empty_window: bool,
 }
 
@@ -471,7 +470,7 @@ impl SeanceApp {
                         // keep the last-good grid until the in-flight FULL lands.
                         if do_resync {
                             eprintln!(
-                                "[seance gui] grid_bin resync for {pane}: {e} (cleared base; full reattach)"
+                                "[seance gui] grid_bin resync for {pane}: {e} (cleared base; pane refresh)"
                             );
                             if let Some(rt) = self
                                 .panes
@@ -484,13 +483,10 @@ impl SeanceApp {
                                 // rev and every full frame at that rev is dropped.
                                 rt.update(cx, |t, cx| t.clear_for_resync(cx));
                             }
-                            let _ =
-                                self.client
-                                    .send(crate::runtime::protocol::GuiRequest::Attach {
-                                        empty: false,
-                                        selected_workspace: self.selected_workspace.clone(),
-                                        focused_pane: self.active_slug.clone(),
-                                    });
+                            // Targeted repair: one FULL frame for this pane.
+                            // (Used to re-Attach the whole window — heavier and
+                            // racy with every other pane's in-flight damage.)
+                            let _ = self.client.refresh_grid(&pane);
                         }
                     }
                 }
@@ -956,6 +952,10 @@ impl SeanceApp {
             body: PaneBody::Remote { terminal, view },
             popped: None,
         });
+        // Fresh mount = empty snapshot. Ask the daemon for a FULL frame so
+        // panes arriving via transfer/pull/collect paint immediately instead
+        // of waiting for the engine's delayed belt-and-suspenders flush.
+        let _ = self.client.refresh_grid(&info.slug);
         // If we were waiting to focus this slug, try now that the view exists.
         if self.pending_focus.as_deref() == Some(info.slug.as_str()) {
             self.focus_pane_if_possible(&info.slug, cx);

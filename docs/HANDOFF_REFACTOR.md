@@ -43,13 +43,15 @@ Conventions the split established (follow them):
 - `scripts/check.sh` must stay green (fmt --check, deny-warnings
   check --all-targets, full tests). Run it before every commit.
 
-## Multi-window: backend wired to UI as of 0.9.14
+## Multi-window: FULLY wired as of 0.9.15
 
-Overview (`ctrl+shift+space`), transfer menus, collect-all, empty-window pull,
-minimize shelf, row sashes — all live. Still protocol-ready but deliberately
-unwired (kept with documented `#[allow(dead_code)]`): `GuiClient::refresh_grid`,
-`Engine::flush_all_grids`, `Engine::full_state_event`, `SeanceApp.empty_window`
-read-side. Wire or retire consciously; don't delete blind.
+Overview (`ctrl+shift+space`, viewport-filling grid with ≤1× thumbs), transfer
+menus, collect-all, empty-window pull (with stage instructions), minimize
+shelf, row sashes — all live. The former "protocol-ready, awaiting UI" allows
+are all resolved: `refresh_grid` wired (pane mount + damage repair),
+`flush_all_grids` wired (CollectAll), `empty_window` read (stage hint),
+`full_state_event` retired. Drive-mode chip (`⛔ locked` / `⚡ led`) renders in
+pane headers. There are zero `#[allow(dead_code)]`-for-wiring markers left.
 
 ## Remaining sensible next steps (none blocking)
 
@@ -57,7 +59,6 @@ read-side. Wire or retire consciously; don't delete blind.
   files above ~1.3k; both cohesive, both have tests — split only with cause.
 - Grid throttle timer path (`push_grid_throttled`) is consciously untested
   (real clocks → flake risk); damage-vs-full decision needs a live PtySession.
-- `OwnerChrome.drive_mode` is plumbed but unrendered — product decision.
 - e2e: `./scripts/e2e-thorough.sh` + `./scripts/agent-collab-test.sh` after
   orchestration-behavior changes (not needed for pure refactors).
 
