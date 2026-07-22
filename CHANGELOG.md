@@ -19,6 +19,13 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.9.17] — 2026-07-22
+
+### Changed
+
+- Overview cards get a **hover effect** (lifted bg + warm border) so it's
+  obvious they're click-to-select.
+
 ## [0.9.16] — 2026-07-22
 
 ### Fixed

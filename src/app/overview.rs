@@ -153,6 +153,15 @@ impl SeanceApp {
                     })
                     .bg(SeancePalette::bg_elevated())
                     .cursor_pointer()
+                    // Hover = "click me to jump here": lift the card and warm
+                    // the border (already-selected keeps its full flame ring).
+                    .hover(move |s| {
+                        s.bg(SeancePalette::surface()).border_color(if is_sel {
+                            SeancePalette::flame()
+                        } else {
+                            SeancePalette::flame_dim()
+                        })
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.set_overview(false, cx);
                         this.select_workspace(&ws_click, window, cx);
