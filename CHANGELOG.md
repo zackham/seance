@@ -19,6 +19,20 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.9.18] — 2026-07-22
+
+### Added
+
+- **Quicklaunch strip** in the sidebar (above the claude-accounts host
+  strip): configurable one-click buttons that spawn a terminal in a chosen
+  working dir running a chosen command. Config at
+  `~/.config/seance/quicklaunch.json`:
+  `[{"name": "vita", "cwd": "~/work/vita", "command": "claude"}]` —
+  `command` omitted = plain shell; optional `"workspace"` targets/creates a
+  workspace (default: selected). Hot-reloads on file edit (~2s mtime watch);
+  a bad edit keeps the previous entries. Hidden when the file is
+  missing/empty.
+
 ## [0.9.17] — 2026-07-22
 
 ### Changed

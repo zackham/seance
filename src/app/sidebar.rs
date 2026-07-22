@@ -564,6 +564,7 @@ impl SeanceApp {
                             })
                     })
             })
+            .child(self.render_quicklaunch(cx))
             .child(self.render_host_sidebar(cx))
             .child(
                 // Footer: summon + help.

@@ -35,6 +35,7 @@ mod layout;
 mod overview;
 mod pads;
 mod palette;
+mod quicklaunch;
 mod sidebar;
 mod tiles;
 mod util;
@@ -43,6 +44,7 @@ mod workspaces;
 use self::actions::*;
 use self::chrome::*;
 use self::layout::*;
+use self::quicklaunch::QuickLaunchEntry;
 use self::util::*;
 use self::workspaces::WorkspaceAttention;
 
@@ -163,6 +165,12 @@ pub struct SeanceApp {
     pending_transfer: Option<String>,
     /// This window attached as empty (second process / new-window transfer target).
     empty_window: bool,
+    /// Quicklaunch strip entries (~/.config/seance/quicklaunch.json).
+    quicklaunch: Vec<QuickLaunchEntry>,
+    /// mtime of the config at last load — reload only on change.
+    quicklaunch_mtime: Option<std::time::SystemTime>,
+    /// Last stat check — throttles the mtime probe to every ~2s.
+    quicklaunch_checked: Option<std::time::Instant>,
 }
 
 /// Active sash drag state.
@@ -246,6 +254,9 @@ impl SeanceApp {
             overview: false,
             pending_transfer: None,
             empty_window: empty,
+            quicklaunch: Vec::new(),
+            quicklaunch_mtime: None,
+            quicklaunch_checked: None,
         };
         let _ = crate::prompts::ensure_user_file();
         let (split, weights, row_weights) = load_layout_file();
@@ -1656,6 +1667,9 @@ impl Render for SeanceApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_bg = cx.theme().background;
         let _ = theme_bg;
+
+        // Quicklaunch config hot-reload (stat throttled to ~2s).
+        self.reload_quicklaunch_if_stale();
 
         // Summon arrives without a Window on the event path; open rename here.
         if self.pending_rename.is_some() {
