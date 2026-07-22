@@ -19,13 +19,38 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.9.14] — 2026-07-22
+
+Codebase-health release: the full modular refactor the 0.9.13 handoff called
+for, plus dead-subsystem removal, zero warnings, and a hard test/format gate.
+No protocol break; live smoke = daemon upgrade + GUI restart with 9 panes
+surviving. Adversarially reviewed as behavior-preserving (all moved bodies
+diffed against baseline; state files load identically).
+
 ### Changed
 
 - Split oversized modules for maintainability (no protocol break):
-  - `runtime/engine` → `engine/{mod,control,helpers,tests}.rs`
+  - `app.rs` (5.9k LOC) → `app/{mod,actions,layout,util,chrome,pads,overview,sidebar,tiles,palette,workspaces}.rs` — core `app/mod.rs` now ~1.9k
+  - `runtime/engine` → `engine/{mod,gui,spawn,control,helpers,tests,gui_tests}.rs` — `mod.rs` now ~0.6k
   - `ctl` → `ctl/{mod,parse,wait,print,phone}.rs`
-- Expanded unit/integration tests (~76 → 123), including hermetic engine control-plane tests
-- Refactor handoff for remaining work: `docs/HANDOFF_REFACTOR.md`
+- Expanded unit/integration tests (~76 → **143**): hermetic engine
+  control-plane tests, **multi-window `handle_gui` tests** (attach/empty/
+  transfer/collect/overview/bye/prune against captured GuiEvent payloads),
+  layout.json parse round-trips, app pure-helper pins
+- Zero build warnings (was 89), enforced by `scripts/check.sh`
+  (fmt --check + deny-warnings check + tests)
+
+### Removed
+
+- Dead pre-daemon **local-PTY subsystem** (~1.4k LOC): `terminal.rs`,
+  `terminal_view.rs`, `PaneBody::Terminal` and pane vestige. Compiler-proven
+  unreachable — the live path is daemon PTYs (`pty_session` + `engine/spawn`)
+  rendered by `remote_term_view`. Shared items live on in `term_shared.rs`.
+- Dead in-GUI control-server cluster in `control.rs` (superseded by the
+  daemon's own ctl serving), retired whisper compose + run-in-pane launch bar
+  code, misc never-read fields/methods across the tree
+- Multi-window protocol APIs not yet wired to UI are kept and marked
+  (`refresh_grid`, `flush_all_grids`, `full_state_event`, `empty_window`)
 
 ### Fixed
 

@@ -17,12 +17,17 @@ Bump only as a pair — `docs/PLAYBOOK.md`. Grep `deps/zed` for real APIs.
 
 ```bash
 ./scripts/bootstrap-deps.sh
+./scripts/check.sh  # gate: fmt --check + deny-warnings check + full tests — keep green
 cargo build --release && cargo test
 ./target/release/seance
 seance ctl skill    # agent-facing engagement protocol
 seance ctl list --all
 seance ctl roster   # stage projection (owner/status/pad_rev)
 ```
+
+Module conventions from the 0.9.14 split (`docs/HANDOFF_REFACTOR.md`): child
+modules hold `impl SeanceApp`/`impl Engine` blocks and see parent private
+fields; cross-module methods are `pub(super)`; zero warnings is enforced.
 
 ### Session survival — never hard-kill the daemon
 

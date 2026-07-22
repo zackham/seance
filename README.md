@@ -13,7 +13,7 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) · **Status:** 0.9.13
+**License:** MIT · **Platform:** Linux (Wayland / X11) · **Status:** 0.9.14
 
 Release notes: [`CHANGELOG.md`](CHANGELOG.md).
 
