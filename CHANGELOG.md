@@ -19,6 +19,15 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.9.21] — 2026-07-22
+
+### Fixed
+
+- **Quicklaunch selects its new workspace.** GUI-requested spawns now update
+  the requesting window's selection daemon-side before the State push — the
+  push used to carry the old selection and revert the GUI's switch (invisible
+  for same-workspace summons, visible for quicklaunch's fresh workspaces).
+
 ## [0.9.20] — 2026-07-22
 
 ### Fixed

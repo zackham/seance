@@ -1,6 +1,6 @@
 [package]
 name = "seance"
-version = "0.9.20"
+version = "0.9.21"
 edition = "2021"
 description = "Shared live workspace for humans and agents — multi-pane terminals, notes, file panes, and a control plane for co-working in the open."
 license = "MIT"

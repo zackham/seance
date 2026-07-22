@@ -998,13 +998,24 @@ impl Engine {
                     name,
                     cwd,
                     command,
-                    workspace: Some(ws),
+                    workspace: Some(ws.clone()),
                     tiled,
                     resume: false,
                     file,
                 }) {
                     Ok(slug) => {
                         self.persist();
+                        // A GUI-requested spawn selects its workspace on the
+                        // requesting window BEFORE the State push below —
+                        // otherwise State still carries the old selection and
+                        // reverts the GUI's PaneSpawned-side select (visible
+                        // with quicklaunch, which targets a fresh workspace).
+                        if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
+                            c.selected_workspace = Some(ws.clone());
+                            c.focused_pane = Some(slug.clone());
+                        }
+                        self.selected_workspace = Some(ws.clone());
+                        self.focused_pane = Some(slug.clone());
                         let info = self
                             .pane_infos()
                             .into_iter()
