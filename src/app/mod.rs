@@ -171,6 +171,8 @@ pub struct SeanceApp {
     quicklaunch_mtime: Option<std::time::SystemTime>,
     /// Last stat check — throttles the mtime probe to every ~2s.
     quicklaunch_checked: Option<std::time::Instant>,
+    /// Open quicklaunch create/edit modal (None = closed).
+    quicklaunch_editor: Option<quicklaunch::QuickLaunchEditor>,
 }
 
 /// Active sash drag state.
@@ -257,6 +259,7 @@ impl SeanceApp {
             quicklaunch: Vec::new(),
             quicklaunch_mtime: None,
             quicklaunch_checked: None,
+            quicklaunch_editor: None,
         };
         let _ = crate::prompts::ensure_user_file();
         let (split, weights, row_weights) = load_layout_file();
@@ -809,6 +812,16 @@ impl SeanceApp {
 
         // ---- escape for chrome overlays only; else let terminal get it ----
         if key == "escape" {
+            if self.quicklaunch_editor.is_some() {
+                self.cancel_quicklaunch_editor(cx);
+                if let Some(slug) = self.active_slug.clone() {
+                    if let Some(pane) = self.panes.iter().find(|p| p.slug == slug) {
+                        pane.focus_content(window, cx);
+                    }
+                }
+                cx.stop_propagation();
+                return;
+            }
             if self.overview {
                 self.set_overview(false, cx);
                 cx.stop_propagation();
@@ -1676,11 +1689,13 @@ impl Render for SeanceApp {
             self.flush_pending_rename(window, cx);
         }
         // Launch / spawn: put keyboard on the active terminal once the view exists.
-        // Skip while palette / rename / whisper / notes drawer owns input.
+        // Skip while palette / rename / whisper / notes drawer / quicklaunch
+        // editor owns input.
         if matches!(self.palette, PaletteMode::Closed)
             && self.renaming.is_none()
             && self.whisper.is_none()
             && self.flipped.is_none()
+            && self.quicklaunch_editor.is_none()
         {
             self.ensure_keyboard_focus(window, cx);
         }
@@ -1758,6 +1773,12 @@ impl Render for SeanceApp {
                 if let Some(wid) = this.window_id.clone() {
                     let _ = this.client.transfer_workspace(&act.0, &wid);
                 }
+            }))
+            .on_action(cx.listener(|this, act: &ActQuickLaunchEdit, window, cx| {
+                this.open_quicklaunch_editor(Some(&act.0.clone()), window, cx);
+            }))
+            .on_action(cx.listener(|this, act: &ActQuickLaunchRemove, _, cx| {
+                this.quicklaunch_remove(&act.0.clone(), cx);
             }))
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
                 let Some(drag) = this.sash_drag.clone() else {
@@ -1849,6 +1870,7 @@ impl Render for SeanceApp {
                     .then(|| self.render_overview(cx).into_any_element()),
             )
             .children(self.render_palette(cx))
+            .children(self.render_quicklaunch_editor(cx))
             .children(match &self.drawer {
                 Drawer::Closed => None,
                 Drawer::Activity => Some(

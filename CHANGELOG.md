@@ -19,6 +19,19 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.9.19] — 2026-07-22
+
+### Added
+
+- **Quicklaunch management UI** — the strip is now editable in place:
+  right-click a chip for **edit… / remove**, **drag-drop** chips to reorder
+  (insert-before, same as sidebar rows), and a **`+`** button on the title
+  row opens a modal editor (name / cwd / command / workspace; Enter saves,
+  Esc cancels; empty or colliding names block the save with a hint). All
+  changes persist atomically to `~/.config/seance/quicklaunch.json` — the
+  file stays the source of truth and hand-edits still hot-reload. Caveat:
+  unknown JSON fields don't survive a UI edit (serde round-trip).
+
 ## [0.9.18] — 2026-07-22
 
 ### Added

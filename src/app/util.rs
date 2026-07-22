@@ -34,6 +34,12 @@ pub(super) struct DraggedWorkspace {
     pub name: String,
 }
 
+/// Payload for dragging a quicklaunch chip (reorder chips, insert-before).
+#[derive(Clone)]
+pub(super) struct DraggedQuickLaunch {
+    pub name: String,
+}
+
 /// Tooltip helper: `.tooltip(tip("..."))` on any interactive element.
 pub(super) fn tip(
     text: &'static str,

@@ -110,3 +110,13 @@ pub struct ActCollectAllWindows;
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]
 pub struct ActPullWorkspace(pub String);
+
+/// Open the quicklaunch editor pre-filled for the named entry (context menu).
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActQuickLaunchEdit(pub String);
+
+/// Remove the named quicklaunch entry and persist (context menu).
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActQuickLaunchRemove(pub String);
