@@ -12,15 +12,14 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use gpui::{
-    div, ease_in_out, prelude::*, px, relative, Action, Animation, AnimationExt as _, Context,
-    Entity, FocusHandle, Focusable as _, SharedString, Window,
+    div, ease_in_out, prelude::*, px, relative, Animation, AnimationExt as _, Context, Entity,
+    FocusHandle, Focusable as _, SharedString, Window,
 };
 use gpui_component::{
     input::{Input, InputEvent, InputState},
     menu::ContextMenuExt as _,
-    ActiveTheme as _, Colorize as _, GlobalState, StyledExt as _, WindowExt as _,
+    ActiveTheme as _, Colorize as _, StyledExt as _, WindowExt as _,
 };
-use serde::Deserialize;
 
 use crate::{
     control::{ControlRequest, ControlResponse},
@@ -38,274 +37,13 @@ use crate::{
 };
 use std::sync::Arc;
 
-fn decode_grid_b64(data_b64: &str, base: Option<&GridSnapshot>) -> Result<GridSnapshot, String> {
-    use crate::runtime::snapshot::decode_grid_bin_onto;
-    use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data_b64)
-        .map_err(|e| e.to_string())?;
-    decode_grid_bin_onto(&bytes, base)
-}
+mod actions;
+mod layout;
+mod util;
 
-// Sidebar context-menu actions (menu items dispatch gpui actions).
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActToggleTiled(pub String);
-
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActOpenNotes(pub String);
-
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActKillSession(pub String);
-
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActMoveToWorkspace {
-    pub slug: String,
-    pub workspace: String,
-}
-
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActMoveToNewWorkspace(pub String);
-
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActTogglePopout(pub String);
-
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActForkWorkspace(pub String);
-
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActKillWorkspace(pub String);
-
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActRenamePane(pub String);
-
-/// Prompt injected by the one-click "arm" action — orients an agent in a
-/// seance pane so it uses the control plane instead of flying blind.
-const SEANCE_ARM_PROMPT: &str = "\
-You are inside **seance** — a shared live workspace where humans and agents \
-work in the open. Every pane is on my screen; visibility is the point.
-
-Your environment already has:
-- `$SEANCE_SESSION` — this pane's id
-- `$SEANCE_WORKSPACE` — circle name (`seance ctl` is scoped to it)
-- `$SEANCE_SCRATCHPAD` — notes we share (I flip this pane to read them)
-- `$SEANCE_SOCKET` — control socket
-
-Please:
-1. Run `seance ctl skill` and internalize the engagement protocol
-2. Use `seance ctl` to discover/spawn/drive sibling panes in this workspace
-3. Prefer `propose` (ghost text I approve) and `ask` (blocking choices) over silent risk
-4. Report status (`status-set working|blocked|needs-human|done`) so I can triage
-5. Write durable notes to `$SEANCE_SCRATCHPAD` — screens scroll away
-
-**File / markdown panes (critical):**
-To put a document on my screen as a live viewer, spawn a **file pane**, not a \
-shell with bat/less/watch:
-
-  seance ctl new --name notes --file /absolute/or/relative/path.md
-
-- `.md` renders as markdown and auto-refreshes on mtime (history ◀/▶ built-in).
-- Do **NOT** use `new --command 'bat …'` or `watch` loops for docs — those are \
-  terminal panes; I want the native file viewer.
-- Then **edit the file on disk** (Write/Edit tools). Do not `ctl send` into a \
-  file pane (no PTY). Re-`read` the path yourself; the human sees the pane update.
-- Wrong: `new --name x --command \"bash -c 'while true; do clear; bat f; sleep 1; done'\"`
-- Right:  `new --name x --file \"$PWD/path/to/f.md\"`
-
-Confirm you're oriented and ready, then wait for the next instruction.";
-
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActRenameWorkspace(pub String);
-
-/// Bump workspace recency without selecting it (sidebar context menu).
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActTouchWorkspace(pub String);
-
-/// Move a workspace to another GUI window (multi-window).
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActTransferWorkspace {
-    pub workspace: String,
-    pub to_window: String,
-}
-
-/// Open a new empty OS window and transfer this workspace there.
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActTransferWorkspaceNewWindow(pub String);
-
-/// Pull every workspace into this window.
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActCollectAllWindows;
-
-/// Pull a foreign workspace into this window.
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActPullWorkspace(pub String);
-
-/// Payload for dragging a sidebar pane row onto a workspace header.
-#[derive(Clone)]
-pub struct DraggedPane {
-    pub slug: String,
-    pub name: String,
-}
-
-/// Payload for dragging a workspace header (reorder workspaces).
-#[derive(Clone)]
-pub struct DraggedWorkspace {
-    pub name: String,
-}
-
-/// Tooltip helper: `.tooltip(tip("..."))` on any interactive element.
-fn tip(text: &'static str) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
-    move |window, cx| gpui_component::tooltip::Tooltip::new(text).build(window, cx)
-}
-
-/// Owned-string tooltip (host chip labels, errors, …).
-fn tip_s(
-    text: impl Into<String>,
-) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
-    let text = text.into();
-    move |window, cx| gpui_component::tooltip::Tooltip::new(text.clone()).build(window, cx)
-}
-
-/// Standard selected-row fill for sidebar lists (workspaces, host chips, panes).
-/// High-contrast on `bg_elevated` — not `surface` (too close to the panel).
-#[inline]
-fn selected_row_fill() -> gpui::Hsla {
-    SeancePalette::border()
-}
-
-fn layout_file_path() -> PathBuf {
-    PathBuf::from(shellexpand::tilde("~/.local/share/seance/layout.json").into_owned())
-}
-
-fn load_layout_file() -> (
-    f32,
-    std::collections::HashMap<String, f32>,
-    std::collections::HashMap<String, f32>,
-) {
-    let empty = || {
-        (
-            0.5,
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-        )
-    };
-    let Ok(bytes) = std::fs::read_to_string(layout_file_path()) else {
-        return empty();
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes) else {
-        return empty();
-    };
-    let split = v.get("split_ratio").and_then(|x| x.as_f64()).unwrap_or(0.5) as f32;
-    let mut weights = std::collections::HashMap::new();
-    if let Some(obj) = v.get("weights").and_then(|w| w.as_object()) {
-        for (k, val) in obj {
-            if let Some(f) = val.as_f64() {
-                weights.insert(k.clone(), f as f32);
-            }
-        }
-    }
-    let mut row_weights = std::collections::HashMap::new();
-    if let Some(obj) = v.get("row_weights").and_then(|w| w.as_object()) {
-        for (k, val) in obj {
-            if let Some(f) = val.as_f64() {
-                row_weights.insert(k.clone(), f as f32);
-            }
-        }
-    }
-    (split.clamp(0.2, 0.8), weights, row_weights)
-}
-
-fn save_layout_file(
-    split_ratio: f32,
-    weights: &std::collections::HashMap<String, f32>,
-    row_weights: &std::collections::HashMap<String, f32>,
-) {
-    let mut wmap = serde_json::Map::new();
-    for (k, v) in weights {
-        wmap.insert(k.clone(), serde_json::json!(*v));
-    }
-    let mut rmap = serde_json::Map::new();
-    for (k, v) in row_weights {
-        rmap.insert(k.clone(), serde_json::json!(*v));
-    }
-    let v = serde_json::json!({
-        "split_ratio": split_ratio,
-        "weights": wmap,
-        "row_weights": rmap,
-    });
-    if let Ok(s) = serde_json::to_string_pretty(&v) {
-        let path = layout_file_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(path, s);
-    }
-}
-
-fn ui_debug(msg: &str) {
-    if std::env::var("SEANCE_DEBUG_UI").is_ok() {
-        eprintln!("[seance:ui] {msg}");
-    }
-}
-
-/// Kill in-progress platform text selection (markdown file panes are
-/// `.selectable(true)`). Same fix as the face chip: sidebar drag-and-drop
-/// keeps the mouse button down while the cursor crosses the tile region, and
-/// without this the markdown body treats that as a text drag-select.
-///
-/// Cheap when idle: `has_text_selection` short-circuits. Never call this from
-/// `on_drag_move` — GPUI refreshes the whole window every drag move already,
-/// and clear/end walks every selectable TextView. Continuous kill was the
-/// sidebar DnD frame limiter.
-fn kill_text_selection(window: &mut Window, cx: &mut gpui::App) {
-    if !window.has_text_selection(cx) {
-        return;
-    }
-    window.end_text_selection(cx);
-    window.clear_text_selection(cx);
-}
-
-/// Sidebar rows own their press/drag. Suppress window text selection for this
-/// mouse-down (Button/Input pattern) so a reorder never starts a markdown
-/// highlight — even before the drag threshold, and without per-move clears.
-fn sidebar_press_no_select(window: &mut Window, cx: &mut gpui::App) {
-    GlobalState::suppress_text_selection(cx);
-    kill_text_selection(window, cx);
-}
-
-/// The little pill that follows the cursor during a drag.
-pub struct DragPill {
-    label: String,
-}
-
-impl Render for DragPill {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(SeancePalette::surface())
-            .border_1()
-            .border_color(SeancePalette::flame_dim())
-            .text_sm()
-            .text_color(SeancePalette::text())
-            .child(self.label.clone())
-    }
-}
+use self::actions::*;
+use self::layout::*;
+use self::util::*;
 
 /// What's being renamed inline in the sidebar.
 #[derive(Clone)]
@@ -363,16 +101,6 @@ pub struct PaneStatus {
     pub note: Option<String>,
 }
 
-fn status_color(state: &str) -> gpui::Hsla {
-    match state {
-        "blocked" | "risky" => SeancePalette::danger(),
-        "needs-human" => SeancePalette::violet(),
-        "done" => SeancePalette::success(),
-        "idle" => SeancePalette::text_faint(),
-        _ => SeancePalette::flame(), // planning/working
-    }
-}
-
 /// Badge on an *inactive* workspace header in the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkspaceAttention {
@@ -406,83 +134,6 @@ impl WorkspaceAttention {
             Self::Done => 1,
         }
     }
-}
-
-/// Claude Code / ink TUIs put a braille spinner in the OSC title while streaming.
-/// Idle Claude uses `✳` (U+2733) — that is *not* busy.
-fn title_looks_busy(title: &str) -> bool {
-    let t = title.trim_start();
-    let Some(c) = t.chars().next() else {
-        return false;
-    };
-    matches!(c, '\u{2800}'..='\u{28FF}')
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// If `~/.local/share/seance/scratch/<slug>.telegram.json` exists, post status
-/// to that topic via vita (best-effort, never blocks the GUI).
-fn telegram_status_bridge(slug: &str, state: &str, note: Option<&str>) {
-    let path = PathBuf::from(
-        shellexpand::tilde(&format!(
-            "~/.local/share/seance/scratch/{slug}.telegram.json"
-        ))
-        .into_owned(),
-    );
-    let Ok(bytes) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes) else {
-        return;
-    };
-    let Some(topic_id) = v
-        .get("topic_id")
-        .and_then(|t| t.as_str())
-        .map(|s| s.to_string())
-    else {
-        return;
-    };
-    let text = match note {
-        Some(n) if !n.is_empty() => format!("seance `{slug}` → *{state}*: {n}"),
-        _ => format!("seance `{slug}` → *{state}*"),
-    };
-    std::thread::spawn(move || {
-        let input = serde_json::json!({"topic_id": topic_id, "text": text});
-        let input_s = input.to_string();
-        let vita = PathBuf::from(shellexpand::tilde("~/work/vita").into_owned());
-        let run = vita.join("run");
-        let mut cmd = if run.exists() {
-            let mut c = std::process::Command::new(&run);
-            c.current_dir(&vita);
-            c.args([
-                "capabilities",
-                "call",
-                "vita.telegram.send",
-                "--input",
-                &input_s,
-            ]);
-            c
-        } else {
-            let mut c = std::process::Command::new("vita");
-            c.args([
-                "capabilities",
-                "call",
-                "vita.telegram.send",
-                "--input",
-                &input_s,
-            ]);
-            c
-        };
-        let _ = cmd
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    });
 }
 
 /// Co-presence chrome for a pane (mirrors daemon agency).
