@@ -1,5 +1,6 @@
 //! Engine integration tests (control plane with stub panes).
 
+use super::helpers::now_ms;
 use super::*;
 use crate::control::ControlRequest;
 use std::path::PathBuf;
