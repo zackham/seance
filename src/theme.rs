@@ -119,49 +119,6 @@ impl SeancePalette {
     }
 }
 
-/// A custom 16-color ANSI palette, candlelit-tuned.
-///
-/// Claude Code's TUI renders inside the embedded terminal using these colors,
-/// so they must feel native to the app: readable on the deep charcoal ground,
-/// amber-warm yellows, violet-tinted magentas/blues. Order is standard ANSI:
-///
-/// ```text
-///  0 black     1 red      2 green    3 yellow
-///  4 blue      5 magenta  6 cyan     7 white
-///  8 bright-black (gray)  9 bright-red   10 bright-green  11 bright-yellow
-/// 12 bright-blue  13 bright-magenta  14 bright-cyan  15 bright-white
-/// ```
-///
-/// # Hex reference
-/// ```text
-///  0 #1C1718   1 #C7594D   2 #7CA871   3 #E9A03A
-///  4 #7C91CB   5 #A790D5   6 #71ADAB   7 #C9BDB1
-///  8 #494143   9 #E1776B  10 #94C487  11 #F4BE62
-/// 12 #94A8E0  13 #BFA8E6  14 #8FCCCA  15 #EBE3DB
-/// ```
-pub fn ansi_palette() -> [Hsla; 16] {
-    [
-        // ── normal ──────────────────────────────────────────────────────────
-        hsl(345., 8., 10.),  //  0 black — matches bg_elevated, not pure black
-        hsl(6., 52., 54.),   //  1 red — warm brick
-        hsl(108., 24., 55.), //  2 green — muted sage
-        hsl(35., 80., 57.),  //  3 yellow — the flame (amber, not lemon)
-        hsl(224., 43., 64.), //  4 blue — dusty periwinkle
-        hsl(260., 45., 70.), //  5 magenta — the violet highlight
-        hsl(178., 27., 56.), //  6 cyan — muted teal
-        hsl(30., 18., 74.),  //  7 white — soft parchment
-        // ── bright ──────────────────────────────────────────────────────────
-        hsl(345., 6., 27.),  //  8 bright-black — warm gray (dim text on bg)
-        hsl(6., 66., 65.),   //  9 bright-red — lifted brick
-        hsl(108., 34., 65.), // 10 bright-green — lifted sage
-        hsl(38., 87., 67.),  // 11 bright-yellow — bright candle
-        hsl(224., 55., 73.), // 12 bright-blue — lifted periwinkle
-        hsl(262., 55., 78.), // 13 bright-magenta — lifted violet
-        hsl(178., 37., 68.), // 14 bright-cyan — lifted teal
-        hsl(30., 27., 89.),  // 15 bright-white — the primary text warm off-white
-    ]
-}
-
 /// Activate the candlelit dark theme and apply the palette to gpui-component's
 /// global `Theme` so its widgets (buttons, inputs, panels, tabs, scrollbars)
 /// match seance's chrome.

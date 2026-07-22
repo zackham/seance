@@ -19,7 +19,7 @@ use crate::{
     control::{ControlRequest, ControlResponse},
     events,
     gui_client::GuiClient,
-    pane::{Pane, PaneBody, PaneKind, SpawnRequest},
+    pane::{Pane, PaneBody, SpawnRequest},
     remote_term::RemoteTerminal,
     remote_term_view::RemoteTerminalView,
     runtime::protocol::{ForeignWorkspace, GuiEvent, PaneInfo, WindowInfo},
@@ -667,7 +667,6 @@ impl SeanceApp {
             .find(|p| p.slug == slug)
             .and_then(|p| match &p.body {
                 PaneBody::Remote { view, .. } => Some(view.read(cx).focus_handle()),
-                PaneBody::Terminal { view, .. } => Some(view.read(cx).focus_handle()),
                 PaneBody::File { .. } => None,
             });
         let Some(handle) = handle else {
@@ -933,15 +932,12 @@ impl SeanceApp {
                 std::path::PathBuf::from(info.file.clone().unwrap_or_else(|| info.command.clone()));
             let view = cx.new(|cx| crate::fileview::FileView::new(path.clone(), cx));
             self.panes.push(Pane {
-                kind: PaneKind::File,
                 name: info.name.clone(),
                 slug: info.slug.clone(),
                 workspace: info.workspace.clone(),
                 cwd: info.cwd.clone(),
                 command: info.command.clone(),
                 tiled: info.tiled,
-                resume_on_restore: false,
-                scratch_path: std::path::PathBuf::from(&info.scratchpad),
                 body: PaneBody::File { view },
                 popped: None,
             });
@@ -951,15 +947,12 @@ impl SeanceApp {
             cx.new(|_cx| RemoteTerminal::new(info.slug.clone(), Arc::clone(&self.client)));
         let view = cx.new(|cx| RemoteTerminalView::new(terminal.clone(), cx));
         self.panes.push(Pane {
-            kind: PaneKind::Terminal,
             name: info.name.clone(),
             slug: info.slug.clone(),
             workspace: info.workspace.clone(),
             cwd: info.cwd.clone(),
             command: info.command.clone(),
             tiled: info.tiled,
-            resume_on_restore: false,
-            scratch_path: std::path::PathBuf::from(&info.scratchpad),
             body: PaneBody::Remote { terminal, view },
             popped: None,
         });
@@ -996,8 +989,6 @@ impl SeanceApp {
                 cwd: None,
                 command: None,
                 workspace: self.selected_workspace.clone(),
-                tiled: true,
-                resume: false,
                 file: None,
             },
             cx,
@@ -1566,12 +1557,6 @@ impl SeanceApp {
             events::log("human", Some(&pane.workspace), Some(slug), kind, detail);
             if let Some(rt) = pane.remote_terminal() {
                 rt.read(cx).inject(text.to_string(), true);
-                self.touch(slug, "whispered", "you", cx);
-            } else if let Some(terminal) = pane.terminal() {
-                terminal.update(cx, |term, cx| {
-                    term.scroll_to_bottom();
-                    term.inject(text.to_string(), true, cx);
-                });
                 self.touch(slug, "whispered", "you", cx);
             }
         }

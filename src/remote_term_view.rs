@@ -17,7 +17,7 @@ use gpui_component::{notification::Notification, WindowExt as _};
 use crate::remote_term::RemoteTerminal;
 use crate::runtime::snapshot::{CellSnap, GridSnapshot};
 use crate::term_font::{self, term_font, term_font_bold, FONT_SIZE, LINE_HEIGHT_FACTOR};
-use crate::terminal::keystroke_bytes;
+use crate::term_shared::keystroke_bytes;
 use crate::theme::SeancePalette;
 use alacritty_terminal::term::TermMode;
 

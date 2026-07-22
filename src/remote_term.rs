@@ -9,7 +9,7 @@ use gpui::{Context, EventEmitter};
 
 use crate::gui_client::GuiClient;
 use crate::runtime::snapshot::{GhostSnap, GridSnapshot};
-use crate::terminal::{Ghost, TerminalEvent};
+use crate::term_shared::{Ghost, TerminalEvent};
 
 /// Debounce PTY resizes so 1px layout jitter can't thrash the daemon.
 struct ResizeGate {

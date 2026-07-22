@@ -20,8 +20,7 @@ mod runtime;
 mod scratchpad;
 mod state;
 mod term_font;
-mod terminal;
-mod terminal_view;
+mod term_shared;
 mod theme;
 
 use gpui::*;

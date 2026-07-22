@@ -331,8 +331,8 @@ pub(super) fn render_pane(
     let slug = pane.slug.clone();
     let running = pane.is_running(cx);
     let title = pane.title(cx).unwrap_or_else(|| pane.command.clone());
-    // Local or daemon-backed terminal panes both get arm/phone chrome.
-    let has_terminal = pane.terminal().is_some() || pane.remote_terminal().is_some();
+    // Daemon-backed terminal panes get arm/phone chrome.
+    let has_terminal = pane.remote_terminal().is_some();
     let exited = owner.map(|o| o.exited).unwrap_or(false);
     let owner_label = owner.map(|o| {
         if o.exited {
