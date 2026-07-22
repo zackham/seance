@@ -628,19 +628,25 @@ impl SeanceApp {
     }
 
     /// Apply a decoded grid to the matching remote pane. Shared by JSON
-    /// `grid` and binary `grid_bin` events. Only paints panes on the selected
-    /// workspace (other workspaces never get live pushes from the daemon).
+    /// `grid` and binary `grid_bin` events. Outside overview, only panes on
+    /// the selected workspace apply (others never get live pushes anyway).
     fn apply_grid_snap(&mut self, snap: GridSnapshot, cx: &mut Context<Self>) {
         let slug = snap.pane.clone();
         // Skip paint work for panes not on screen. Hidden workspaces with
-        // spinning TUIs used to keep the GUI at 90%+ CPU.
-        let ws = self.selected_workspace.as_deref();
-        let visible = self
-            .panes
-            .iter()
-            .any(|p| p.slug == slug && p.popped.is_none() && ws.is_none_or(|w| p.workspace == w));
-        if !visible {
-            return;
+        // spinning TUIs used to keep the GUI at 90%+ CPU. EXCEPT in overview:
+        // it shows EVERY circle's thumbs, so all frames must apply — with the
+        // gate up, the open-flush got dropped and cards stayed blank until a
+        // resize forced a flush while selected. The daemon throttles
+        // non-selected circles to ~15fps during overview, so the CPU guard
+        // isn't needed there.
+        if !self.overview {
+            let ws = self.selected_workspace.as_deref();
+            let visible = self.panes.iter().any(|p| {
+                p.slug == slug && p.popped.is_none() && ws.is_none_or(|w| p.workspace == w)
+            });
+            if !visible {
+                return;
+            }
         }
         if let Some(rt) = self
             .panes

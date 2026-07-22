@@ -19,6 +19,18 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.9.16] — 2026-07-22
+
+### Fixed
+
+- **Overview no longer shows blank cards** for workspaces you haven't visited
+  since GUI start. The GUI's CPU guard (drop grid frames for non-selected
+  workspaces) was also eating the daemon's overview open-flush; the guard now
+  stands down while overview is open. This regression was fixed once before
+  in an app.rs working tree that got rolled back — re-fixed at the guard
+  itself with a comment explaining the interplay. Workaround was
+  select-workspace + resize; no longer needed.
+
 ## [0.9.15] — 2026-07-22
 
 Multi-window completion + overview that actually fills the screen.
