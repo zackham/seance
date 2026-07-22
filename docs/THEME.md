@@ -33,9 +33,10 @@ hex below is computed from that HSL (sRGB round). Authored with
 
 | token             | maps to     | meaning |
 |-------------------|-------------|---------|
-| `status_running`  | `flame`     | pane live / actively working |
-| `status_idle`     | `text_dim`  | present but quiet |
 | `status_exited`   | `text_faint`| process left the circle |
+
+> `status_running` / `status_idle` were removed 2026-07-22 (dead code); live
+> "working" state is drawn from observed TUI title spinners, not theme tokens.
 
 ## ANSI terminal palette (16-color)
 
@@ -74,12 +75,9 @@ impl SeancePalette {
     pub fn flame() -> Hsla;         pub fn flame_dim() -> Hsla;
     pub fn violet() -> Hsla;        pub fn violet_dim() -> Hsla;
     pub fn success() -> Hsla;       pub fn danger() -> Hsla;
-    pub fn status_running() -> Hsla;
-    pub fn status_idle() -> Hsla;
     pub fn status_exited() -> Hsla;
 }
 
-pub fn ansi_palette() -> [gpui::Hsla; 16];   // standard ANSI order
 pub fn init(cx: &mut gpui::App);             // activate dark theme + overrides
 ```
 
@@ -138,11 +136,10 @@ Color transforms (`.opacity/.lighten/.darken`) come from `gpui_component`'s
 2. **`apply_palette` covers the fields seance uses.** The `chart_*` swatches and
    the base `red/green/blue/yellow/magenta/cyan(+_light)` `ThemeColor` fields are
    left at the Default-Dark seed — they only feed data-viz widgets seance
-   doesn't ship, and terminal color is handled separately by `ansi_palette()`.
+   doesn't ship, and terminal color is resolved daemon-side
+   (ghostty palette in `runtime/pty_session.rs`), not by the theme module.
    If a component you add reads those, extend `apply_palette`.
-3. **`ansi_palette()` is not auto-wired.** It returns the 16 colors; wiring them
-   into the `alacritty_terminal` render path (its `Colors`/`TermColors` map) is
-   the terminal-pane code's job, not the theme module's.
+   (`ansi_palette()` was removed 2026-07-22 with the dead local-PTY path.)
 4. **No `window_border` on non-Linux**, per gpui-component docs
    (`theme_color.rs:314-319`). seance is Linux-only, so this is fine; we set it
    to `border`.

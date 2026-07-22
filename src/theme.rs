@@ -18,8 +18,6 @@
 //!   violet_dim   #6C5B95   dimmed violet
 //!   success      #86B67C   soft sage (calm, not neon)
 //!   danger       #D0675D   warm muted red (does not scream)
-//!   status_running #E9A03A amber — a spirit is present / working
-//!   status_idle    #A69A91 dim  — summoned but quiet
 //!   status_exited  #69605D gray — the circle closed
 //! ───────────────────────────────────────────────────────────────────────────
 //!

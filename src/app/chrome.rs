@@ -19,7 +19,7 @@ use super::util::{selected_row_fill, status_color, tip};
 use super::{Drawer, OwnerChrome, PaneStatus, SeanceApp};
 
 /// The grimoire in its own window.
-pub struct HelpWindow;
+pub(super) struct HelpWindow;
 
 impl Render for HelpWindow {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

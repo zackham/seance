@@ -24,13 +24,13 @@ pub(super) fn decode_grid_b64(
 
 /// Payload for dragging a sidebar pane row onto a workspace header.
 #[derive(Clone)]
-pub struct DraggedPane {
+pub(super) struct DraggedPane {
     pub slug: String,
 }
 
 /// Payload for dragging a workspace header (reorder workspaces).
 #[derive(Clone)]
-pub struct DraggedWorkspace {
+pub(super) struct DraggedWorkspace {
     pub name: String,
 }
 
@@ -88,7 +88,7 @@ pub(super) fn sidebar_press_no_select(window: &mut Window, cx: &mut gpui::App) {
 }
 
 /// The little pill that follows the cursor during a drag.
-pub struct DragPill {
+pub(super) struct DragPill {
     pub(super) label: String,
 }
 
