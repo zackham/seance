@@ -199,14 +199,6 @@ impl GridSnapshot {
             hyperlinks: Vec::new(),
         }
     }
-
-    /// URI under cell (row, col), if any.
-    pub fn hyperlink_at(&self, row: u16, col: u16) -> Option<&str> {
-        self.hyperlinks
-            .iter()
-            .find(|h| h.row == row && col >= h.col_start && col < h.col_end)
-            .map(|h| h.uri.as_str())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +380,7 @@ pub fn encode_grid_bin_ex(snap: &GridSnapshot, dirty: Option<&[u16]>) -> Result<
 /// For DAMAGE frames, `base` must be the previous snapshot for that pane
 /// (same cols/rows). If base is missing or size mismatches, returns an error
 /// so the caller can request a full frame (engine will send full next push).
+#[allow(dead_code)] // exercised by snapshot round-trip tests; live decode uses decode_grid_bin_onto
 pub fn decode_grid_bin(data: &[u8]) -> Result<GridSnapshot, String> {
     decode_grid_bin_onto(data, None)
 }
@@ -748,7 +741,7 @@ mod bin_tests {
 
     #[test]
     fn roundtrip_damage() {
-        let mut a = sample();
+        let a = sample();
         let mut b = a.clone();
         b.rev = 43;
         b.cells[80].c = 'X';

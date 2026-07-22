@@ -1,13 +1,11 @@
 //! Blocking wait / watch / boot-clear for `seance ctl`.
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use crate::control::{socket_path, ControlRequest, ControlResponse};
 
-use super::parse::{base64_encode, parse_duration_secs, single_positional, with_identity};
-use super::{send_request, ConnectError};
+use super::parse::{base64_encode, with_identity};
+use super::send_request;
 
 pub(crate) fn run_wait(
     args: Vec<String>,

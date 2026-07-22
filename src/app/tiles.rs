@@ -32,7 +32,7 @@ impl SeanceApp {
         let name = pane.name.clone();
         let slug = pane.slug.clone();
         let slug_unzoom = slug.clone();
-        let whisper = self
+        let _whisper = self
             .whisper
             .as_ref()
             .filter(|(ws, _)| *ws == pane.slug)
@@ -163,7 +163,7 @@ impl SeanceApp {
 
     pub(super) fn render_tiles(&self, window_active: bool, cx: &Context<Self>) -> impl IntoElement {
         // The tiling region shows only the SELECTED workspace's tiled panes.
-        let mut tiled: Vec<&Pane> = self
+        let tiled: Vec<&Pane> = self
             .panes
             .iter()
             .filter(|s| {
@@ -286,10 +286,8 @@ impl SeanceApp {
                         .hover(|s| s.bg(SeancePalette::flame_dim()))
                         .on_mouse_down(
                             gpui::MouseButton::Left,
-                            cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| {
-                                this.sash_drag = Some(SashDrag::TwoPane {
-                                    start_x: ev.position.x.into(),
-                                });
+                            cx.listener(|this, _ev: &gpui::MouseDownEvent, _, cx| {
+                                this.sash_drag = Some(SashDrag::TwoPane);
                                 cx.notify();
                             }),
                         ),

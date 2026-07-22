@@ -9,7 +9,6 @@
 
 use std::time::Duration;
 
-use futures::StreamExt;
 use gpui::{div, prelude::*, px, Context, Entity, FocusHandle, Focusable as _, Window};
 use gpui_component::{
     input::{InputEvent, InputState},
@@ -20,14 +19,12 @@ use crate::{
     control::{ControlRequest, ControlResponse},
     events,
     gui_client::GuiClient,
-    pane::{spawn_pane, Pane, PaneBody, PaneKind, SpawnRequest},
+    pane::{Pane, PaneBody, PaneKind, SpawnRequest},
     remote_term::RemoteTerminal,
     remote_term_view::RemoteTerminalView,
     runtime::protocol::{ForeignWorkspace, GuiEvent, PaneInfo, WindowInfo},
     runtime::snapshot::GridSnapshot,
     scratchpad::{ScratchpadDrawer, ScratchpadStore},
-    state::AppState,
-    terminal::TerminalEvent,
     theme::SeancePalette,
 };
 use std::sync::Arc;
@@ -95,6 +92,8 @@ pub struct PaneStatus {
 #[derive(Clone, Debug)]
 struct OwnerChrome {
     owner: String,
+    /// Plumbed from daemon Agency events; not yet rendered (pair/agent badge TODO).
+    #[allow(dead_code)]
     drive_mode: String,
     exited: bool,
     exit_code: Option<i32>,
@@ -108,15 +107,10 @@ pub struct SeanceApp {
     owners: std::collections::HashMap<String, OwnerChrome>,
     /// (pane slug -> (verb, actor, when)) — transient "driven by X" flashes.
     touches: std::collections::HashMap<String, (String, String, std::time::Instant)>,
-    ask_counter: u64,
-    /// proposal id -> (pane slug, outcome once resolved)
-    proposals: std::collections::HashMap<String, (String, Option<String>)>,
-    proposal_counter: u64,
     /// Active whisper compose bar: (pane slug, input state).
     whisper: Option<(String, Entity<InputState>)>,
     /// Pane currently flipped to its notes face: (slug, scratchpad entity).
     flipped: Option<(String, Entity<ScratchpadDrawer>)>,
-    cmd_log: crate::cmdlog::CommandLog,
     active_slug: Option<String>,
     selected_workspace: Option<String>,
     /// Last focused pane slug per workspace — restored on workspace switch.
@@ -168,6 +162,7 @@ pub struct SeanceApp {
     /// Workspace waiting to move into a newly-opened empty window.
     pending_transfer: Option<String>,
     /// This window attached as empty (second process / new-window transfer target).
+    #[allow(dead_code)] // multi-window API — protocol-ready, awaiting empty-window UI wiring
     empty_window: bool,
 }
 
@@ -175,7 +170,7 @@ pub struct SeanceApp {
 #[derive(Clone)]
 enum SashDrag {
     /// Classic 2-pane ratio drag.
-    TwoPane { start_x: f32 },
+    TwoPane,
     /// Adjacent panes in a multi-pane row (horizontal sash).
     Pair {
         left: String,
@@ -220,12 +215,8 @@ impl SeanceApp {
             statuses: std::collections::HashMap::new(),
             owners: std::collections::HashMap::new(),
             touches: std::collections::HashMap::new(),
-            ask_counter: 0,
-            proposals: std::collections::HashMap::new(),
-            proposal_counter: 0,
             whisper: None,
             flipped: None,
-            cmd_log: crate::cmdlog::CommandLog::new(),
             active_slug: None,
             selected_workspace: None,
             workspace_focus: std::collections::HashMap::new(),
@@ -1538,9 +1529,8 @@ impl SeanceApp {
     // compile if any residual reference remains; it must never be the
     // live path.
 
-    #[allow(dead_code)]
     /// Retired: control plane lives in the daemon (`Engine::handle_control`).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // retired GUI control-plane stub — kept so residual refs still compile
     fn handle_control(
         &mut self,
         _request: ControlRequest,
@@ -1746,7 +1736,7 @@ impl Render for SeanceApp {
                 this.touch_workspace(&act.0);
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, act: &ActTransferWorkspace, _, cx| {
+            .on_action(cx.listener(|this, act: &ActTransferWorkspace, _, _cx| {
                 let _ = this
                     .client
                     .transfer_workspace(&act.workspace, &act.to_window);
@@ -1756,10 +1746,10 @@ impl Render for SeanceApp {
                     this.send_workspace_to_new_window(&act.0, cx);
                 }),
             )
-            .on_action(cx.listener(|this, _: &ActCollectAllWindows, _, cx| {
+            .on_action(cx.listener(|this, _: &ActCollectAllWindows, _, _cx| {
                 let _ = this.client.collect_all();
             }))
-            .on_action(cx.listener(|this, act: &ActPullWorkspace, _, cx| {
+            .on_action(cx.listener(|this, act: &ActPullWorkspace, _, _cx| {
                 if let Some(wid) = this.window_id.clone() {
                     let _ = this.client.transfer_workspace(&act.0, &wid);
                 }
@@ -1774,7 +1764,7 @@ impl Render for SeanceApp {
                 let main_left = 232.0;
                 let main_w = (w - main_left).max(100.0);
                 match drag {
-                    SashDrag::TwoPane { .. } => {
+                    SashDrag::TwoPane => {
                         let ratio = ((x - main_left) / main_w).clamp(0.2, 0.8);
                         this.split_ratio = ratio;
                     }

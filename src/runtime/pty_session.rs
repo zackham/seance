@@ -29,7 +29,7 @@ use alacritty_terminal::{
 use anyhow::{bail, Context as _, Result};
 
 use super::snapshot::{CellSnap, GhostSnap, GridSnapshot};
-use super::{upgrade_in_progress, UPGRADE_IN_PROGRESS};
+use super::upgrade_in_progress;
 
 const SCROLL_HISTORY: usize = 10_000;
 
@@ -168,6 +168,10 @@ pub struct PtySession {
     term: Arc<FairMutex<Term<Listener>>>,
     io_tx: Sender<IoMsg>,
     _io_thread: Option<JoinHandle<()>>,
+    // Session-side owner of the child handle; the actual reap happens on the io
+    // thread's clone. Held (not read) so the `Child` isn't solely owned by a
+    // detached thread — keep the RAII refcount intact.
+    #[allow(dead_code)]
     child: Arc<Mutex<Option<Child>>>,
     child_pid: Arc<Mutex<Option<u32>>>,
     master_fd: Arc<Mutex<Option<RawFd>>>,
@@ -1059,7 +1063,6 @@ fn named_fallback(n: NamedColor, is_bg: bool) -> u32 {
         NamedColor::DimCyan => dim_u32(ANSI16[6]),
         NamedColor::DimWhite => dim_u32(ANSI16[7]),
         NamedColor::DimForeground => dim_u32(DEFAULT_FG),
-        _ => DEFAULT,
     }
 }
 

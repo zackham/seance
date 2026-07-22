@@ -112,16 +112,6 @@ impl SeancePalette {
     }
 
     // ── session status dots ──────────────────────────────────────────────────
-    /// A spirit is present / actively working — amber, alive.
-    #[inline]
-    pub fn status_running() -> Hsla {
-        Self::flame()
-    }
-    /// Summoned but quiet — dim parchment.
-    #[inline]
-    pub fn status_idle() -> Hsla {
-        Self::text_dim()
-    }
     /// The circle closed — gray, spent.
     #[inline]
     pub fn status_exited() -> Hsla {
@@ -217,7 +207,6 @@ struct Palette {
     border: Hsla,
     text: Hsla,
     text_dim: Hsla,
-    text_faint: Hsla,
     flame: Hsla,
     flame_dim: Hsla,
     violet: Hsla,
@@ -234,7 +223,6 @@ fn palette() -> Palette {
         border: SeancePalette::border(),
         text: SeancePalette::text(),
         text_dim: SeancePalette::text_dim(),
-        text_faint: SeancePalette::text_faint(),
         flame: SeancePalette::flame(),
         flame_dim: SeancePalette::flame_dim(),
         violet: SeancePalette::violet(),

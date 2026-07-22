@@ -1,7 +1,7 @@
 //! seance daemon process — owns the session engine and serves ctl + GUI + handoff.
 
-use std::io::{BufRead, BufReader, IoSlice, IoSliceMut, Write};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::io::{BufRead, BufReader, IoSlice, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -437,7 +437,7 @@ fn serve_upgrade_request(mut writer: UnixStream, engine: SharedEngine) -> Result
         let _ = std::fs::create_dir_all(dir);
     }
     let log_file = std::fs::File::create(&log_path).context("daemon-upgrade.log")?;
-    let mut child = std::process::Command::new(&bin)
+    let child = std::process::Command::new(&bin)
         .arg("daemon")
         .arg("--takeover")
         .arg(&handoff_path)
@@ -532,7 +532,7 @@ fn send_handoff(mut stream: UnixStream, bundle: &HandoffBundle, fds: &[OwnedFd])
     let raws: Vec<RawFd> = fds.iter().map(|f| f.as_raw_fd()).collect();
     // Send a single dummy byte with the FDs.
     let dummy = [0u8];
-    let iov = [IoSlice::new(&dummy)];
+    let _iov = [IoSlice::new(&dummy)];
     // cmsg buffer
     let fd_bytes = unsafe {
         std::slice::from_raw_parts(
@@ -780,12 +780,4 @@ pub fn request_upgrade() -> Result<()> {
         thread::sleep(Duration::from_millis(50));
     }
     bail!("upgraded daemon did not become ready on control socket");
-}
-
-/// Connect as ctl client (hello first). Used by seance ctl after protocol change.
-pub fn ctl_connect() -> Result<UnixStream> {
-    let mut stream = UnixStream::connect(control::socket_path())
-        .with_context(|| format!("connect {}", control::socket_path().display()))?;
-    writeln!(stream, r#"{{"role":"ctl"}}"#)?;
-    Ok(stream)
 }

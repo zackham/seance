@@ -1,45 +1,24 @@
-//! The seance **control plane**: a Unix-socket server that lets one session
-//! (a "master" agent — Claude, codex, grok, or any CLI running in a pane) drive
-//! the *other* sessions in the app. Spawn them, inject prompts, read their
+//! The seance **control plane** wire types: the JSON-lines protocol that lets
+//! one session (a "master" agent — Claude, codex, grok, or any CLI running in a
+//! pane) drive the *other* sessions. Spawn them, inject prompts, read their
 //! rendered screens — all while the human watches the terminals get driven live.
 //!
 //! # Shape
 //!
-//! - A blocking `std::os::unix::net::UnixListener` bound at
-//!   [`socket_path`] (`$XDG_RUNTIME_DIR/seance.sock`, falling back to
-//!   `/tmp/seance-$UID.sock`). One thread accepts; a fresh thread handles each
-//!   connection. No async runtime, no tokio — just std threads and blocking IO.
 //! - **JSON-lines protocol.** One request JSON per `\n`-terminated line in, one
 //!   [`ControlResponse`] JSON line out. The connection may stay open and carry
 //!   many request/response pairs (a master session keeps a socket and pipelines
 //!   `send`/`read` calls without reconnecting).
-//! - Requests are forwarded onto the gpui side through
-//!   [`ControlHandle::tx`] paired with a [`oneshot::Sender`]. The connection
-//!   thread blocks on the oneshot receiver (via `futures::executor::block_on`)
-//!   with a **10-second timeout** — a wedged/slow gpui main loop turns into an
-//!   `ok: false` error response, never a hung client.
+//! - [`socket_path`] resolves the bound Unix socket
+//!   (`$XDG_RUNTIME_DIR/seance.sock`, falling back to `/tmp/seance-$UID.sock`).
 //!
-//! # Seam with the app (the gpui side owns the receiver)
-//!
-//! This module is deliberately **gpui-free** so it compiles independently. It
-//! only defines the protocol types and the socket plumbing. The app constructs
-//! the channel, hands us the [`ControlHandle`] (the send half), keeps the
-//! receive half, and on the gpui foreground loop:
-//!
-//! 1. drains `(ControlRequest, oneshot::Sender<ControlResponse>)` pairs,
-//! 2. applies each request to real sessions (spawn PTYs, bracketed-paste into
-//!    the driven terminal, snapshot the alacritty grid, …),
-//! 3. answers the `oneshot::Sender` with a [`ControlResponse`].
-//!
-//! Nothing here touches a terminal or a gpui entity; that all lives app-side.
+//! This module is deliberately **gpui-free** so it compiles independently: it
+//! defines only the protocol types ([`ControlRequest`] / [`ControlResponse`])
+//! and the socket-path helper. The actual socket server + request dispatch now
+//! lives in the **daemon** (`src/daemon` + `Engine::handle_control`); the older
+//! in-GUI server was retired in the daemon split.
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::time::Duration;
-
-use anyhow::{anyhow, Context as _, Result};
-use futures::channel::{mpsc, oneshot};
 
 /// A request from a control client (the CLI or a master pane) to the app.
 ///
@@ -647,6 +626,7 @@ impl ControlResponse {
     }
 
     /// A successful response with no payload (e.g. `kill`).
+    #[allow(dead_code)] // used by serde round-trip tests; no live caller post-daemon-split
     pub fn ok_empty() -> Self {
         Self {
             ok: true,
@@ -664,21 +644,6 @@ impl ControlResponse {
         }
     }
 }
-
-/// The app-side handle the server uses to hand requests to the gpui loop.
-///
-/// The app builds `mpsc::unbounded()`, keeps the receiver, and passes a
-/// `ControlHandle { tx }` (the sender) to [`start_server`]. Cloneable because
-/// the underlying `UnboundedSender` is; each connection thread clones it.
-#[derive(Clone)]
-pub struct ControlHandle {
-    pub tx: mpsc::UnboundedSender<(ControlRequest, oneshot::Sender<ControlResponse>)>,
-}
-
-/// How long a connection thread waits for the gpui side to answer one request
-/// before giving up and returning an error response. Guards against a wedged or
-/// backed-up main loop hanging control clients indefinitely.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Resolve the control socket path.
 ///
@@ -715,184 +680,6 @@ fn current_uid() -> u32 {
         }
     }
     0
-}
-
-/// Bind the control socket and start serving on background std threads.
-///
-/// Returns the bound socket path (also available from [`socket_path`]).
-///
-/// **Stale-socket handling.** If the socket file already exists we first try to
-/// connect to it. A live server answering means another seance is already
-/// running — we error out rather than steal the socket. If the connect fails
-/// (leftover file from a crash), we remove the stale file and bind fresh.
-///
-/// Spawns a detached acceptor thread; each accepted connection gets its own
-/// detached handler thread. The threads live for the process's lifetime.
-pub fn start_server(handle: ControlHandle) -> Result<PathBuf> {
-    let path = socket_path();
-
-    // If something is already listening, don't clobber it.
-    if path.exists() {
-        match UnixStream::connect(&path) {
-            Ok(_) => {
-                return Err(anyhow!(
-                    "a seance control server is already listening at {}",
-                    path.display()
-                ));
-            }
-            Err(_) => {
-                // Stale file from a crashed instance — safe to remove.
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("removing stale control socket {}", path.display()))?;
-            }
-        }
-    }
-
-    // Ensure the parent dir exists (XDG_RUNTIME_DIR normally does; /tmp always).
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating control socket dir {}", parent.display()))?;
-    }
-
-    let listener = UnixListener::bind(&path)
-        .with_context(|| format!("binding control socket {}", path.display()))?;
-
-    let bound = path.clone();
-    std::thread::Builder::new()
-        .name("seance-control".into())
-        .spawn(move || accept_loop(listener, handle))
-        .context("spawning control acceptor thread")?;
-
-    Ok(bound)
-}
-
-/// Accept connections forever, spinning a handler thread per connection.
-fn accept_loop(listener: UnixListener, handle: ControlHandle) {
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let handle = handle.clone();
-                // Detached: a slow/wedged client can't back up the acceptor.
-                let spawned = std::thread::Builder::new()
-                    .name("seance-control-conn".into())
-                    .spawn(move || {
-                        if let Err(err) = handle_connection(stream, handle) {
-                            eprintln!("control: connection error: {err:#}");
-                        }
-                    });
-                if let Err(err) = spawned {
-                    eprintln!("control: failed to spawn connection handler: {err:#}");
-                }
-            }
-            Err(err) => {
-                eprintln!("control: accept error: {err:#}");
-                // Transient accept errors shouldn't kill the whole server.
-            }
-        }
-    }
-}
-
-/// Serve one connection: read request lines until EOF, answer each in order.
-///
-/// A malformed line (bad JSON) produces an error response but keeps the
-/// connection open — one fat-fingered request doesn't drop the session.
-fn handle_connection(stream: UnixStream, handle: ControlHandle) -> Result<()> {
-    let write_stream = stream.try_clone().context("cloning control stream")?;
-    let reader = BufReader::new(stream);
-    let mut writer = write_stream;
-
-    for line in reader.lines() {
-        let line = line.context("reading control request line")?;
-        // Tolerate blank lines / keepalives.
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let response = match serde_json::from_str::<ControlRequest>(&line) {
-            Ok(request) => dispatch(&handle, request),
-            Err(err) => ControlResponse::err(format!("invalid request json: {err}")),
-        };
-
-        let mut out = serde_json::to_string(&response).unwrap_or_else(|e| {
-            // Serializing our own response should never fail; if it somehow
-            // does, emit a hand-rolled error line so the client sees *some*
-            // valid JSON rather than a dropped connection.
-            format!("{{\"ok\":false,\"error\":\"failed to serialize response: {e}\"}}")
-        });
-        out.push('\n');
-        writer
-            .write_all(out.as_bytes())
-            .context("writing control response")?;
-        writer.flush().context("flushing control response")?;
-    }
-
-    Ok(())
-}
-
-/// Forward one request to the gpui side and block for its answer.
-///
-/// Sends `(request, oneshot_sender)` through the handle, then blocks on the
-/// oneshot receiver with [`REQUEST_TIMEOUT`]. Three failure modes, each mapped
-/// to an `ok: false` response:
-/// - the mpsc send failed → the app dropped the receiver (shutting down),
-/// - the oneshot was dropped without a reply → the app abandoned the request,
-/// - the timeout elapsed → the main loop is wedged or badly backed up.
-fn dispatch(handle: &ControlHandle, request: ControlRequest) -> ControlResponse {
-    let (reply_tx, reply_rx) = oneshot::channel();
-
-    if handle.tx.unbounded_send((request, reply_tx)).is_err() {
-        return ControlResponse::err(
-            "seance app is not accepting control requests (shutting down?)",
-        );
-    }
-
-    // Block this connection thread on the oneshot with a timeout. We race the
-    // receiver against a timer future; whichever resolves first wins.
-    match block_on_with_timeout(reply_rx, REQUEST_TIMEOUT) {
-        Ok(Ok(response)) => response,
-        Ok(Err(_canceled)) => {
-            ControlResponse::err("seance app dropped the request without replying")
-        }
-        Err(_timeout) => ControlResponse::err(format!(
-            "seance app did not answer within {}s (main loop wedged?)",
-            REQUEST_TIMEOUT.as_secs()
-        )),
-    }
-}
-
-/// Block on a `oneshot::Receiver` with a wall-clock timeout, using only
-/// `futures` + a std timer thread (no async runtime).
-///
-/// Returns `Ok(result)` when the oneshot resolves in time (result is
-/// `Ok(value)` or `Err(Canceled)`), or `Err(())` on timeout.
-///
-/// Implementation: a throwaway std thread sleeps for `timeout` then fires a
-/// second oneshot. We `block_on` a `select` over the real receiver and the
-/// timeout receiver. `futures::executor::block_on` drives both to completion on
-/// this thread — no reactor needed because the real receiver is woken by the
-/// gpui side's `Sender::send`, and the timeout receiver by the timer thread.
-fn block_on_with_timeout(
-    reply_rx: oneshot::Receiver<ControlResponse>,
-    timeout: Duration,
-) -> std::result::Result<std::result::Result<ControlResponse, oneshot::Canceled>, ()> {
-    use futures::future::{self, Either};
-
-    let (timeout_tx, timeout_rx) = oneshot::channel::<()>();
-    // Detached timer thread: sleeps, then trips the timeout oneshot. If the real
-    // reply lands first, `timeout_tx` is simply dropped when this thread ends.
-    std::thread::spawn(move || {
-        std::thread::sleep(timeout);
-        let _ = timeout_tx.send(());
-    });
-
-    futures::executor::block_on(async move {
-        match future::select(reply_rx, timeout_rx).await {
-            // Real reply resolved first (Ok=value, Err=canceled — both "not a timeout").
-            Either::Left((result, _timeout_fut)) => Ok(result),
-            // Timeout fired first (or the timer sender was dropped — treat as timeout).
-            Either::Right((_timeout_result, _reply_fut)) => Err(()),
-        }
-    })
 }
 
 /// Default for `Send { submit }`: submit unless explicitly told not to.

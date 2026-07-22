@@ -2,11 +2,10 @@
 
 use std::path::PathBuf;
 
-use crate::control::{ControlRequest, ControlResponse};
+use crate::control::ControlRequest;
 
 use super::parse::with_identity;
-use super::print::{print_ok_human, str_field};
-use super::{send_request, ConnectError};
+use super::send_request;
 
 pub(crate) fn run_phone(
     args: Vec<String>,

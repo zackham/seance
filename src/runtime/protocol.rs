@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::snapshot::{GhostSnap, GridSnapshot};
-use crate::control::{ControlRequest, ControlResponse};
+use crate::control::ControlRequest;
 
 /// First line on every socket connection.
 #[derive(Debug, Serialize, Deserialize)]
@@ -395,7 +395,3 @@ pub struct HandoffBundle {
     #[serde(default)]
     pub cmd_log: crate::cmdlog::CommandLog,
 }
-
-/// Re-export control types for daemon routing.
-pub type CtlReq = ControlRequest;
-pub type CtlResp = ControlResponse;

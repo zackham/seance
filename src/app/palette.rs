@@ -163,7 +163,7 @@ impl SeanceApp {
         }
     }
 
-    pub(super) fn render_palette(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn render_palette(&self, _cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let (title, query, selected, items): (String, String, usize, Vec<(String, String)>) =
             match &self.palette {
                 PaletteMode::Closed => return None,

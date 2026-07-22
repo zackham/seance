@@ -4,6 +4,13 @@
 //! original implementation): a `Term` grid behind a FairMutex, an alacritty
 //! EventLoop pumping the PTY on its own thread, and a gpui task moving
 //! events from the listener channel into this entity.
+//!
+// NOTE: local-PTY path — possibly fully superseded by remote terminals; see refactor dossier.
+// The in-GUI `Terminal`/`open_terminal`/`SpawnConfig` path is only constructed by the
+// dead `pane::spawn_pane` free fn (zero callers); the live path is the daemon PTY +
+// `RemoteTerminal`. Shared items still used by the remote path (`TerminalEvent`, `Ghost`,
+// `convert_color`, `keystroke_bytes`) are NOT dead. Kept intact pending the delete decision.
+#![allow(dead_code)]
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 

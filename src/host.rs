@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -281,9 +281,4 @@ fn poll_widget(cfg: &HostSidebarConfig) -> Result<HostWidgetSnap, String> {
         Ok(_) => Err("unsupported schema".into()),
         Err(_) => Err(last_err),
     }
-}
-
-/// Suggested poll interval for the host bridge loop.
-pub fn poll_interval(state: &HostState) -> Duration {
-    Duration::from_secs(state.min_poll_secs())
 }

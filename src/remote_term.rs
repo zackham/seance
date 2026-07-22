@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use gpui::{AppContext as _, Context, EventEmitter, SharedString};
+use gpui::{Context, EventEmitter};
 
 use crate::gui_client::GuiClient;
 use crate::runtime::snapshot::{GhostSnap, GridSnapshot};
@@ -242,17 +242,6 @@ impl RemoteTerminal {
         }
     }
 
-    /// After tile reflow (pane auto-closed, etc.): forget last sent size so the
-    /// next layout measure is treated as a first-layout / big reflow and
-    /// resizes immediately. Also open the rev gate for the FULL that follows.
-    pub fn invalidate_layout_size(&mut self) {
-        self.rev = 0;
-        let mut g = self.resize.lock().unwrap();
-        g.sent = (0, 0);
-        g.seen = (0, 0);
-        g.stable = 0;
-    }
-
     pub fn scroll_lines(&self, delta: i32) {
         let _ = self.client.scroll(&self.slug, delta);
     }
@@ -267,10 +256,6 @@ impl RemoteTerminal {
 
     pub fn ghost_reject(&self) {
         let _ = self.client.ghost_reject(&self.slug);
-    }
-
-    pub fn rev(&self) -> u64 {
-        self.rev
     }
 }
 

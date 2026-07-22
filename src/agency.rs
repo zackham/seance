@@ -62,6 +62,7 @@ impl Owner {
         matches!(self, Self::Human)
     }
 
+    #[allow(dead_code)] // owner-posture predicate exercised by agency tests; symmetric with is_human
     pub fn is_none(&self) -> bool {
         matches!(self, Self::None)
     }
@@ -147,6 +148,7 @@ impl Agency {
         self.owner = Owner::None;
     }
 
+    #[allow(dead_code)] // exit-transition helper exercised by agency tests; live exits go via engine
     pub fn mark_exited(&mut self, code: Option<i32>) {
         self.exited = true;
         self.exit_code = code;

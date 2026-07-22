@@ -1,6 +1,11 @@
 //! TerminalView: focusable gpui view rendering a Terminal entity's grid via
 //! a canvas element — background rects, style-batched shaped text runs, and
 //! a candle-amber cursor.
+//!
+// NOTE: local-PTY path — possibly fully superseded by remote terminals; see refactor dossier.
+// `TerminalView` is only constructed by the dead `pane::spawn_pane` free fn; the live UI
+// renders `RemoteTerminalView`. Kept intact pending the delete decision.
+#![allow(dead_code)]
 
 use alacritty_terminal::term::cell::Flags;
 use gpui::{

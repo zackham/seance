@@ -10,7 +10,6 @@ mod wait;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::control::{socket_path, ControlRequest, ControlResponse};

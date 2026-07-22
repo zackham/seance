@@ -26,7 +26,6 @@ pub(super) fn decode_grid_b64(
 #[derive(Clone)]
 pub struct DraggedPane {
     pub slug: String,
-    pub name: String,
 }
 
 /// Payload for dragging a workspace header (reorder workspaces).

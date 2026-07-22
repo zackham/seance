@@ -51,7 +51,7 @@ impl SeanceApp {
     /// Bands: working → needs → done-unread → rest; each by activity recency
     /// (input/inject/status — *not* click-to-select).
     pub(super) fn workspaces(&self) -> Vec<String> {
-        let mut known: std::collections::HashSet<String> = self
+        let known: std::collections::HashSet<String> = self
             .panes
             .iter()
             .map(|s| s.workspace.clone())

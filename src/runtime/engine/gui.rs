@@ -420,6 +420,7 @@ impl Engine {
         None
     }
 
+    #[allow(dead_code)] // multi-window API — protocol-ready grid broadcast, awaiting UI wiring
     fn flush_all_grids(&mut self) {
         let slugs: Vec<String> = self
             .panes
@@ -578,6 +579,7 @@ impl Engine {
     }
 
     /// Legacy whole-state (ctl / first-window fallback). Prefer `state_for_window`.
+    #[allow(dead_code)] // multi-window API — whole-state fallback, awaiting UI wiring
     pub fn full_state_event(&self) -> GuiEvent {
         let wid = self.gui_conns.first().map(|c| c.id.clone());
         if let Some(id) = wid {

@@ -16,7 +16,7 @@ use anyhow::{Context as _, Result};
 use base64::Engine as _;
 
 use crate::control::socket_path;
-use crate::runtime::protocol::{GuiEvent, GuiRequest, PaneInfo};
+use crate::runtime::protocol::{GuiEvent, GuiRequest};
 
 /// How long to wait between reconnect attempts after a disconnect.
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(400);
@@ -184,6 +184,7 @@ impl GuiClient {
     }
 
     /// Request a FULL grid frame for one pane (repair after damage desync).
+    #[allow(dead_code)] // multi-window API — protocol-ready, awaiting UI wiring
     pub fn refresh_grid(&self, pane: &str) -> Result<()> {
         self.send(GuiRequest::RefreshGrid {
             pane: pane.to_string(),
@@ -259,8 +260,6 @@ impl GuiClient {
         })
     }
 }
-
-pub type PaneList = Vec<PaneInfo>;
 
 // ---------------------------------------------------------------------------
 // connection supervisor

@@ -68,6 +68,7 @@ pub struct CommandRecord {
 
 impl CommandRecord {
     /// Whether the command has finished (received an `end`).
+    #[allow(dead_code)] // exercised by cmdlog tests; live done-checks read `ended_ms` directly
     pub fn is_done(&self) -> bool {
         self.ended_ms.is_some()
     }
@@ -112,6 +113,7 @@ struct PaneLog {
 
 impl CommandLog {
     /// A fresh, empty log.
+    #[allow(dead_code)] // used by cmdlog + state tests; live construction uses Default
     pub fn new() -> Self {
         Self::default()
     }
@@ -199,16 +201,6 @@ impl CommandLog {
     /// `pane_killed`). Idempotent.
     pub fn remove_pane(&mut self, pane: &str) {
         self.panes.remove(pane);
-    }
-
-    /// All pane slugs that have at least one record (for export / handoff).
-    pub fn pane_slugs(&self) -> Vec<String> {
-        self.panes.keys().cloned().collect()
-    }
-
-    /// Total record count across all panes.
-    pub fn total_records(&self) -> usize {
-        self.panes.values().map(|p| p.records.len()).sum()
     }
 }
 

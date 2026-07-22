@@ -75,11 +75,6 @@ impl ScratchpadStore {
         Ok(Self { dir })
     }
 
-    /// The scratchpad directory (`~/.local/share/seance/scratch/`).
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
     /// Path to the scratchpad for `slug`, i.e. `<dir>/<slug>.md`.
     ///
     /// On first access the file is created with a small header template. If the
@@ -169,7 +164,6 @@ fn atomic_write(path: &Path, contents: &str) -> Result<()> {
 
 /// A gpui view: an editable panel bound to one session's scratchpad file.
 pub struct ScratchpadDrawer {
-    slug: String,
     title: String,
     path: PathBuf,
 
@@ -234,7 +228,6 @@ impl ScratchpadDrawer {
         );
 
         let mut this = Self {
-            slug,
             title,
             path,
             input,
@@ -247,16 +240,6 @@ impl ScratchpadDrawer {
 
         this.start_watch(window, cx);
         this
-    }
-
-    /// The session slug this drawer belongs to.
-    pub fn slug(&self) -> &str {
-        &self.slug
-    }
-
-    /// The file backing this scratchpad.
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     /// Focus handle of the notes editor (for flipping focus into notes).

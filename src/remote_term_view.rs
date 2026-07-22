@@ -21,8 +21,6 @@ use crate::terminal::keystroke_bytes;
 use crate::theme::SeancePalette;
 use alacritty_terminal::term::TermMode;
 
-pub use crate::term_font::FONT_FAMILY;
-
 /// Visible-grid cell coordinate (0-based).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CellPos {
@@ -687,7 +685,7 @@ impl OverviewThumb {
 }
 
 impl Render for OverviewThumb {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let term = self.terminal.clone();
         div()
             .size_full()

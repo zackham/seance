@@ -1,5 +1,13 @@
 //! Pane model: a named pane grouped by workspace. Terminals are the first
 //! pane kind; the `PaneKind` seam is where markdown/graph/etc panes land.
+//!
+// NOTE: local-PTY path — possibly fully superseded by remote terminals; see refactor dossier.
+// The `PaneBody::Terminal` variant + `spawn_pane` free fn (the in-GUI local-terminal
+// constructor) are dead: the live path builds `PaneBody::Remote` from the daemon. Residual
+// GUI-persist vestige (`Pane::persisted`, `kind`/`resume_on_restore`/`scratch_path` fields)
+// is also dead now that the daemon owns persistence. Kept intact pending the delete decision
+// (deletion cascades through ~8 `PaneBody::Terminal` match arms on the live `Pane`).
+#![allow(dead_code)]
 
 use std::{collections::HashMap, path::PathBuf};
 

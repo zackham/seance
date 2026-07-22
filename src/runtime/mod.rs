@@ -8,13 +8,8 @@ pub mod protocol;
 pub mod pty_session;
 pub mod snapshot;
 
-pub use engine::{Engine, EnginePane, SpawnSpec};
-pub use protocol::*;
-pub use pty_session::{AdoptedPty, PtySession, SessionEvent};
-pub use snapshot::{
-    decode_grid_bin, decode_grid_bin_onto, dirty_rows, encode_grid_bin, encode_grid_bin_ex,
-    CellSnap, GhostSnap, GridSnapshot,
-};
+pub use engine::Engine;
+pub use pty_session::SessionEvent;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
