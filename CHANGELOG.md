@@ -27,13 +27,18 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 - Expanded unit/integration tests (~76 → 123), including hermetic engine control-plane tests
 - Refactor handoff for remaining work: `docs/HANDOFF_REFACTOR.md`
 
-### Known gap
-
-- Multi-window / overview: **protocol + engine + gui_client** APIs exist; **app UI not fully wired** (see handoff). Do not advertise as done until app surfaces transfer/overview/empty-window.
-
-
 ### Fixed
 
+- Restored multi-window **app UI** after accidental loss in refactor restore:
+  workspace context menu (send to new window / peer windows / collect all),
+  empty-sidebar right-click pull, same-process empty window, overview
+  (`ctrl+shift+space`), minimize shelf, touch, hover banish ×, activity-band
+  sidebar sort, title-spinner working badges
+- Double context menu on workspace rows (empty-area pull/collect menu no longer
+  nests on the scroller under circle menus)
+- Tile **row sashes** (vertical multi-row resize) + `row_weights` in layout.json
+- Whisper compose UI + run-in-pane launch bar removed from chrome (steer via
+  agent TUI / `ctl send` / notes flip)
 - Sidebar **working** badge uses *observed* TUI title spinners (Claude braille),
   not sticky `status-set working` — stale inject/open-task no longer marks
   idle circles; live agents without status-set now light up. Daemon also

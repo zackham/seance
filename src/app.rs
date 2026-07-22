@@ -28,8 +28,8 @@ use crate::{
     gui_client::GuiClient,
     pane::{spawn_pane, Pane, PaneBody, PaneKind, SpawnRequest},
     remote_term::RemoteTerminal,
-    remote_term_view::RemoteTerminalView,
-    runtime::protocol::{GuiEvent, PaneInfo},
+    remote_term_view::{OverviewThumb, RemoteTerminalView},
+    runtime::protocol::{ForeignWorkspace, GuiEvent, PaneInfo, WindowInfo},
     runtime::snapshot::GridSnapshot,
     scratchpad::{ScratchpadDrawer, ScratchpadStore},
     state::AppState,
@@ -130,6 +130,34 @@ Confirm you're oriented and ready, then wait for the next instruction."
 #[action(namespace = seance, no_json)]
 pub struct ActRenameWorkspace(pub String);
 
+/// Bump workspace recency without selecting it (sidebar context menu).
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActTouchWorkspace(pub String);
+
+/// Move a workspace to another GUI window (multi-window).
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActTransferWorkspace {
+    pub workspace: String,
+    pub to_window: String,
+}
+
+/// Open a new empty OS window and transfer this workspace there.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActTransferWorkspaceNewWindow(pub String);
+
+/// Pull every workspace into this window.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActCollectAllWindows;
+
+/// Pull a foreign workspace into this window.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActPullWorkspace(pub String);
+
 /// Payload for dragging a sidebar pane row onto a workspace header.
 #[derive(Clone)]
 pub struct DraggedPane {
@@ -165,12 +193,23 @@ fn layout_file_path() -> PathBuf {
     PathBuf::from(shellexpand::tilde("~/.local/share/seance/layout.json").into_owned())
 }
 
-fn load_layout_file() -> (f32, std::collections::HashMap<String, f32>) {
+fn load_layout_file() -> (
+    f32,
+    std::collections::HashMap<String, f32>,
+    std::collections::HashMap<String, f32>,
+) {
+    let empty = || {
+        (
+            0.5,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        )
+    };
     let Ok(bytes) = std::fs::read_to_string(layout_file_path()) else {
-        return (0.5, std::collections::HashMap::new());
+        return empty();
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes) else {
-        return (0.5, std::collections::HashMap::new());
+        return empty();
     };
     let split = v
         .get("split_ratio")
@@ -184,17 +223,34 @@ fn load_layout_file() -> (f32, std::collections::HashMap<String, f32>) {
             }
         }
     }
-    (split.clamp(0.2, 0.8), weights)
+    let mut row_weights = std::collections::HashMap::new();
+    if let Some(obj) = v.get("row_weights").and_then(|w| w.as_object()) {
+        for (k, val) in obj {
+            if let Some(f) = val.as_f64() {
+                row_weights.insert(k.clone(), f as f32);
+            }
+        }
+    }
+    (split.clamp(0.2, 0.8), weights, row_weights)
 }
 
-fn save_layout_file(split_ratio: f32, weights: &std::collections::HashMap<String, f32>) {
+fn save_layout_file(
+    split_ratio: f32,
+    weights: &std::collections::HashMap<String, f32>,
+    row_weights: &std::collections::HashMap<String, f32>,
+) {
     let mut wmap = serde_json::Map::new();
     for (k, v) in weights {
         wmap.insert(k.clone(), serde_json::json!(*v));
     }
+    let mut rmap = serde_json::Map::new();
+    for (k, v) in row_weights {
+        rmap.insert(k.clone(), serde_json::json!(*v));
+    }
     let v = serde_json::json!({
         "split_ratio": split_ratio,
         "weights": wmap,
+        "row_weights": rmap,
     });
     if let Ok(s) = serde_json::to_string_pretty(&v) {
         let path = layout_file_path();
@@ -320,6 +376,58 @@ fn status_color(state: &str) -> gpui::Hsla {
     }
 }
 
+/// Badge on an *inactive* workspace header in the sidebar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceAttention {
+    /// Observed live-busy (TUI title spinner / agent actively driving).
+    Working,
+    /// Blocked or needs-human.
+    NeedsHuman,
+    /// Finished work while the human was elsewhere — sticky until select.
+    Done,
+}
+
+impl WorkspaceAttention {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::NeedsHuman => "needs",
+            Self::Done => "done",
+        }
+    }
+    fn color(self) -> gpui::Hsla {
+        match self {
+            Self::Working => SeancePalette::flame(),
+            Self::NeedsHuman => SeancePalette::violet(),
+            Self::Done => SeancePalette::success(),
+        }
+    }
+    fn priority(self) -> u8 {
+        match self {
+            Self::NeedsHuman => 3,
+            Self::Working => 2,
+            Self::Done => 1,
+        }
+    }
+}
+
+/// Claude Code / ink TUIs put a braille spinner in the OSC title while streaming.
+/// Idle Claude uses `✳` (U+2733) — that is *not* busy.
+fn title_looks_busy(title: &str) -> bool {
+    let t = title.trim_start();
+    let Some(c) = t.chars().next() else {
+        return false;
+    };
+    matches!(c, '\u{2800}'..='\u{28FF}')
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// If `~/.local/share/seance/scratch/<slug>.telegram.json` exists, post status
 /// to that topic via vita (best-effort, never blocks the GUI).
 fn telegram_status_bridge(slug: &str, state: &str, note: Option<&str>) {
@@ -415,12 +523,30 @@ pub struct SeanceApp {
     split_ratio: f32,
     /// Per-pane flex weights for n>2 tile resize (slug → weight).
     pane_weights: std::collections::HashMap<String, f32>,
+    /// Per-row flex weights for multi-row grids (row key → weight).
+    row_weights: std::collections::HashMap<String, f32>,
     /// Dragging sash: (left_slug, right_slug) for multi-pane, or 2-pane marker.
     sash_drag: Option<SashDrag>,
     /// Pad drawer live-refresh generation (bumped on timer / events).
     pad_refresh_tick: u64,
     /// Optional host-bridge widgets (claude accounts, …) — fail closed.
     host: crate::host::HostState,
+    /// This GUI connection's window id (from daemon State).
+    window_id: Option<String>,
+    /// Live windows for transfer menus.
+    windows: Vec<WindowInfo>,
+    /// Workspaces owned by other windows (empty-sidebar pull menu).
+    foreign_workspaces: Vec<ForeignWorkspace>,
+    /// Last activity timestamp (ms) per workspace — input/inject/status, not click.
+    workspace_touch: std::collections::HashMap<String, u64>,
+    /// Sticky attention on inactive circles until selected (done/needs).
+    workspace_unread: std::collections::HashMap<String, WorkspaceAttention>,
+    /// Full-window live overview (ctrl+shift+space).
+    overview: bool,
+    /// Workspace waiting to move into a newly-opened empty window.
+    pending_transfer: Option<String>,
+    /// This window attached as empty (second process / new-window transfer target).
+    empty_window: bool,
 }
 
 /// Active sash drag state.
@@ -428,7 +554,7 @@ pub struct SeanceApp {
 enum SashDrag {
     /// Classic 2-pane ratio drag.
     TwoPane { start_x: f32 },
-    /// Adjacent panes in a multi-pane row.
+    /// Adjacent panes in a multi-pane row (horizontal sash).
     Pair {
         left: String,
         right: String,
@@ -436,14 +562,35 @@ enum SashDrag {
         left_w: f32,
         right_w: f32,
     },
+    /// Adjacent grid rows (vertical sash).
+    RowPair {
+        above_key: String,
+        below_key: String,
+        start_y: f32,
+        above_w: f32,
+        below_w: f32,
+    },
 }
 
 impl SeanceApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_inner(window, cx, false)
+    }
+
+    /// Empty window: claims no workspaces until pull/transfer (multi-window).
+    pub fn new_empty_window(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_inner(window, cx, true)
+    }
+
+    fn new_inner(window: &mut Window, cx: &mut Context<Self>, empty: bool) -> Self {
         let store = ScratchpadStore::new().expect("scratchpad dir");
 
         // Connect to the session daemon (PTYs live there).
-        let (client, event_rx) = GuiClient::connect().expect("gui client connect to daemon");
+        let (client, event_rx) = if empty {
+            GuiClient::connect_empty().expect("gui client connect empty")
+        } else {
+            GuiClient::connect().expect("gui client connect to daemon")
+        };
 
         let mut app = SeanceApp {
             panes: Vec::new(),
@@ -475,14 +622,24 @@ impl SeanceApp {
             palette: PaletteMode::Closed,
             split_ratio: 0.5,
             pane_weights: std::collections::HashMap::new(),
+            row_weights: std::collections::HashMap::new(),
             sash_drag: None,
             pad_refresh_tick: 0,
             host: crate::host::HostState::load(),
+            window_id: None,
+            windows: Vec::new(),
+            foreign_workspaces: Vec::new(),
+            workspace_touch: std::collections::HashMap::new(),
+            workspace_unread: std::collections::HashMap::new(),
+            overview: false,
+            pending_transfer: None,
+            empty_window: empty,
         };
         let _ = crate::prompts::ensure_user_file();
-        let (split, weights) = load_layout_file();
+        let (split, weights, row_weights) = load_layout_file();
         app.split_ratio = split;
         app.pane_weights = weights;
+        app.row_weights = row_weights;
 
         // Host bridge: poll optional sidebar widgets (claude accounts, …).
         if app.host.enabled() {
@@ -573,10 +730,32 @@ impl SeanceApp {
                 workspace_order,
                 asks,
                 statuses,
-                window_id: _,
-                windows: _,
-                foreign_workspaces: _,
+                window_id,
+                windows,
+                foreign_workspaces,
             } => {
+                // Multi-window identity + peer list.
+                let prev_windows: std::collections::HashSet<String> =
+                    self.windows.iter().map(|w| w.id.clone()).collect();
+                if let Some(id) = window_id {
+                    self.window_id = Some(id);
+                }
+                self.windows = windows;
+                self.foreign_workspaces = foreign_workspaces;
+
+                // Complete "send to new window": transfer once the empty peer appears.
+                if let Some(ws) = self.pending_transfer.clone() {
+                    let self_id = self.window_id.clone();
+                    let peer = self.windows.iter().find(|w| {
+                        Some(w.id.as_str()) != self_id.as_deref() && !prev_windows.contains(&w.id)
+                    });
+                    if let Some(peer) = peer {
+                        let to = peer.id.clone();
+                        let _ = self.client.transfer_workspace(&ws, &to);
+                        self.pending_transfer = None;
+                    }
+                }
+
                 self.selected_workspace = selected_workspace;
                 self.active_slug = focused_pane;
                 self.extra_workspaces = extra_workspaces;
@@ -772,6 +951,7 @@ impl SeanceApp {
                     // If this pane is phoned to telegram, post a one-liner.
                     telegram_status_bridge(&slug, &state, note.as_deref());
                 }
+                self.note_workspace_status_event(&slug, &state);
                 self.statuses.insert(slug, PaneStatus { state, note });
                 if matches!(self.drawer, Drawer::Pad { .. }) {
                     self.pad_refresh_tick = self.pad_refresh_tick.wrapping_add(1);
@@ -782,6 +962,16 @@ impl SeanceApp {
                 self.touch(&slug, &verb, &actor, cx);
             }
             GuiEvent::InputOrigin { pane, origin } => {
+                // Real input (keystroke / inject / propose) bumps recency.
+                // Focus/select alone never emits InputOrigin.
+                if let Some(ws) = self
+                    .panes
+                    .iter()
+                    .find(|p| p.slug == pane)
+                    .map(|p| p.workspace.clone())
+                {
+                    self.touch_workspace(&ws);
+                }
                 if let Some(rt) = self
                     .panes
                     .iter()
@@ -1005,6 +1195,11 @@ impl SeanceApp {
 
         // ---- escape for chrome overlays only; else let terminal get it ----
         if key == "escape" {
+            if self.overview {
+                self.set_overview(false, cx);
+                cx.stop_propagation();
+                return;
+            }
             if self.renaming.is_some() {
                 self.renaming = None;
                 self.pending_rename = None;
@@ -1054,7 +1249,17 @@ impl SeanceApp {
                     cx.stop_propagation();
                 }
                 "w" => {
-                    self.kill_active_pane(cx);
+                    // Empty then banish workspace (or active pane if empty circle).
+                    if let Some(ws) = self.selected_workspace.clone() {
+                        let has = self.panes.iter().any(|p| p.workspace == ws);
+                        if has {
+                            self.kill_workspace(&ws, cx);
+                        } else {
+                            self.kill_active_pane(cx);
+                        }
+                    } else {
+                        self.kill_active_pane(cx);
+                    }
                     cx.stop_propagation();
                 }
                 "s" => {
@@ -1066,6 +1271,10 @@ impl SeanceApp {
                         self.toggle_popout(&slug, cx);
                         cx.stop_propagation();
                     }
+                }
+                " " | "space" => {
+                    self.set_overview(!self.overview, cx);
+                    cx.stop_propagation();
                 }
                 "k" => {
                     self.palette = PaletteMode::Prompts {
@@ -1196,10 +1405,9 @@ impl SeanceApp {
         );
     }
 
-    /// All workspaces in sidebar display order: explicit `workspace_order`
-    /// first, then any not-yet-ordered ones in discovery order (extras, then
-    /// pane appearance). Never alphabetically — that put brand-new circles
-    /// at the top of the list.
+    /// All workspaces in sidebar display order.
+    /// Bands: working → needs → done-unread → rest; each by activity recency
+    /// (input/inject/status — *not* click-to-select).
     fn workspaces(&self) -> Vec<String> {
         let mut known: std::collections::HashSet<String> = self
             .panes
@@ -1208,24 +1416,63 @@ impl SeanceApp {
             .chain(self.extra_workspaces.iter().cloned())
             .chain(self.selected_workspace.iter().cloned())
             .collect();
-        let mut out: Vec<String> = self
-            .workspace_order
+        let mut out: Vec<String> = known.iter().cloned().collect();
+        out.sort_by_key(|ws| self.workspace_sort_key(ws));
+        // Keep explicit order as a weak tie-break for equal keys via stable sort of residual.
+        let _ = self.workspace_order;
+        out
+    }
+
+    fn workspace_sort_key(&self, ws: &str) -> (u8, std::cmp::Reverse<u64>, String) {
+        let band = self.workspace_band(ws);
+        let touch = self.workspace_touch.get(ws).copied().unwrap_or(0);
+        (band, std::cmp::Reverse(touch), ws.to_string())
+    }
+
+    /// 0=working, 1=needs, 2=done-unread, 3=rest.
+    fn workspace_band(&self, ws: &str) -> u8 {
+        if let Some(a) = self.workspace_attention(ws) {
+            match a {
+                WorkspaceAttention::Working => 0,
+                WorkspaceAttention::NeedsHuman => 1,
+                WorkspaceAttention::Done => 2,
+            }
+        } else {
+            3
+        }
+    }
+
+    /// Observed live-busy: braille OSC title spinner, or agent-owned status.
+    fn pane_is_live_working(&self, slug: &str, cx: &gpui::App) -> bool {
+        if let Some(title) = self
+            .panes
             .iter()
-            .filter(|w| known.remove(w.as_str()))
-            .cloned()
-            .collect();
-        // Residual in creation / appearance order (not alpha).
-        for w in self
-            .extra_workspaces
-            .iter()
-            .chain(self.panes.iter().map(|p| &p.workspace))
-            .chain(self.selected_workspace.iter())
+            .find(|p| p.slug == slug)
+            .and_then(|p| p.title(cx))
         {
-            if known.remove(w) {
-                out.push(w.clone());
+            if title_looks_busy(&title) {
+                return true;
             }
         }
-        out
+        let owner = self.owners.get(slug);
+        let st = self.statuses.get(slug).map(|s| s.state.as_str());
+        match (owner, st) {
+            // Human-owned sticky "working" is often stale inject chrome — ignore.
+            (Some(o), Some("working") | Some("planning")) if o.owner == "human" => false,
+            (_, Some("working") | Some("planning")) => true,
+            (Some(o), _) if o.owner.starts_with("agent:") && !o.exited => {
+                // Agent holds keys without status-set — still "live" if title busy already handled.
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn touch_workspace(&mut self, ws: &str) {
+        if ws.is_empty() {
+            return;
+        }
+        self.workspace_touch.insert(ws.to_string(), now_ms());
     }
 
     /// Ensure `ws` is listed in sidebar order, appended at the bottom when new.
@@ -1234,6 +1481,324 @@ impl SeanceApp {
             return;
         }
         self.workspace_order.push(ws.to_string());
+        self.touch_workspace(ws);
+    }
+
+    fn note_workspace_status_event(&mut self, slug: &str, state: &str) {
+        let Some(ws) = self
+            .panes
+            .iter()
+            .find(|p| p.slug == slug)
+            .map(|p| p.workspace.clone())
+        else {
+            return;
+        };
+        self.touch_workspace(&ws);
+        // Sticky unread only when the human is *not* looking at this circle.
+        if self.selected_workspace.as_deref() == Some(ws.as_str()) {
+            self.workspace_unread.remove(&ws);
+            return;
+        }
+        let att = match state {
+            "needs-human" | "blocked" | "risky" => Some(WorkspaceAttention::NeedsHuman),
+            "done" => Some(WorkspaceAttention::Done),
+            "working" | "planning" => Some(WorkspaceAttention::Working),
+            _ => None,
+        };
+        if let Some(a) = att {
+            let cur = self.workspace_unread.get(&ws).copied();
+            if cur.map(|c| a.priority() > c.priority()).unwrap_or(true) {
+                self.workspace_unread.insert(ws, a);
+            }
+        }
+    }
+
+    fn workspace_attention(&self, workspace: &str) -> Option<WorkspaceAttention> {
+        // Live busy wins over sticky status.
+        let live = self.panes.iter().any(|p| {
+            p.workspace == workspace && {
+                // Need App for title — approximate via statuses + owners without cx:
+                // title check done in render path with cx. Here status/owner only.
+                match self.statuses.get(&p.slug).map(|s| s.state.as_str()) {
+                    Some("working") | Some("planning") => {
+                        let human = self
+                            .owners
+                            .get(&p.slug)
+                            .map(|o| o.owner == "human")
+                            .unwrap_or(false);
+                        !human
+                    }
+                    Some("needs-human") | Some("blocked") | Some("risky") => false, // handled below
+                    _ => false,
+                }
+            }
+        });
+        // needs-human live
+        let needs = self.panes.iter().any(|p| {
+            p.workspace == workspace
+                && matches!(
+                    self.statuses.get(&p.slug).map(|s| s.state.as_str()),
+                    Some("needs-human") | Some("blocked") | Some("risky")
+                )
+        });
+        if needs {
+            return Some(WorkspaceAttention::NeedsHuman);
+        }
+        if live {
+            return Some(WorkspaceAttention::Working);
+        }
+        // Also check unread sticky
+        self.workspace_unread.get(workspace).copied()
+    }
+
+    /// Live attention with title spinners (needs `&App`).
+    fn workspace_attention_cx(&self, workspace: &str, cx: &gpui::App) -> Option<WorkspaceAttention> {
+        let needs = self.panes.iter().any(|p| {
+            p.workspace == workspace
+                && matches!(
+                    self.statuses.get(&p.slug).map(|s| s.state.as_str()),
+                    Some("needs-human") | Some("blocked") | Some("risky")
+                )
+        });
+        if needs {
+            return Some(WorkspaceAttention::NeedsHuman);
+        }
+        let working = self
+            .panes
+            .iter()
+            .any(|p| p.workspace == workspace && self.pane_is_live_working(&p.slug, cx));
+        if working {
+            return Some(WorkspaceAttention::Working);
+        }
+        self.workspace_unread.get(workspace).copied()
+    }
+
+    /// Open an empty OS window (same process) for multi-window transfers.
+    fn open_empty_os_window(&mut self, cx: &mut Context<Self>) {
+        let bounds = gpui::Bounds::centered(None, gpui::size(px(1280.), px(800.)), cx);
+        let _ = cx.open_window(
+            gpui::WindowOptions {
+                window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("seance".into()),
+                    ..Default::default()
+                }),
+                app_id: Some("seance".into()),
+                ..Default::default()
+            },
+            |window, cx| {
+                let view = cx.new(|cx| SeanceApp::new_empty_window(window, cx));
+                // On close, tell daemon (Bye) via disconnect.
+                let client = view.read(cx).client.clone();
+                window.on_window_should_close(cx, move |_, _| {
+                    client.disconnect();
+                    true
+                });
+                cx.new(|cx| gpui_component::Root::new(view, window, cx))
+            },
+        );
+    }
+
+    fn send_workspace_to_new_window(&mut self, workspace: &str, cx: &mut Context<Self>) {
+        self.pending_transfer = Some(workspace.to_string());
+        self.open_empty_os_window(cx);
+    }
+
+    fn set_overview(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.overview = on;
+        let _ = self.client.set_overview(on);
+        cx.notify();
+    }
+
+    fn overview_thumb_for(
+        &self,
+        terminal: &gpui::Entity<RemoteTerminal>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Entity<OverviewThumb> {
+        cx.new(|cx| OverviewThumb::new(terminal.clone(), cx))
+    }
+
+    fn render_overview(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspaces = self.workspaces();
+        let selected = self.selected_workspace.clone();
+        let n = workspaces.len().max(1);
+        let cols = (n as f32).sqrt().ceil() as usize;
+        let cards = self.pack_overview_cards(workspaces, selected, cols.max(1), cx);
+        div()
+            .id("overview")
+            .absolute()
+            .inset_0()
+            .flex()
+            .flex_col()
+            .bg(SeancePalette::bg())
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(40.))
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(SeancePalette::border())
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(SeancePalette::text())
+                            .child("overview · all workspaces"),
+                    )
+                    .child(
+                        div()
+                            .id("overview-close")
+                            .text_xs()
+                            .text_color(SeancePalette::text_faint())
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_overview(false, cx);
+                            }))
+                            .tooltip(tip("exit overview (esc · ctrl+shift+space)"))
+                            .child("esc · ctrl+shift+space"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("overview-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .p_3()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .children(cards),
+            )
+    }
+
+    fn pack_overview_cards(
+        &mut self,
+        workspaces: Vec<String>,
+        selected: Option<String>,
+        cols: usize,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let mut cards: Vec<gpui::AnyElement> = Vec::with_capacity(workspaces.len());
+        for ws in &workspaces {
+            let is_sel = selected.as_deref() == Some(ws.as_str());
+            let attention = self.workspace_attention_cx(ws, cx);
+            let thumbs: Vec<gpui::AnyElement> = self
+                .panes
+                .iter()
+                .filter(|p| p.workspace == *ws && p.tiled && p.popped.is_none())
+                .filter_map(|pane| {
+                    let rt = pane.remote_terminal()?.clone();
+                    let thumb = self.overview_thumb_for(&rt, cx);
+                    let sc = self
+                        .statuses
+                        .get(&pane.slug)
+                        .map(|s| status_color(&s.state))
+                        .unwrap_or(SeancePalette::border());
+                    Some(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h(px(80.))
+                            .border_1()
+                            .border_color(sc)
+                            .rounded_md()
+                            .overflow_hidden()
+                            .child(thumb)
+                            .into_any_element(),
+                    )
+                })
+                .collect();
+            let ws_click = ws.clone();
+            let badge = attention.map(|a| {
+                div()
+                    .px_1p5()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(a.color())
+                    .child(a.label())
+                    .into_any_element()
+            });
+            cards.push(
+                div()
+                    .id(SharedString::from(format!("ov-card-{ws}")))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(if is_sel {
+                        SeancePalette::flame()
+                    } else {
+                        SeancePalette::border()
+                    })
+                    .bg(SeancePalette::bg_elevated())
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_overview(false, cx);
+                        this.select_workspace(&ws_click, window, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .text_color(SeancePalette::text())
+                                    .child(ws.clone()),
+                            )
+                            .children(badge),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .min_h(px(100.))
+                            .children(if thumbs.is_empty() {
+                                vec![div()
+                                    .text_xs()
+                                    .text_color(SeancePalette::text_faint())
+                                    .child("(empty)")
+                                    .into_any_element()]
+                            } else {
+                                thumbs
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        // Pack into rows of `cols`.
+        let mut rows = Vec::new();
+        let mut it = cards.into_iter();
+        loop {
+            let mut row_kids = Vec::new();
+            for _ in 0..cols {
+                if let Some(c) = it.next() {
+                    row_kids.push(c);
+                }
+            }
+            if row_kids.is_empty() {
+                break;
+            }
+            rows.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .children(row_kids)
+                    .into_any_element(),
+            );
+        }
+        rows
     }
 
     /// Move workspace `moved` to appear before `before` in the sidebar.
@@ -1445,6 +2010,8 @@ impl SeanceApp {
             }
         }
         self.selected_workspace = Some(workspace.to_string());
+        // Selecting a circle clears sticky "done/needs" unread — does NOT bump touch.
+        self.workspace_unread.remove(workspace);
         // When entering a circle that was off-screen, zero local revs for its
         // panes so the daemon's full flush can't be dropped as "stale". The
         // daemon also sends FULL frames on workspace change.
@@ -2192,6 +2759,14 @@ impl SeanceApp {
     /// Record a transient cross-pane touch ("⚡ driven by X") and schedule its
     /// fade — the visible-agency overlay the council converged on.
     fn touch(&mut self, slug: &str, verb: &str, actor: &str, cx: &mut Context<Self>) {
+        if let Some(ws) = self
+            .panes
+            .iter()
+            .find(|p| p.slug == slug)
+            .map(|p| p.workspace.clone())
+        {
+            self.touch_workspace(&ws);
+        }
         self.touches.insert(
             slug.to_string(),
             (verb.to_string(), actor.to_string(), std::time::Instant::now()),
@@ -2221,6 +2796,72 @@ impl SeanceApp {
     }
 
     // ---- rendering ----
+
+    /// Minimize shelf: chips for shelved panes in the selected circle only.
+    /// Hidden entirely when nothing is minimized.
+    fn render_minimize_shelf(&self, window_active: bool, cx: &Context<Self>) -> impl IntoElement {
+        let ws = self.selected_workspace.clone();
+        let shelved: Vec<&Pane> = self
+            .panes
+            .iter()
+            .filter(|p| {
+                !p.tiled
+                    && p.popped.is_none()
+                    && ws.as_ref().is_none_or(|w| p.workspace == *w)
+            })
+            .collect();
+        if shelved.is_empty() {
+            return div().into_any_element();
+        }
+        let active = if window_active {
+            self.active_slug.clone()
+        } else {
+            None
+        };
+        div()
+            .id("minimize-shelf")
+            .flex_none()
+            .px_2()
+            .py_1()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_1()
+            .border_b_1()
+            .border_color(SeancePalette::border())
+            .bg(SeancePalette::bg_elevated())
+            .children(shelved.into_iter().map(|pane| {
+                let slug = pane.slug.clone();
+                let name = pane.name.clone();
+                let is_active = active.as_deref() == Some(slug.as_str());
+                div()
+                    .id(SharedString::from(format!("shelf-{slug}")))
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .text_xs()
+                    .cursor_pointer()
+                    .bg(if is_active {
+                        selected_row_fill()
+                    } else {
+                        SeancePalette::surface()
+                    })
+                    .text_color(if is_active {
+                        SeancePalette::flame()
+                    } else {
+                        SeancePalette::text_dim()
+                    })
+                    .hover(|s| s.bg(SeancePalette::surface().lighten(0.05)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        // Click-to-show: re-tile shelved pane.
+                        this.toggle_tiled(&slug, cx);
+                        this.set_active(&slug, window, cx);
+                    }))
+                    .child(name)
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
 
     /// Unanswered agent questions for the selected workspace, as a toast strip.
     fn render_asks(&self, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
@@ -2542,12 +3183,7 @@ impl SeanceApp {
             })
             .collect();
 
-        // Only paint focus chrome while the OS window is active.
-        let active = if window_active {
-            self.active_slug.clone()
-        } else {
-            None
-        };
+        let _ = window_active; // focus chrome reserved for future empty-window dimming
 
         div()
             .id("sidebar")
@@ -2601,7 +3237,9 @@ impl SeanceApp {
                             .child("◈+"),
                     ),
             )
-            .child(
+            .child({
+                // Workspace list only — context menus live on *rows*, not the scroller.
+                // Empty-area multi-window menu is a separate flex filler (avoids double menus).
                 div()
                     .id("pane-list")
                     .flex_1()
@@ -2613,7 +3251,6 @@ impl SeanceApp {
                     .gap_1()
                     .children(by_workspace.into_iter().map(|(workspace, panes)| {
                         let selected = self.selected_workspace.as_deref() == Some(workspace.as_str());
-                        let all_workspaces = self.workspaces();
                         let pane_n = panes.len();
                         let ws_for_click = workspace.clone();
                         let ws_for_group_drop = workspace.clone();
@@ -2625,8 +3262,7 @@ impl SeanceApp {
                             Some((RenameTarget::Workspace(w), _)) if *w == workspace
                         );
                         let rename_input = self.renaming.as_ref().map(|(_, i)| i.clone());
-                        // Collapsed workspaces: header only. Active circle expands
-                        // its pane list (sidebar stays scannable with many circles).
+                        // Collapsed workspaces: header only (no pane rows).
                         let header: gpui::AnyElement = if renaming_this_ws {
                             div()
                                 .px_2()
@@ -2699,20 +3335,56 @@ impl SeanceApp {
                                         this.select_workspace(&ws_for_click, window, cx);
                                     }
                                 }))
-                                .context_menu(move |menu, _, _| {
-                                    menu.menu(
-                                        "rename workspace",
-                                        Box::new(ActRenameWorkspace(ws_for_menu.clone())),
-                                    )
-                                    .menu(
-                                        "fork workspace ⑂",
-                                        Box::new(ActForkWorkspace(ws_for_menu.clone())),
-                                    )
-                                    .separator()
-                                    .menu(
-                                        "banish workspace (kill all panes)",
-                                        Box::new(ActKillWorkspace(ws_for_menu.clone())),
-                                    )
+                                .context_menu({
+                                    let ws_m = ws_for_menu.clone();
+                                    let peers: Vec<(String, String)> = self
+                                        .windows
+                                        .iter()
+                                        .filter(|w| Some(w.id.as_str()) != self.window_id.as_deref())
+                                        .map(|w| (w.id.clone(), w.label.clone()))
+                                        .collect();
+                                    move |menu, _, _| {
+                                        let mut m = menu
+                                            .menu(
+                                                "touch (bump recency)",
+                                                Box::new(ActTouchWorkspace(ws_m.clone())),
+                                            )
+                                            .menu(
+                                                "rename workspace",
+                                                Box::new(ActRenameWorkspace(ws_m.clone())),
+                                            )
+                                            .menu(
+                                                "fork workspace ⑂",
+                                                Box::new(ActForkWorkspace(ws_m.clone())),
+                                            )
+                                            .separator()
+                                            .menu(
+                                                "send to new window",
+                                                Box::new(ActTransferWorkspaceNewWindow(
+                                                    ws_m.clone(),
+                                                )),
+                                            );
+                                        for (id, label) in &peers {
+                                            m = m.menu(
+                                                format!("send to {label}"),
+                                                Box::new(ActTransferWorkspace {
+                                                    workspace: ws_m.clone(),
+                                                    to_window: id.clone(),
+                                                }),
+                                            );
+                                        }
+                                        m = m
+                                            .menu(
+                                                "collect all windows here",
+                                                Box::new(ActCollectAllWindows),
+                                            )
+                                            .separator()
+                                            .menu(
+                                                "banish workspace (kill all panes)",
+                                                Box::new(ActKillWorkspace(ws_m.clone())),
+                                            );
+                                        m
+                                    }
                                 })
                                 .child(
                                     div()
@@ -2742,6 +3414,46 @@ impl SeanceApp {
                                             SeancePalette::text_dim()
                                         })
                                         .child(workspace.clone()),
+                                )
+                                .children({
+                                    // Live badge (working/needs/done) for inactive circles.
+                                    let att = if selected {
+                                        None
+                                    } else {
+                                        self.workspace_attention_cx(&workspace, cx)
+                                    };
+                                    att.map(|a| {
+                                        div()
+                                            .flex_none()
+                                            .px_1()
+                                            .rounded_sm()
+                                            .text_xs()
+                                            .text_color(a.color())
+                                            .child(a.label())
+                                    })
+                                })
+                                .child(
+                                    // Hover × to banish (only when selected header shows count otherwise).
+                                    div()
+                                        .id(SharedString::from(format!("ws-banish-{workspace}")))
+                                        .flex_none()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .text_xs()
+                                        .text_color(SeancePalette::text_faint())
+                                        .hover(|s| {
+                                            s.text_color(SeancePalette::danger())
+                                                .bg(SeancePalette::surface())
+                                        })
+                                        .cursor_pointer()
+                                        .on_click({
+                                            let ws = workspace.clone();
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.kill_workspace(&ws, cx);
+                                            })
+                                        })
+                                        .tooltip(tip("banish workspace (kill all panes)"))
+                                        .child("×"),
                                 )
                                 .child(
                                     div()
@@ -2773,28 +3485,37 @@ impl SeanceApp {
                                 this.reorder_pane(&drag.slug, &ws_for_group_drop, None, cx);
                             }))
                             .child(header)
-                            // Pane rows only for the selected workspace — indented
-                            // so hierarchy under the circle is obvious.
-                            .children(
-                                panes
-                                    .into_iter()
-                                    .filter(|_| selected)
-                                    .map(|pane| {
-                                        div()
-                                            .pl_5()
-                                            .pr_2()
-                                            .child(render_session_row(
-                                                pane,
-                                                active.as_deref(),
-                                                &all_workspaces,
-                                                self.renaming.as_ref(),
-                                                self.statuses.get(&pane.slug),
-                                                cx,
-                                            ))
-                                    }),
-                            )
-                    })),
-            )
+                    }))
+                    // Flex filler: only *blank* sidebar area gets pull/collect menu
+                    // (workspace rows have their own menus — don't nest on the scroller).
+                    .child({
+                        let foreign = self.foreign_workspaces.clone();
+                        div()
+                            .id("sidebar-empty-hit")
+                            .flex_1()
+                            .min_h(px(48.))
+                            .w_full()
+                            .context_menu(move |menu, _, _| {
+                                let mut m = menu.menu(
+                                    "collect all windows here",
+                                    Box::new(ActCollectAllWindows),
+                                );
+                                if !foreign.is_empty() {
+                                    m = m.separator();
+                                    for f in &foreign {
+                                        m = m.menu(
+                                            format!(
+                                                "pull «{}» from {}",
+                                                f.workspace, f.window_label
+                                            ),
+                                            Box::new(ActPullWorkspace(f.workspace.clone())),
+                                        );
+                                    }
+                                }
+                                m
+                            })
+                    })
+            })
             .child(self.render_host_sidebar(cx))
             .child(
                 // Footer: summon + help.
@@ -3436,7 +4157,7 @@ impl SeanceApp {
                         self.statuses.get(&pane.slug),
                         self.owners.get(&pane.slug),
                         self.touches.get(&pane.slug),
-                        whisper,
+                        None,
                         flipped,
                         true, // is_zoomed
                         cx,
@@ -3804,21 +4525,11 @@ impl SeanceApp {
             let ratio = self.split_ratio.clamp(0.2, 0.8);
             let left_pct = (ratio * 100.0) as u32;
             let right_pct = 100 - left_pct;
-            let whisper_l = self
-                .whisper
-                .as_ref()
-                .filter(|(ws, _)| *ws == left.slug)
-                .map(|(_, i)| i);
             let flipped_l = self
                 .flipped
                 .as_ref()
                 .filter(|(ws, _)| *ws == left.slug)
                 .map(|(_, d)| d);
-            let whisper_r = self
-                .whisper
-                .as_ref()
-                .filter(|(ws, _)| *ws == right.slug)
-                .map(|(_, i)| i);
             let flipped_r = self
                 .flipped
                 .as_ref()
@@ -3849,7 +4560,7 @@ impl SeanceApp {
                             self.statuses.get(&left.slug),
                             self.owners.get(&left.slug),
                             self.touches.get(&left.slug),
-                            whisper_l,
+                            None,
                             flipped_l,
                             false,
                             cx,
@@ -3888,7 +4599,7 @@ impl SeanceApp {
                             self.statuses.get(&right.slug),
                             self.owners.get(&right.slug),
                             self.touches.get(&right.slug),
-                            whisper_r,
+                            None,
                             flipped_r,
                             false,
                             cx,
@@ -3897,9 +4608,26 @@ impl SeanceApp {
                 .into_any_element();
         }
 
-        // Weighted auto-grid with inter-pane sashes (n≠2, or zoomed single).
+        // Weighted auto-grid with inter-pane + inter-row sashes (n≠2, or zoomed).
         let cols = (n as f32).sqrt().ceil() as usize;
         let rows = n.div_ceil(cols);
+
+        // Pre-slice into rows so we can hang vertical sashes between them.
+        let mut row_lists: Vec<Vec<&Pane>> = Vec::new();
+        {
+            let mut it = tiled.into_iter();
+            for _ in 0..rows {
+                let mut row_panes: Vec<&Pane> = Vec::new();
+                for _ in 0..cols {
+                    if let Some(pane) = it.next() {
+                        row_panes.push(pane);
+                    }
+                }
+                if !row_panes.is_empty() {
+                    row_lists.push(row_panes);
+                }
+            }
+        }
 
         let mut grid = div()
             .flex_1()
@@ -3912,26 +4640,26 @@ impl SeanceApp {
             .flex_col()
             .gap_0()
             .p_1();
-        let mut it = tiled.into_iter();
-        for _ in 0..rows {
-            let mut row_panes: Vec<&Pane> = Vec::new();
-            for _ in 0..cols {
-                if let Some(pane) = it.next() {
-                    row_panes.push(pane);
-                }
-            }
-            if row_panes.is_empty() {
-                continue;
-            }
+        for (ri, row_panes) in row_lists.iter().enumerate() {
+            let row_key = format!(
+                "row-{}",
+                row_panes.first().map(|p| p.slug.as_str()).unwrap_or("x")
+            );
+            let row_w = self
+                .row_weights
+                .get(&row_key)
+                .copied()
+                .unwrap_or(1.0)
+                .max(0.15);
             let mut row = div()
-                .flex_1()
                 .min_h_0()
                 .min_w_0()
                 .w_full()
                 .overflow_hidden()
                 .flex()
                 .flex_row()
-                .gap_0();
+                .gap_0()
+                .flex_grow(row_w);
             for (i, pane) in row_panes.iter().enumerate() {
                 let w = self
                     .pane_weights
@@ -3939,11 +4667,6 @@ impl SeanceApp {
                     .copied()
                     .unwrap_or(1.0)
                     .max(0.15);
-                let whisper = self
-                    .whisper
-                    .as_ref()
-                    .filter(|(ws, _)| *ws == pane.slug)
-                    .map(|(_, i)| i);
                 let flipped = self
                     .flipped
                     .as_ref()
@@ -3963,7 +4686,7 @@ impl SeanceApp {
                             self.statuses.get(&pane.slug),
                             self.owners.get(&pane.slug),
                             self.touches.get(&pane.slug),
-                            whisper,
+                            None, // whisper retired
                             flipped,
                             false,
                             cx,
@@ -4000,6 +4723,42 @@ impl SeanceApp {
                 }
             }
             grid = grid.child(row);
+            // Vertical sash between rows.
+            if ri + 1 < row_lists.len() {
+                let above_key = row_key.clone();
+                let below_key = format!(
+                    "row-{}",
+                    row_lists[ri + 1]
+                        .first()
+                        .map(|p| p.slug.as_str())
+                        .unwrap_or("x")
+                );
+                let above_w = self.row_weights.get(&above_key).copied().unwrap_or(1.0);
+                let below_w = self.row_weights.get(&below_key).copied().unwrap_or(1.0);
+                grid = grid.child(
+                    div()
+                        .id(SharedString::from(format!("rsash-{above_key}-{below_key}")))
+                        .flex_none()
+                        .h(px(5.))
+                        .w_full()
+                        .cursor_row_resize()
+                        .bg(SeancePalette::border())
+                        .hover(|s| s.bg(SeancePalette::flame_dim()))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                                this.sash_drag = Some(SashDrag::RowPair {
+                                    above_key: above_key.clone(),
+                                    below_key: below_key.clone(),
+                                    start_y: ev.position.y.into(),
+                                    above_w,
+                                    below_w,
+                                });
+                                cx.notify();
+                            }),
+                        ),
+                );
+            }
         }
         grid.into_any_element()
     }
@@ -4240,11 +4999,11 @@ fn render_pane(
 ) -> impl IntoElement {
     let is_active = active == Some(pane.slug.as_str());
     let is_flipped = flipped.is_some();
-    let is_whispering = whisper.is_some();
+    let _ = whisper; // whisper UI retired — keep arg for call-site stability
     let slug = pane.slug.clone();
     let running = pane.is_running(cx);
     let title = pane.title(cx).unwrap_or_else(|| pane.command.clone());
-    // Local or daemon-backed terminal panes both get arm/whisper chrome.
+    // Local or daemon-backed terminal panes both get arm/phone chrome.
     let has_terminal = pane.terminal().is_some() || pane.remote_terminal().is_some();
     let exited = owner.map(|o| o.exited).unwrap_or(false);
     let owner_label = owner.map(|o| {
@@ -4307,101 +5066,6 @@ fn render_pane(
             .child(pane.content_element())
             .into_any_element()
     };
-
-    // Whisper compose bar (rendered; previously state was set but never shown).
-    let whisper_bar: Option<gpui::AnyElement> = whisper.map(|input| {
-        let slug_arm = slug.clone();
-        let slug_cancel = slug.clone();
-        div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px_2()
-            .py_1p5()
-            .border_t_1()
-            .border_color(SeancePalette::violet_dim())
-            .bg(SeancePalette::surface())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(SeancePalette::violet())
-                            .child("💬 whisper — injects into the agent's prompt (Enter sends)"),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("whisper-cancel-{slug}")))
-                            .text_xs()
-                            .text_color(SeancePalette::text_faint())
-                            .hover(|s| s.text_color(SeancePalette::flame()))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.cancel_whisper(cx);
-                                cx.stop_propagation();
-                            }))
-                            .tooltip(tip("cancel whisper"))
-                            .child("✕"),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(input)),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("arm-{slug_arm}")))
-                            .flex_none()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_md()
-                            .text_xs()
-                            .text_color(SeancePalette::flame())
-                            .bg(SeancePalette::bg())
-                            .border_1()
-                            .border_color(SeancePalette::flame_dim())
-                            .hover(|s| s.bg(SeancePalette::bg_elevated()))
-                            .cursor_pointer()
-                            .on_click(cx.listener({
-                                let slug = slug_arm.clone();
-                                move |this, _, _, cx| {
-                                    this.arm_pane(&slug, cx);
-                                    cx.stop_propagation();
-                                }
-                            }))
-                            .tooltip(tip(
-                                "arm this agent with seance orientation (one-click inject)",
-                            ))
-                            .child("⚡ arm"),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("whisper-x-{slug_cancel}")))
-                            .flex_none()
-                            .text_xs()
-                            .text_color(SeancePalette::text_faint())
-                            .hover(|s| s.text_color(SeancePalette::flame()))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.cancel_whisper(cx);
-                                cx.stop_propagation();
-                            }))
-                            .child("esc"),
-                    ),
-            )
-            .into_any_element()
-    });
 
     div()
         .id(SharedString::from(format!("pane-{slug}")))
@@ -4610,33 +5274,6 @@ fn render_pane(
                         .tooltip(tip("pad drawer — task + scratchpad tail"))
                         .child("▤"),
                 )
-                // Whisper (terminals only).
-                .when(has_terminal, |d| {
-                    d.child(
-                        div()
-                            .id(SharedString::from(format!("whisper-{slug}")))
-                            .flex_none()
-                            .text_xs()
-                            .text_color(if is_whispering {
-                                SeancePalette::violet()
-                            } else {
-                                SeancePalette::text_faint()
-                            })
-                            .hover(|s| s.text_color(SeancePalette::violet()))
-                            .cursor_pointer()
-                            .on_click(cx.listener({
-                                let slug = slug.clone();
-                                move |this, _, window, cx| {
-                                    this.start_whisper(&slug, window, cx);
-                                    cx.stop_propagation();
-                                }
-                            }))
-                            .tooltip(tip(
-                                "whisper — open a bar to inject a message into this agent",
-                            ))
-                            .child("💬"),
-                    )
-                })
                 .child(
                     div()
                         .id(SharedString::from(format!("popout-{slug}")))
@@ -4722,7 +5359,7 @@ fn render_pane(
                 ),
         )
         .child(body)
-        .children(whisper_bar)
+
 }
 
 fn drawer_close_bar(title: &'static str, cx: &Context<SeanceApp>) -> impl IntoElement {
@@ -5088,6 +5725,26 @@ impl Render for SeanceApp {
                     cx,
                 );
             }))
+            .on_action(cx.listener(|this, act: &ActTouchWorkspace, _, cx| {
+                this.touch_workspace(&act.0);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, act: &ActTransferWorkspace, _, cx| {
+                let _ = this
+                    .client
+                    .transfer_workspace(&act.workspace, &act.to_window);
+            }))
+            .on_action(cx.listener(|this, act: &ActTransferWorkspaceNewWindow, _, cx| {
+                this.send_workspace_to_new_window(&act.0, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ActCollectAllWindows, _, cx| {
+                let _ = this.client.collect_all();
+            }))
+            .on_action(cx.listener(|this, act: &ActPullWorkspace, _, cx| {
+                if let Some(wid) = this.window_id.clone() {
+                    let _ = this.client.transfer_workspace(&act.0, &wid);
+                }
+            }))
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
                 let Some(drag) = this.sash_drag.clone() else {
                     return;
@@ -5121,6 +5778,27 @@ impl Render for SeanceApp {
                         this.pane_weights.insert(left, nl);
                         this.pane_weights.insert(right, nr);
                     }
+                    SashDrag::RowPair {
+                        above_key,
+                        below_key,
+                        start_y,
+                        above_w,
+                        below_w,
+                    } => {
+                        let h: f32 = bounds.size.height.into();
+                        let main_h = (h - 40.0).max(80.0); // rough chrome
+                        let y: f32 = ev.position.y.into();
+                        let dy = (y - start_y) / main_h;
+                        let sum = (above_w + below_w).max(0.3);
+                        let mut na = (above_w + dy * sum).clamp(0.15, sum - 0.15);
+                        let mut nb = sum - na;
+                        if nb < 0.15 {
+                            nb = 0.15;
+                            na = sum - nb;
+                        }
+                        this.row_weights.insert(above_key, na);
+                        this.row_weights.insert(below_key, nb);
+                    }
                 }
                 cx.notify();
             }))
@@ -5129,7 +5807,11 @@ impl Render for SeanceApp {
                 cx.listener(|this, _, _, cx| {
                     if this.sash_drag.is_some() {
                         this.sash_drag = None;
-                        save_layout_file(this.split_ratio, &this.pane_weights);
+                        save_layout_file(
+                            this.split_ratio,
+                            &this.pane_weights,
+                            &this.row_weights,
+                        );
                         cx.notify();
                     }
                 }),
@@ -5148,10 +5830,11 @@ impl Render for SeanceApp {
                     .flex()
                     .flex_col()
                     .children(self.render_asks(cx))
-                    .child(self.render_agent_launch_bar(cx))
+                    .child(self.render_minimize_shelf(window.is_window_active(), cx))
                     .child(self.render_stage_strip(window.is_window_active(), cx))
                     .child(self.render_tiles(window.is_window_active(), cx)),
             )
+            .children(self.overview.then(|| self.render_overview(cx).into_any_element()))
             .children(self.render_palette(cx))
             .children(match &self.drawer {
                 Drawer::Closed => None,
