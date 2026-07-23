@@ -904,7 +904,10 @@ pub(super) fn render_help() -> gpui::AnyElement {
         .child(h1("keys"))
         .child(section("global"))
         .child(row("ctrl+shift+n", "summon a new shell pane in the current workspace"))
-        .child(row("ctrl+shift+w", "banish (kill) the active pane"))
+        .child(row(
+            "ctrl+shift+w",
+            "kill active pane (last pane also banishes the workspace)",
+        ))
         .child(row("ctrl+shift+s", "flip notes on the active pane / flip back"))
         .child(row("ctrl+shift+p", "pop active pane out / return to the circle"))
         .child(row("ctrl+shift+k", "precanned prompt palette"))

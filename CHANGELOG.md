@@ -19,6 +19,12 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ctrl+shift+w` kills the active pane only** — no longer banishes the whole
+  workspace on the first press. The workspace is removed only when that was
+  its last pane (or the selected circle is already empty).
+
 ## [0.9.22] — 2026-07-22
 
 ### Changed

@@ -908,16 +908,29 @@ impl SeanceApp {
                     cx.stop_propagation();
                 }
                 "w" => {
-                    // Empty then banish workspace (or active pane if empty circle).
-                    if let Some(ws) = self.selected_workspace.clone() {
-                        let has = self.panes.iter().any(|p| p.workspace == ws);
-                        if has {
-                            self.kill_workspace(&ws, cx);
+                    // Kill the active pane only. Last pane in a circle also
+                    // banishes the workspace (two presses for a 2-pane circle).
+                    // Empty selected circle (no panes) → banish the shell.
+                    if let Some(slug) = self.active_slug.clone() {
+                        let ws = self
+                            .panes
+                            .iter()
+                            .find(|p| p.slug == slug)
+                            .map(|p| p.workspace.clone());
+                        let last_in_ws = ws.as_ref().is_some_and(|w| {
+                            self.panes.iter().filter(|p| p.workspace == *w).count() == 1
+                        });
+                        if last_in_ws {
+                            if let Some(w) = ws {
+                                self.kill_workspace(&w, cx);
+                            }
                         } else {
                             self.kill_active_pane(cx);
                         }
-                    } else {
-                        self.kill_active_pane(cx);
+                    } else if let Some(ws) = self.selected_workspace.clone() {
+                        if !self.panes.iter().any(|p| p.workspace == ws) {
+                            self.kill_workspace(&ws, cx);
+                        }
                     }
                     cx.stop_propagation();
                 }
