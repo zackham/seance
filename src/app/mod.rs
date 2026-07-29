@@ -346,6 +346,21 @@ impl SeanceApp {
         })
         .detach();
 
+        // Sidebar working-spinner animation while any circle is live-busy.
+        // Cheap: only notifies when workspace_was_working is non-empty.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(80))
+                .await;
+            let Some(this) = this.upgrade() else { break };
+            this.update(cx, |app: &mut SeanceApp, cx| {
+                if !app.workspace_was_working.is_empty() {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+
         let _ = window;
         app
     }
@@ -976,6 +991,14 @@ impl SeanceApp {
                         cx.stop_propagation();
                     }
                 }
+                "r" => {
+                    // Inline-rename the selected workspace; Enter commits and
+                    // returns focus to the pane that was active.
+                    if let Some(ws) = self.selected_workspace.clone() {
+                        self.start_rename(RenameTarget::Workspace(ws.clone()), &ws, window, cx);
+                        cx.stop_propagation();
+                    }
+                }
                 "f" => {
                     if let Some(slug) = self.active_slug.clone() {
                         self.show_last_failed(&slug, cx);
@@ -1118,11 +1141,28 @@ impl SeanceApp {
                 InputEvent::PressEnter { .. } => {
                     let value = input.read(cx).value().to_string();
                     this.commit_rename(value.trim(), cx);
-                    let _ = window;
+                    // Return keys to the pane that was active before rename
+                    // (ctrl+shift+r flow: rename → type → enter → back in term).
+                    if let Some(slug) = this.active_slug.clone() {
+                        if let Some(pane) = this.panes.iter().find(|p| p.slug == slug) {
+                            pane.focus_content(window, cx);
+                        } else {
+                            this.pending_focus = Some(slug);
+                        }
+                    }
                 }
                 InputEvent::Blur => {
-                    this.renaming = None;
-                    cx.notify();
+                    // Only cancel if still renaming — Enter already cleared it
+                    // and restored pane focus; a follow-up blur must not steal.
+                    if this.renaming.is_some() {
+                        this.renaming = None;
+                        if let Some(slug) = this.active_slug.clone() {
+                            if let Some(pane) = this.panes.iter().find(|p| p.slug == slug) {
+                                pane.focus_content(window, cx);
+                            }
+                        }
+                        cx.notify();
+                    }
                 }
                 _ => {}
             },

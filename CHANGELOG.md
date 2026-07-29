@@ -19,11 +19,33 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.9.23] — 2026-07-29
+
+### Added
+
+- **`ctrl+shift+r` renames the selected workspace** — focuses the sidebar
+  inline rename field; Enter commits and returns keyboard focus to the pane
+  that was active (Escape cancels the same way).
+- **Durable GUI stderr log** at `~/.local/share/seance/gui.stderr.log` (or
+  `$SEANCE_STATE_DIR/`). Desktop launches no longer swallow panics — stderr is
+  redirected on GUI start, `RUST_BACKTRACE=1` is set when unset, and the file
+  rotates to `gui.stderr.log.1` above ~5 MiB.
+
+### Changed
+
+- **Working circles show a left-icon spinner** instead of a `"working"` text
+  badge, so more of the workspace name is visible. `needs` / `done` badges
+  are unchanged.
+
 ### Fixed
 
 - **`ctrl+shift+w` kills the active pane only** — no longer banishes the whole
   workspace on the first press. The workspace is removed only when that was
   its last pane (or the selected circle is already empty).
+- **Terminal copy no longer kills the GUI on Wayland** — `ctrl+shift+c` (and
+  mouse-up auto-copy) prefer `wl-copy` so clipboard ownership lives out of
+  process; GPUI's in-process write is only a fallback. Caps selection size,
+  catch_unwind around notifications, logs copy outcome to `gui.stderr.log`.
 
 ## [0.9.22] — 2026-07-22
 

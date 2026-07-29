@@ -119,6 +119,10 @@ fn main() {
         std::process::exit(err.map(|s| s.code().unwrap_or(1)).unwrap_or(1));
     }
 
+    // Durable GUI stderr + panic backtraces before anything else on this path
+    // (desktop launches otherwise discard stderr). See `install_gui_stderr_log`.
+    install_gui_stderr_log();
+
     // Ensure the session daemon is up, then open the GUI client.
     match daemon::ensure_daemon() {
         Ok(spawned) => {
@@ -165,4 +169,133 @@ fn main() {
         .expect("failed to open window");
         cx.activate(true);
     });
+}
+
+/// Redirect GUI process stderr to a durable append log so panics / GPUI noise
+/// survive desktop launches (`Terminal=false` otherwise swallows them).
+///
+/// Path: `$SEANCE_STATE_DIR/gui.stderr.log` (default `~/.local/share/seance/`).
+/// Rotates to `gui.stderr.log.1` above ~5 MiB. Sets `RUST_BACKTRACE=1` when
+/// unset so panics include stacks. No-op for `ctl` / `daemon` (those paths
+/// never call this). Best-effort — failures never block launch.
+fn install_gui_stderr_log() {
+    // Prefer full backtraces on panic for post-mortem (user can override).
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        // SAFETY: single-threaded at main startup; no other threads yet.
+        unsafe {
+            std::env::set_var("RUST_BACKTRACE", "1");
+        }
+    }
+
+    let dir = match gui_log_dir() {
+        Some(d) => d,
+        None => return,
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("gui.stderr.log");
+    rotate_gui_log_if_large(&path);
+
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+
+    use std::io::Write;
+    let mut file = file;
+    let ts = chrono_lite_stamp();
+    let banner = format!(
+        "\n--- seance gui pid={} version={} started={} ---\n",
+        std::process::id(),
+        env!("CARGO_PKG_VERSION"),
+        ts
+    );
+    let _ = file.write_all(banner.as_bytes());
+    let _ = file.flush();
+
+    // If the user launched from a real terminal, leave a breadcrumb on the TTY
+    // before we steal fd 2.
+    let stderr_is_tty = unsafe { libc::isatty(libc::STDERR_FILENO) == 1 };
+    if stderr_is_tty {
+        let _ = writeln!(
+            std::io::stderr(),
+            "[seance] gui stderr → {}",
+            path.display()
+        );
+    }
+
+    // Point fd 2 at the log file so `eprintln!`, panic hooks, and C libraries
+    // all land in the durable path.
+    let fd = {
+        use std::os::fd::AsRawFd;
+        file.as_raw_fd()
+    };
+    unsafe {
+        if libc::dup2(fd, libc::STDERR_FILENO) < 0 {
+            return;
+        }
+    }
+    // Keep `file` open for the process lifetime via leak — the fd is what
+    // matters after dup2; dropping would close our only handle if dup failed
+    // mid-way. Leak is intentional.
+    std::mem::forget(file);
+
+    eprintln!("[seance] gui log ready (RUST_BACKTRACE=1)");
+}
+
+fn gui_log_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("SEANCE_STATE_DIR") {
+        if !dir.is_empty() {
+            let expanded = shellexpand::full(&dir).ok()?;
+            return Some(std::path::PathBuf::from(expanded.as_ref()));
+        }
+    }
+    Some(std::path::PathBuf::from(
+        shellexpand::tilde("~/.local/share/seance").as_ref(),
+    ))
+}
+
+fn rotate_gui_log_if_large(path: &std::path::Path) {
+    const MAX: u64 = 5 * 1024 * 1024; // 5 MiB
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() < MAX {
+        return;
+    }
+    let bak = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("gui.stderr.log.1");
+    let _ = std::fs::rename(path, bak);
+}
+
+fn chrono_lite_stamp() -> String {
+    // Local wall time without pulling chrono into main — match daemon style.
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Prefer libc localtime for a readable stamp.
+    unsafe {
+        let mut t = secs as libc::time_t;
+        let tm = libc::localtime(&mut t);
+        if tm.is_null() {
+            return format!("unix:{secs}");
+        }
+        let tm = *tm;
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
+    }
 }

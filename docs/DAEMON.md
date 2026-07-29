@@ -73,7 +73,10 @@ Daemon → client (push):
 ## Layout on disk
 
 Unchanged paths under `~/.local/share/seance/` (or `SEANCE_STATE_DIR`):
-state.json, scratch/, events.jsonl, plus `daemon.pid` for the live daemon.
+state.json, scratch/, events.jsonl, plus `daemon.pid` for the live daemon,
+and **`gui.stderr.log`** — durable GUI stderr (panics/backtraces). Rotates to
+`gui.stderr.log.1` above ~5 MiB. After a mysterious window death, `tail` that
+file first.
 
 ## Dev loop — DO NOT hard-kill the daemon
 

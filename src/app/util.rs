@@ -127,6 +127,16 @@ pub(super) fn title_looks_busy(title: &str) -> bool {
     matches!(c, '\u{2800}'..='\u{28FF}')
 }
 
+/// Braille spinner glyph for the sidebar workspace icon (replaces the word
+/// "working" so names get more room). Phase is wall-clock so any re-render
+/// advances the frame (terminal paint / status / pad tick).
+pub(super) fn working_spinner_glyph() -> &'static str {
+    // Classic CLI spinner frames (same family as Claude/ink titles).
+    const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let i = ((now_ms() / 80) as usize) % FRAMES.len();
+    FRAMES[i]
+}
+
 pub(super) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

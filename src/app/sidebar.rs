@@ -11,7 +11,11 @@ use crate::pane::Pane;
 use crate::theme::SeancePalette;
 
 use super::actions::*;
-use super::util::{selected_row_fill, sidebar_press_no_select, tip, tip_s, ui_debug, DraggedPane};
+use super::util::{
+    selected_row_fill, sidebar_press_no_select, tip, tip_s, ui_debug, working_spinner_glyph,
+    DraggedPane,
+};
+use super::workspaces::WorkspaceAttention;
 use super::{RenameTarget, SeanceApp};
 
 impl SeanceApp {
@@ -485,17 +489,25 @@ impl SeanceApp {
                                         m
                                     }
                                 })
-                                .child(
+                                .child({
+                                    // Working → spinner in the icon slot (no "working"
+                                    // text badge), so more of the workspace name shows.
+                                    let att = self.workspace_attention_cx(&workspace, cx);
+                                    let working =
+                                        matches!(att, Some(WorkspaceAttention::Working));
+                                    let (glyph, color) = if working {
+                                        (working_spinner_glyph(), SeancePalette::flame())
+                                    } else if selected {
+                                        ("◆", SeancePalette::flame())
+                                    } else {
+                                        ("◈", SeancePalette::text_faint())
+                                    };
                                     div()
                                         .flex_none()
                                         .text_sm()
-                                        .text_color(if selected {
-                                            SeancePalette::flame()
-                                        } else {
-                                            SeancePalette::text_faint()
-                                        })
-                                        .child(if selected { "◆" } else { "◈" }),
-                                )
+                                        .text_color(color)
+                                        .child(glyph)
+                                })
                                 .child(
                                     div()
                                         .flex_1()
@@ -515,11 +527,15 @@ impl SeanceApp {
                                         .child(workspace.clone()),
                                 )
                                 .children({
-                                    // Live badge (working/needs/done) for inactive circles.
+                                    // Text badges only for needs/done — working is
+                                    // the left-side spinner above.
                                     let att = if selected {
                                         None
                                     } else {
                                         self.workspace_attention_cx(&workspace, cx)
+                                            .filter(|a| {
+                                                !matches!(a, WorkspaceAttention::Working)
+                                            })
                                     };
                                     att.map(|a| {
                                         div()

@@ -6,6 +6,8 @@
 //! stays cheap; the old per-cell path pegged a core at ~90% idle.
 
 use std::collections::HashMap;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use gpui::{
@@ -20,6 +22,75 @@ use crate::term_font::{self, term_font, term_font_bold, FONT_SIZE, LINE_HEIGHT_F
 use crate::term_shared::keystroke_bytes;
 use crate::theme::SeancePalette;
 use alacritty_terminal::term::TermMode;
+
+/// Put `text` on the system clipboard. Returns a short "how" label for logs.
+///
+/// On Wayland, prefer the external `wl-copy` binary so a compositor bug can't
+/// SIGSEGV the GUI process. Falls back to GPUI's in-process path (X11 / no
+/// wl-copy). Panics from the GPUI path are caught; hard crashes are not.
+fn copy_text_to_clipboard(text: &str, cx: &mut App) -> Result<&'static str, String> {
+    // Wayland: never touch GPUI's in-process clipboard write if `wl-copy`
+    // works. We've seen GUI deaths on ctrl+shift+c with zero Rust panic —
+    // almost certainly compositor/libwayland inside `write_to_clipboard`.
+    // Owning the selection via a child process keeps the crash out of seance.
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if let Some(how) = try_wl_copy(text) {
+            return Ok(how);
+        }
+        eprintln!("[seance gui] wl-copy unavailable or failed; falling back to gpui clipboard");
+    }
+
+    let t = text.to_string();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(t));
+    }));
+    match r {
+        Ok(()) => Ok("gpui"),
+        Err(_) => Err("gpui clipboard write panicked".into()),
+    }
+}
+
+/// Spawn `wl-copy` with the text on stdin. Does not wait for exit (wl-copy
+/// often stays alive as the clipboard owner until replaced); a side thread
+/// reaps the child to avoid zombies.
+fn try_wl_copy(text: &str) -> Option<&'static str> {
+    // Clipboard (Ctrl+C / Ctrl+V path).
+    if !spawn_wl_copy(text, false) {
+        return None;
+    }
+    // Primary selection too — middle-click paste after a mouse-drag select.
+    let _ = spawn_wl_copy(text, true);
+    Some("wl-copy")
+}
+
+fn spawn_wl_copy(text: &str, primary: bool) -> bool {
+    let mut cmd = Command::new("wl-copy");
+    if primary {
+        cmd.arg("--primary");
+    }
+    // --foreground keeps it simple for small pastes in some versions; we still
+    // don't wait. Prefer default (background) ownership behavior of wl-clipboard.
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let Ok(mut child) = cmd.spawn() else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(text.as_bytes()).is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        // Close stdin so wl-copy knows the payload is complete.
+        drop(stdin);
+    }
+    // Reap in the background — wl-copy may exit immediately or linger as owner.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    true
+}
 
 /// Visible-grid cell coordinate (0-based).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,19 +276,52 @@ impl RemoteTerminalView {
     }
 
     fn copy_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.selection_text(cx) {
-            if !text.is_empty() {
-                let n = text.chars().count();
-                let lines = text.lines().count().max(1);
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                let msg = if lines > 1 {
-                    format!("copied · {n} chars · {lines} lines")
-                } else {
-                    format!("copied · {n} chars")
-                };
-                window.push_notification(Notification::success(msg), cx);
-            }
+        let Some(mut text) = self.selection_text(cx) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
         }
+        // Hard cap — pathological multi-megabyte selections shouldn't leave the
+        // GUI (or the compositor clipboard path) holding unbounded data.
+        const MAX_BYTES: usize = 2 * 1024 * 1024;
+        if text.len() > MAX_BYTES {
+            text.truncate(MAX_BYTES);
+            // Avoid cutting mid-char.
+            while !text.is_char_boundary(text.len()) {
+                text.pop();
+            }
+            text.push_str("\n… [truncated]");
+        }
+        let n = text.chars().count();
+        let lines = text.lines().count().max(1);
+
+        // Prefer `wl-copy` on Wayland: clipboard ownership lives in a child, so
+        // a compositor/libwayland bug can't take down the GUI. Fall back to
+        // GPUI's in-process write (also catch_unwind'd — panics only; SIGSEGV
+        // still needs the child path).
+        let via = match copy_text_to_clipboard(&text, cx) {
+            Ok(how) => how,
+            Err(e) => {
+                eprintln!("[seance gui] copy failed: {e}");
+                let msg = format!("copy failed: {e}");
+                // Notification itself must not be able to take us down.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    window.push_notification(Notification::error(msg), cx);
+                }));
+                return;
+            }
+        };
+        eprintln!("[seance gui] copied {n} chars ({lines} lines) via {via}");
+
+        let msg = if lines > 1 {
+            format!("copied · {n} chars · {lines} lines")
+        } else {
+            format!("copied · {n} chars")
+        };
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            window.push_notification(Notification::success(msg), cx);
+        }));
     }
 
     fn expand_word(snap: &GridSnapshot, pos: CellPos) -> (CellPos, CellPos) {

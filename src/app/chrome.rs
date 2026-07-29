@@ -908,6 +908,10 @@ pub(super) fn render_help() -> gpui::AnyElement {
             "ctrl+shift+w",
             "kill active pane (last pane also banishes the workspace)",
         ))
+        .child(row(
+            "ctrl+shift+r",
+            "rename selected workspace (enter commits, focus returns to pane)",
+        ))
         .child(row("ctrl+shift+s", "flip notes on the active pane / flip back"))
         .child(row("ctrl+shift+p", "pop active pane out / return to the circle"))
         .child(row("ctrl+shift+k", "precanned prompt palette"))
