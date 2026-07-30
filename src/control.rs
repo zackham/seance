@@ -647,10 +647,28 @@ impl ControlResponse {
 
 /// Resolve the control socket path.
 ///
-/// Prefers `$XDG_RUNTIME_DIR/seance.sock` (the user's runtime dir, cleaned on
-/// logout). Falls back to `/tmp/seance-$UID.sock` when `XDG_RUNTIME_DIR` is
-/// unset — the `$UID` suffix keeps it per-user on a shared `/tmp`.
+/// `$SEANCE_SOCKET`, when set and non-empty, wins outright — this is how a
+/// thin client (or a pane spawned by the daemon, which exports it) targets a
+/// specific socket, e.g. an ssh-forwarded unix socket to a remote daemon.
+/// Otherwise prefers `$XDG_RUNTIME_DIR/seance.sock` (the user's runtime dir,
+/// cleaned on logout), falling back to `/tmp/seance-$UID.sock` when
+/// `XDG_RUNTIME_DIR` is unset — the `$UID` suffix keeps it per-user on a
+/// shared `/tmp`.
 pub fn socket_path() -> PathBuf {
+    if let Some(sock) = std::env::var_os("SEANCE_SOCKET") {
+        if !sock.is_empty() {
+            return PathBuf::from(sock);
+        }
+    }
+    bind_socket_path()
+}
+
+/// The socket path a daemon on *this* machine binds (and exports to panes).
+///
+/// Deliberately ignores `$SEANCE_SOCKET`: that variable redirects *clients*
+/// (possibly at a forwarded socket to another machine); a daemon inheriting it
+/// must still bind its own local path or a stray env turns into a split brain.
+pub fn bind_socket_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         if !dir.is_empty() {
             return PathBuf::from(dir).join("seance.sock");

@@ -617,7 +617,7 @@ pub(crate) fn send_request(request: &ControlRequest) -> Result<ControlResponse, 
     // Protocol v2: first line is a role hello so the daemon can multiplex
     // ctl / gui / upgrade on one socket.
     writer
-        .write_all(b"{\"role\":\"ctl\"}\n")
+        .write_all(crate::runtime::protocol::hello_line("ctl").as_bytes())
         .map_err(ConnectError::Io)?;
     let mut line = serde_json::to_string(request)
         .map_err(|e| ConnectError::Protocol(format!("could not serialize request: {e}")))?;

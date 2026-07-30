@@ -346,6 +346,17 @@ fn connection_supervisor(
                             }
                         }
                         Err(e) => {
+                            // A ControlResponse error here is the daemon's
+                            // hello refusal (e.g. strict version mismatch) —
+                            // surface it verbatim instead of "bad event".
+                            if let Ok(resp) =
+                                serde_json::from_str::<crate::control::ControlResponse>(&line)
+                            {
+                                if let Some(err) = resp.error {
+                                    eprintln!("[seance gui] daemon refused connection: {err}");
+                                    continue;
+                                }
+                            }
                             eprintln!("[seance gui] bad event: {e}: {line}");
                         }
                     }
@@ -431,7 +442,7 @@ fn open_gui_stream() -> Result<UnixStream> {
     let _ = stream.set_read_timeout(None);
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
     let mut writer = stream.try_clone()?;
-    writeln!(writer, r#"{{"role":"gui"}}"#)?;
+    writer.write_all(crate::runtime::protocol::hello_line("gui").as_bytes())?;
     writer.flush()?;
     Ok(stream)
 }

@@ -73,7 +73,7 @@ fn run_daemon_inner(args: Vec<String>) -> Result<()> {
     }
     let _ = std::fs::write(&pid_path, format!("{}\n", std::process::id()));
 
-    let sock_path = control::socket_path();
+    let sock_path = control::bind_socket_path();
     // Remove stale socket if we own the world.
     // On takeover, the old daemon may still be closing — wait briefly for it
     // to drop the control socket, then bind.
@@ -143,6 +143,26 @@ fn handle_connection(stream: UnixStream, engine: SharedEngine) -> Result<()> {
         return Ok(());
     }
     let hello: Hello = serde_json::from_str(line.trim()).context("hello parse")?;
+    // Strict version gate for ctl/gui: thin clients may connect from other
+    // machines, and skew between client and daemon silently corrupts the
+    // protocol. Exact build match or a loud refusal. handoff/upgrade are
+    // exempt — they cross versions by design.
+    if matches!(hello.role.as_str(), "ctl" | "gui") {
+        let daemon_build = env!("CARGO_PKG_VERSION");
+        if hello.build.as_deref() != Some(daemon_build) {
+            let got = hello.build.as_deref().unwrap_or("<absent>");
+            let _ = writeln!(
+                writer,
+                "{}",
+                serde_json::to_string(&ControlResponse::err(format!(
+                    "version mismatch: daemon is seance {daemon_build}, client is {got} — \
+                     upgrade the older side (`cargo build --release && seance upgrade` \
+                     on the daemon host, or redeploy the client binary)"
+                )))?
+            );
+            return Ok(());
+        }
+    }
     match hello.role.as_str() {
         "ctl" => serve_ctl(reader, writer, engine),
         "gui" => serve_gui(reader, writer, engine),
@@ -413,7 +433,7 @@ fn serve_upgrade_request(mut writer: UnixStream, engine: SharedEngine) -> Result
     }
     let _gate = UpgradeGate;
     let handoff_path = {
-        let mut p = control::socket_path();
+        let mut p = control::bind_socket_path();
         p.set_extension("handoff.sock");
         p
     };
@@ -483,7 +503,7 @@ fn serve_upgrade_request(mut writer: UnixStream, engine: SharedEngine) -> Result
     // Drop control socket FIRST so the new daemon can bind, then exit.
     // Children stay alive: prepare_upgrade already released master FDs
     // without SIGHUP.
-    let _ = std::fs::remove_file(control::socket_path());
+    let _ = std::fs::remove_file(control::bind_socket_path());
     let _ = std::fs::remove_file(&handoff_path);
     eprintln!("[seance daemon] upgrade complete, exiting old process");
     // Small delay so sendmsg flush / client response lands.

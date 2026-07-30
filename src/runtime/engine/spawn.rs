@@ -204,7 +204,9 @@ impl Engine {
         );
         env.insert(
             "SEANCE_SOCKET".into(),
-            crate::control::socket_path().to_string_lossy().to_string(),
+            crate::control::bind_socket_path()
+                .to_string_lossy()
+                .to_string(),
         );
         PtySession::spawn(
             slug.to_string(),

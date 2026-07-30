@@ -495,7 +495,10 @@ pub(crate) fn run_watch(request: &ControlRequest, json_out: bool) -> i32 {
             return 2;
         }
     };
-    if writer.write_all(b"{\"role\":\"ctl\"}\n").is_err() {
+    if writer
+        .write_all(crate::runtime::protocol::hello_line("ctl").as_bytes())
+        .is_err()
+    {
         eprintln!("seance ctl: failed to say hello");
         return 2;
     }
@@ -596,7 +599,10 @@ pub(crate) fn watch_wake_loop(panes: Vec<String>, tx: std::sync::mpsc::Sender<()
     let Ok(mut writer) = stream.try_clone() else {
         return;
     };
-    if writer.write_all(b"{\"role\":\"ctl\"}\n").is_err() {
+    if writer
+        .write_all(crate::runtime::protocol::hello_line("ctl").as_bytes())
+        .is_err()
+    {
         return;
     }
     // Catch status, finish, note, send, pane lifecycle — anything that can

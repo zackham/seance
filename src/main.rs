@@ -11,7 +11,9 @@ mod events;
 mod fileview;
 mod gui_client;
 mod host;
+mod launch;
 mod pane;
+mod picker;
 mod popout;
 mod prompts;
 mod remote_term;
@@ -22,6 +24,7 @@ mod state;
 mod term_font;
 mod term_shared;
 mod theme;
+mod tunnel;
 
 use gpui::*;
 use gpui_component::Root;
@@ -49,6 +52,33 @@ fn main() {
     // `seance ctl ...` — control-plane CLI client, no GUI.
     if args.get(1).map(String::as_str) == Some("ctl") {
         std::process::exit(ctl::run_ctl(args[2..].to_vec()));
+    }
+
+    // Hidden helpers used by the thin-client tunnel over ssh.
+    // `seance _sockpath` — print the local daemon bind path.
+    if args.get(1).map(String::as_str) == Some("_sockpath") {
+        println!("{}", control::bind_socket_path().display());
+        return;
+    }
+    // `seance _ensure-daemon` — start the local daemon if absent, wait ready.
+    if args.get(1).map(String::as_str) == Some("_ensure-daemon") {
+        match daemon::ensure_daemon() {
+            Ok(spawned) => {
+                eprintln!(
+                    "[seance] daemon {}",
+                    if spawned {
+                        "started"
+                    } else {
+                        "already running"
+                    }
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!("[seance] ensure-daemon failed: {e:#}");
+                std::process::exit(1);
+            }
+        }
     }
 
     // `seance daemon` — long-lived session runtime (no GUI).
@@ -123,20 +153,77 @@ fn main() {
     // (desktop launches otherwise discard stderr). See `install_gui_stderr_log`.
     install_gui_stderr_log();
 
-    // Ensure the session daemon is up, then open the GUI client.
-    match daemon::ensure_daemon() {
-        Ok(spawned) => {
-            if spawned {
-                eprintln!("[seance] started session daemon");
+    // Resolve where the daemon lives. CLI overrides rewrite the saved
+    // preference; otherwise the preference (or a reachable local daemon)
+    // decides silently, and only genuine ambiguity opens the picker.
+    let cli_pref = match args.get(1).map(String::as_str) {
+        Some("--remote") => match args.get(2) {
+            Some(host) => Some(launch::LaunchPref {
+                mode: launch::LaunchMode::Remote,
+                host: Some(host.clone()),
+            }),
+            None => {
+                eprintln!("usage: seance --remote <host>");
+                std::process::exit(2);
+            }
+        },
+        Some("--local") => Some(launch::LaunchPref {
+            mode: launch::LaunchMode::Local,
+            host: launch::load().and_then(|p| p.host),
+        }),
+        _ => None,
+    };
+    if let Some(ref pref) = cli_pref {
+        launch::save(pref);
+    }
+    let pref = cli_pref.or_else(launch::load);
+
+    enum Boot {
+        /// Local daemon confirmed up.
+        Local,
+        /// Tunnel established; connect through it.
+        Remote(tunnel::Tunnel),
+        /// Ask the human (prefill + optional error from a failed silent path).
+        Picker(Option<launch::LaunchPref>, Option<String>),
+    }
+
+    let boot = match &pref {
+        Some(p) if p.mode == launch::LaunchMode::Remote => {
+            let host = p.host.clone().unwrap_or_default();
+            if host.is_empty() {
+                Boot::Picker(
+                    pref.clone(),
+                    Some("saved remote preference has no host".into()),
+                )
             } else {
-                eprintln!("[seance] connected to session daemon");
+                eprintln!("[seance] launch preference: remote → {host}");
+                match tunnel::Tunnel::establish(&host) {
+                    Ok(t) => Boot::Remote(t),
+                    Err(e) => Boot::Picker(pref.clone(), Some(format!("{host}: {e:#}"))),
+                }
             }
         }
-        Err(e) => {
-            eprintln!("[seance] daemon unavailable: {e:#}");
-            std::process::exit(1);
+        Some(_) => match daemon::ensure_daemon() {
+            Ok(spawned) => {
+                eprintln!(
+                    "[seance] {} session daemon",
+                    if spawned { "started" } else { "connected to" }
+                );
+                Boot::Local
+            }
+            Err(e) => Boot::Picker(pref.clone(), Some(format!("local daemon: {e:#}"))),
+        },
+        None => {
+            // No preference: a running local daemon means business as usual;
+            // otherwise ask rather than silently spawning one.
+            if std::os::unix::net::UnixStream::connect(control::bind_socket_path()).is_ok() {
+                eprintln!("[seance] connected to session daemon");
+                Boot::Local
+            } else {
+                Boot::Picker(None, None)
+            }
         }
-    }
+    };
 
     // Install the shell-integration rc so default shell panes get command
     // tracking (see docs/SHELL-INTEGRATION.md).
@@ -150,25 +237,95 @@ fn main() {
         gpui_component::init(cx);
         theme::init(cx);
 
-        let bounds = Bounds::centered(None, size(px(1480.), px(920.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("seance".into()),
-                    ..Default::default()
-                }),
-                app_id: Some("seance".into()),
-                ..Default::default()
-            },
-            |window, cx| {
-                let view = cx.new(|cx| SeanceApp::new(window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            },
-        )
-        .expect("failed to open window");
+        // Kill the ssh forward on quit — the tunnel lives and dies with the GUI.
+        cx.on_app_quit(|_cx| async {
+            if let Some(t) = ACTIVE_TUNNEL.get() {
+                t.shutdown();
+            }
+        })
+        .detach();
+
+        match boot {
+            Boot::Local => open_main_window(cx),
+            Boot::Remote(t) => {
+                adopt_tunnel(t);
+                open_main_window(cx);
+            }
+            Boot::Picker(prefill, error) => open_picker_window(prefill, error, cx),
+        }
         cx.activate(true);
     });
+}
+
+/// The live ssh tunnel for this GUI process, if any. Static so the quit hook
+/// and any diagnostics can reach it; set exactly once per process.
+static ACTIVE_TUNNEL: std::sync::OnceLock<tunnel::Tunnel> = std::sync::OnceLock::new();
+
+/// Point every in-process client (gui socket, shelled `seance ctl`) at the
+/// forwarded socket, then stash the tunnel for the process lifetime.
+fn adopt_tunnel(t: tunnel::Tunnel) {
+    eprintln!(
+        "[seance] remote daemon via {} ({})",
+        t.host,
+        t.local_sock.display()
+    );
+    // SAFETY: called on the main thread before the GUI connects or spawns.
+    unsafe {
+        std::env::set_var("SEANCE_SOCKET", &t.local_sock);
+    }
+    let _ = ACTIVE_TUNNEL.set(t);
+}
+
+fn open_main_window(cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(1480.), px(920.)), cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("seance".into()),
+                ..Default::default()
+            }),
+            app_id: Some("seance".into()),
+            ..Default::default()
+        },
+        |window, cx| {
+            let view = cx.new(|cx| SeanceApp::new(window, cx));
+            cx.new(|cx| Root::new(view, window, cx))
+        },
+    )
+    .expect("failed to open window");
+}
+
+fn open_picker_window(prefill: Option<launch::LaunchPref>, error: Option<String>, cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(680.), px(360.)), cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("seance — connect".into()),
+                ..Default::default()
+            }),
+            app_id: Some("seance".into()),
+            ..Default::default()
+        },
+        |_window, cx| {
+            cx.new(|cx| {
+                picker::LaunchPicker::new(
+                    prefill,
+                    error,
+                    cx,
+                    Box::new(|outcome, window, cx| {
+                        if let picker::PickOutcome::Remote(t) = outcome {
+                            adopt_tunnel(t);
+                        }
+                        open_main_window(cx);
+                        window.remove_window();
+                    }),
+                )
+            })
+        },
+    )
+    .expect("failed to open picker window");
 }
 
 /// Redirect GUI process stderr to a durable append log so panics / GPUI noise

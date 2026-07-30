@@ -12,6 +12,41 @@ pub struct Hello {
     /// Optional protocol version.
     #[serde(default)]
     pub v: Option<u32>,
+    /// Client build version (`CARGO_PKG_VERSION`). The daemon enforces an
+    /// exact match for `ctl` / `gui` roles — with thin clients on other
+    /// machines, silent version skew is a protocol-corruption hazard, so
+    /// mismatch (or absence) fails loudly. `handoff` / `upgrade` roles are
+    /// exempt: upgrades cross versions by design.
+    #[serde(default)]
+    pub build: Option<String>,
+}
+
+/// The hello line every same-version client sends (role = "ctl" or "gui").
+pub fn hello_line(role: &str) -> String {
+    format!(
+        "{{\"role\":\"{role}\",\"build\":\"{}\"}}\n",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+#[cfg(test)]
+mod hello_tests {
+    use super::*;
+
+    #[test]
+    fn hello_line_roundtrips_with_build() {
+        let line = hello_line("ctl");
+        let hello: Hello = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(hello.role, "ctl");
+        assert_eq!(hello.build.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn legacy_hello_without_build_parses_as_absent() {
+        let hello: Hello = serde_json::from_str(r#"{"role":"gui"}"#).unwrap();
+        assert_eq!(hello.role, "gui");
+        assert!(hello.build.is_none());
+    }
 }
 
 /// Client → daemon on a GUI connection (JSON lines after hello).
