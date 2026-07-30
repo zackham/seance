@@ -700,9 +700,19 @@ impl SeanceApp {
                     cx.notify();
                 }
             }
+            GuiEvent::Ack { ok, error, .. } => {
+                // Acks are informational, but a failed op must not be a
+                // silent dead click — land it in the gui log at least.
+                if !ok {
+                    eprintln!(
+                        "[seance gui] daemon rejected request: {}",
+                        error.unwrap_or_else(|| "unknown error".into())
+                    );
+                }
+            }
             // FsResult is routed to fs_call waiters inside gui_client and
             // never reaches the app stream; ignore defensively.
-            GuiEvent::FsResult { .. } | GuiEvent::Ack { .. } | GuiEvent::Pong => {}
+            GuiEvent::FsResult { .. } | GuiEvent::Pong => {}
         }
     }
 

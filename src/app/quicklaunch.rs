@@ -562,10 +562,10 @@ impl SeanceApp {
                 this.quicklaunch_reorder(&drag.name, &drop_name, cx);
             }))
             .on_click(cx.listener(move |this, _, _, cx| {
-                let cwd = entry
-                    .cwd
-                    .as_ref()
-                    .map(|c| shellexpand::tilde(c).into_owned());
+                // Send cwd RAW — `~` must expand on the daemon's machine
+                // (engine spawn does it), not here; a thin client's home is
+                // a different filesystem entirely.
+                let cwd = entry.cwd.clone();
                 let command = entry.command.clone().filter(|c| !c.trim().is_empty());
                 // Always a FRESH workspace named after the entry (uniquified
                 // against every window's workspaces), single pane, no rename

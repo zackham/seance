@@ -193,7 +193,16 @@ impl Engine {
         workspace: &str,
         _resume: bool,
     ) -> Result<PtySession> {
-        let cwd = PathBuf::from(shellexpand::tilde(cwd_raw).into_owned());
+        let mut cwd = PathBuf::from(shellexpand::tilde(cwd_raw).into_owned());
+        // A missing cwd (config typo, path from another machine) must not turn
+        // the spawn into a silent dead click — fall back to home, loudly.
+        if !cwd.is_dir() {
+            eprintln!(
+                "[seance daemon] spawn '{slug}': cwd {} missing — falling back to ~",
+                cwd.display()
+            );
+            cwd = PathBuf::from(shellexpand::tilde("~").into_owned());
+        }
         let scratch_path = self.store.path_for(slug);
         let mut env = HashMap::new();
         env.insert("SEANCE_SESSION".into(), slug.to_string());

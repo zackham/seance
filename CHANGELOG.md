@@ -19,6 +19,18 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-07-30
+
+### Fixed
+
+- **Quicklaunch from a thin client spawns correctly** — the chip click was
+  expanding `~` in the entry's cwd on the CLIENT machine before sending, so a
+  mac client sent `/Users/...` to a linux daemon and the spawn died silently.
+  cwd now travels raw and expands daemon-side (which the engine already did).
+- **Spawns with a missing cwd fall back to `~`** (loudly, in the daemon log)
+  instead of failing as a dead click; the GUI also logs daemon-rejected
+  requests to `gui.stderr.log`.
+
 ## [0.10.1] — 2026-07-30
 
 ### Fixed
