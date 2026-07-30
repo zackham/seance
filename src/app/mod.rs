@@ -541,11 +541,14 @@ impl SeanceApp {
                 self.focus_pane_if_possible(&slug, cx);
                 // UI summon: open the sidebar title in edit mode so the human
                 // can name it immediately. External `ctl new` leaves the flag
-                // false and does not steal rename focus.
+                // false and does not steal rename focus. After rename, Enter
+                // restores focus to this pane via restore_keyboard_focus.
                 if self.rename_next_spawn {
                     self.rename_next_spawn = false;
+                    // Rename steals focus; Enter restores via restore_keyboard_focus.
                     self.pending_rename = Some(RenameTarget::Pane(slug));
                 }
+                // else: pending_focus above lands keys on the terminal next render.
                 cx.notify();
             }
             GuiEvent::PaneKilled { slug } => {
@@ -750,11 +753,45 @@ impl SeanceApp {
         }
     }
 
+    /// Put keyboard focus somewhere useful after rename / overlay dismiss /
+    /// empty-circle create. Prefer the active pane in the selected workspace;
+    /// if the circle is empty, land on the app root so capture chords
+    /// (`ctrl+shift+n`, …) still fire (focus=None swallows keys entirely).
+    fn restore_keyboard_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_active_pane_in_workspace();
+        let ws = self.selected_workspace.clone();
+        if let Some(slug) = self.active_slug.clone() {
+            if let Some(pane) = self
+                .panes
+                .iter()
+                .find(|p| p.slug == slug && ws.as_ref().is_none_or(|w| p.workspace == *w))
+            {
+                pane.focus_content(window, cx);
+                return;
+            }
+        }
+        // Empty selected circle (or active slug dead/wrong) — try any pane
+        // in the circle before falling back to the root handle.
+        if let Some(ws) = ws.as_deref() {
+            if let Some(slug) = self.preferred_pane_in_workspace(ws) {
+                self.set_active(&slug, window, cx);
+                return;
+            }
+        }
+        let fh = self.focus_handle.clone();
+        window.focus(&fh, cx);
+    }
+
     /// During render we have a Window — apply pending_focus (summon / palette
     /// close), or recover when nothing in the window is focused (cold launch).
     fn ensure_keyboard_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(slug) = self.pending_focus.clone() {
             if let Some(pane) = self.panes.iter().find(|p| p.slug == slug) {
+                // Don't steal from an open rename of this pane — Enter will
+                // restore focus when the human finishes naming.
+                if matches!(&self.renaming, Some((RenameTarget::Pane(s), _)) if s == &slug) {
+                    return;
+                }
                 pane.focus_content(window, cx);
                 self.pending_focus = None;
                 return;
@@ -765,14 +802,11 @@ impl SeanceApp {
         // Keep active_slug coherent with the selected workspace (invariant:
         // never no active pane when the workspace has panes).
         self.ensure_active_pane_in_workspace();
-        // Cold launch / dead handle: GPUI focus is None → key path is only the
-        // absolute root node, so seance chords and terminals never see keys.
+        // Cold launch / dead handle / post-rename: GPUI focus is None →
+        // key events never reach capture or the terminal. Park on the
+        // active pane, or the root handle for empty circles.
         if window.focused(cx).is_none() {
-            if let Some(slug) = self.active_slug.clone() {
-                if let Some(pane) = self.panes.iter().find(|p| p.slug == slug) {
-                    pane.focus_content(window, cx);
-                }
-            }
+            self.restore_keyboard_focus(window, cx);
         }
     }
 
@@ -877,11 +911,7 @@ impl SeanceApp {
             if self.renaming.is_some() {
                 self.renaming = None;
                 self.pending_rename = None;
-                if let Some(slug) = self.active_slug.clone() {
-                    if let Some(pane) = self.panes.iter().find(|p| p.slug == slug) {
-                        pane.focus_content(window, cx);
-                    }
-                }
+                self.restore_keyboard_focus(window, cx);
                 cx.notify();
                 cx.stop_propagation();
                 return;
@@ -1141,26 +1171,26 @@ impl SeanceApp {
                 InputEvent::PressEnter { .. } => {
                     let value = input.read(cx).value().to_string();
                     this.commit_rename(value.trim(), cx);
-                    // Return keys to the pane that was active before rename
-                    // (ctrl+shift+r flow: rename → type → enter → back in term).
-                    if let Some(slug) = this.active_slug.clone() {
-                        if let Some(pane) = this.panes.iter().find(|p| p.slug == slug) {
-                            pane.focus_content(window, cx);
-                        } else {
-                            this.pending_focus = Some(slug);
+                    // Pane if the circle has one; else app root so chords work
+                    // on a brand-new empty workspace (focus=None eats keys).
+                    this.restore_keyboard_focus(window, cx);
+                    // Next frame: re-assert in case blur of the disposed input
+                    // races and clears focus again.
+                    cx.defer_in(window, |this, window, cx| {
+                        if this.renaming.is_none()
+                            && this.whisper.is_none()
+                            && matches!(this.palette, PaletteMode::Closed)
+                        {
+                            this.restore_keyboard_focus(window, cx);
                         }
-                    }
+                    });
                 }
                 InputEvent::Blur => {
                     // Only cancel if still renaming — Enter already cleared it
                     // and restored pane focus; a follow-up blur must not steal.
                     if this.renaming.is_some() {
                         this.renaming = None;
-                        if let Some(slug) = this.active_slug.clone() {
-                            if let Some(pane) = this.panes.iter().find(|p| p.slug == slug) {
-                                pane.focus_content(window, cx);
-                            }
-                        }
+                        this.restore_keyboard_focus(window, cx);
                         cx.notify();
                     }
                 }

@@ -19,6 +19,15 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Focus after new workspace / summon** — finishing the workspace-name
+  rename on an empty circle no longer leaves keyboard focus dead (chords
+  like `ctrl+shift+n` and typing did nothing until a click). Focus returns
+  to the active pane when one exists, otherwise the app root so capture
+  hotkeys keep working; after a summoned pane is named, keys land in the
+  terminal without an extra click.
+
 ## [0.9.23] — 2026-07-29
 
 ### Added

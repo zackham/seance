@@ -256,7 +256,13 @@ impl SeanceApp {
         }
         self.ensure_workspace_at_bottom(&name);
         self.selected_workspace = Some(name.clone());
-        // Immediate inline rename — name is known up front.
+        // Empty circle: don't keep a foreign active_slug — that would route
+        // focus to a pane in another workspace after rename finishes.
+        self.active_slug = None;
+        let _ = self.client.set_focus(None, Some(name.clone()));
+        // Immediate inline rename — name is known up front. On Enter/Esc,
+        // restore_keyboard_focus parks on the app root so ctrl+shift+n works
+        // without an intervening click.
         self.start_rename(RenameTarget::Workspace(name.clone()), &name, window, cx);
     }
 
