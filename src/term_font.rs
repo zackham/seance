@@ -29,7 +29,14 @@ pub fn term_font() -> Font {
         ])),
         weight: Default::default(),
         style: Default::default(),
-        fallbacks: None,
+        // Sane monospace degradation when the Nerd Font isn't installed
+        // (fresh thin-client machines): Menlo covers macOS, the rest Linux.
+        fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
+            "Menlo".into(),
+            "JetBrains Mono".into(),
+            "DejaVu Sans Mono".into(),
+            "monospace".into(),
+        ])),
     }
 }
 

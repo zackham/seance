@@ -19,6 +19,15 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-07-30
+
+### Fixed
+
+- **Terminal font fallbacks** — the hardcoded `JetBrainsMono Nerd Font` now
+  falls back to Menlo / JetBrains Mono / DejaVu Sans Mono / monospace when
+  not installed (fresh thin-client machines rendered with a garbage
+  substitute). Install the Nerd Font for the identical-to-desk look.
+
 ## [0.10.0] — 2026-07-30
 
 ### Added
