@@ -28,6 +28,8 @@ pub struct Pane {
     pub cwd: String,
     pub command: String,
     pub tiled: bool,
+    /// Daemon-side scratchpad path (from PaneInfo) — pads are bridge-served.
+    pub scratchpad: String,
     pub body: PaneBody,
     /// When popped out, the handle of the OS window hosting this pane's view.
     /// Not persisted — restarts bring every pane back into the main window.

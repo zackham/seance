@@ -678,26 +678,12 @@ pub fn bind_socket_path() -> PathBuf {
     PathBuf::from(format!("/tmp/seance-{uid}.sock"))
 }
 
-/// Best-effort real UID for the `/tmp` fallback socket name.
-///
-/// Reads `$UID` if the shell exported it, else parses `/proc/self/loginuid`,
-/// else `0`. We only need *a* stable per-user token, not a security boundary
-/// (the socket file's own permissions are the boundary).
+/// Real UID for the `/tmp` fallback socket name — portable (macOS has no
+/// procfs), and a per-user token is all we need (the socket file's own
+/// permissions are the security boundary).
 fn current_uid() -> u32 {
-    if let Ok(uid) = std::env::var("UID") {
-        if let Ok(n) = uid.trim().parse::<u32>() {
-            return n;
-        }
-    }
-    // /proc/self/loginuid is the login UID; good enough for a filename token.
-    if let Ok(s) = std::fs::read_to_string("/proc/self/loginuid") {
-        if let Ok(n) = s.trim().parse::<u32>() {
-            if n != u32::MAX {
-                return n;
-            }
-        }
-    }
-    0
+    // SAFETY: getuid is always safe to call.
+    unsafe { libc::getuid() }
 }
 
 /// Default for `Send { submit }`: submit unless explicitly told not to.

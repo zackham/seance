@@ -257,37 +257,61 @@ impl SeanceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.host.select(widget_id, item_id) {
-            Ok(raw) => {
-                // Prefer host JSON message when present.
-                let msg = serde_json::from_str::<serde_json::Value>(&raw)
-                    .ok()
-                    .and_then(|v| {
-                        let email = v.get("email").and_then(|e| e.as_str());
-                        let id = v.get("id").and_then(|e| e.as_str()).unwrap_or(item_id);
-                        Some(match email {
-                            Some(e) if !e.is_empty() && e != "unknown" => {
-                                format!("claude → {id} ({e})")
+        // Select runs daemon-side (thin client: the daemon machine's account
+        // switches, not this one's) and can take seconds — keep it off the UI
+        // thread and notify when it lands.
+        let client = self.client.clone();
+        let widget = widget_id.to_string();
+        let item = item_id.to_string();
+        let item_for_msg = item.clone();
+        let _ = window; // notification lands via the async update below
+        let task = cx
+            .background_executor()
+            .spawn(async move { client.host_select(&widget, &item) });
+        cx.spawn_in(window, async move |this: gpui::WeakEntity<Self>, cx| {
+            let result = task.await;
+            let _ = cx.update(|window, cx| {
+                if let Some(this) = this.upgrade() {
+                    this.update(cx, |_, cx| {
+                        match result {
+                            Ok(raw) => {
+                                // Prefer host JSON message when present.
+                                let msg = serde_json::from_str::<serde_json::Value>(&raw)
+                                    .ok()
+                                    .and_then(|v| {
+                                        let email = v.get("email").and_then(|e| e.as_str());
+                                        let id = v
+                                            .get("id")
+                                            .and_then(|e| e.as_str())
+                                            .unwrap_or(&item_for_msg);
+                                        Some(match email {
+                                            Some(e) if !e.is_empty() && e != "unknown" => {
+                                                format!("claude → {id} ({e})")
+                                            }
+                                            _ => format!("claude → {id}"),
+                                        })
+                                    })
+                                    .unwrap_or_else(|| format!("claude → {item_for_msg}"));
+                                window.push_notification(
+                                    gpui_component::notification::Notification::success(msg),
+                                    cx,
+                                );
                             }
-                            _ => format!("claude → {id}"),
-                        })
-                    })
-                    .unwrap_or_else(|| format!("claude → {item_id}"));
-                window.push_notification(
-                    gpui_component::notification::Notification::success(msg),
-                    cx,
-                );
-            }
-            Err(e) => {
-                window.push_notification(
-                    gpui_component::notification::Notification::error(format!(
-                        "switch failed: {e}"
-                    )),
-                    cx,
-                );
-            }
-        }
-        cx.notify();
+                            Err(e) => {
+                                window.push_notification(
+                                    gpui_component::notification::Notification::error(format!(
+                                        "switch failed: {e}"
+                                    )),
+                                    cx,
+                                );
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            });
+        })
+        .detach();
     }
 
     pub(super) fn render_sidebar(

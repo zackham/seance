@@ -71,11 +71,7 @@ impl SeanceApp {
         // If already linked, open telegram if we have a link + pad drawer.
         if let Some(tid) = Self::phone_linked(&slug) {
             if let Some(link) = Self::phone_link(&slug) {
-                let _ = std::process::Command::new("xdg-open")
-                    .arg(&link)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn();
+                crate::sysopen::open_detached(&link);
             }
             crate::desktop_notify::notify(
                 "seance · already phoned",
@@ -103,11 +99,7 @@ impl SeanceApp {
                             String::from_utf8_lossy(&o.stdout).trim().to_string()
                         });
                         if let Some(link) = Self::phone_link(&slug) {
-                            let _ = std::process::Command::new("xdg-open")
-                                .arg(&link)
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .spawn();
+                            crate::sysopen::open_detached(&link);
                         }
                         crate::desktop_notify::notify(
                             "seance · phone linked",

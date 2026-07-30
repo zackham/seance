@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context as _, Result};
 
+pub mod fsbridge;
+
 use crate::control::{self, ControlRequest, ControlResponse};
 use crate::runtime::engine::{Engine, OwnedFdAdopt};
 use crate::runtime::protocol::{GuiEvent, GuiRequest, HandoffBundle, Hello};
@@ -65,6 +67,9 @@ fn run_daemon_inner(args: Vec<String>) -> Result<()> {
             })
             .ok();
     }
+
+    // Daemon-side host widget poller (thin clients see this machine's chips).
+    fsbridge::start_host_poller(Arc::clone(&engine));
 
     // Write pid file.
     let pid_path = daemon_pid_path();
@@ -327,6 +332,11 @@ fn serve_gui(
         eng.register_gui(tx.clone())
     };
 
+    // Fresh window gets the latest host widgets without waiting a poll tick.
+    if let Some(widgets) = fsbridge::latest_host_widgets() {
+        let _ = tx.send(GuiEvent::HostWidgets { widgets });
+    }
+
     // Writer thread for push events.
     {
         let writer = Arc::clone(&writer);
@@ -365,6 +375,25 @@ fn serve_gui(
                 continue;
             }
         };
+        // Fs bridge ops run on their own thread: disk / host-select latency
+        // must never stall the input pipeline. Correlated by id.
+        if let GuiRequest::Fs { id, fs } = req {
+            let tx = tx.clone();
+            let engine = Arc::clone(&engine);
+            thread::Builder::new()
+                .name("seance-fs-op".into())
+                .spawn(move || {
+                    let (ok, data, error) = fsbridge::run(fs, &engine);
+                    let _ = tx.send(GuiEvent::FsResult {
+                        id,
+                        ok,
+                        data,
+                        error,
+                    });
+                })
+                .ok();
+            continue;
+        }
         let is_bye = matches!(req, GuiRequest::Bye);
         let reply = engine.lock().unwrap().handle_gui(req, &window_id);
         if let Some(ev) = reply {

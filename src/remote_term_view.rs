@@ -954,7 +954,7 @@ fn selection_key(
 fn open_uri(uri: &str) {
     let uri = uri.to_string();
     std::thread::spawn(move || {
-        let _ = std::process::Command::new("xdg-open")
+        let _ = std::process::Command::new(crate::sysopen::opener())
             .arg(&uri)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

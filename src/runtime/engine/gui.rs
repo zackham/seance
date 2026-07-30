@@ -1400,7 +1400,25 @@ impl Engine {
                     error: resp.error,
                 })
             }
+            GuiRequest::Event {
+                actor,
+                workspace,
+                pane,
+                kind,
+                detail,
+            } => {
+                crate::events::log(&actor, workspace.as_deref(), pane.as_deref(), &kind, detail);
+                None
+            }
             GuiRequest::Ping => Some(GuiEvent::Pong),
+            // Fs ops are intercepted in serve_gui (daemon level) and never
+            // reach the engine; answer defensively if one slips through.
+            GuiRequest::Fs { id, .. } => Some(GuiEvent::FsResult {
+                id,
+                ok: false,
+                data: None,
+                error: Some("fs op reached engine (daemon-level handler missing)".into()),
+            }),
         }
     }
 }

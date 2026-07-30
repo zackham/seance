@@ -42,8 +42,9 @@ pub struct HostWidgetSnap {
     pub items: Vec<HostItem>,
     #[serde(default)]
     pub active: Option<String>,
-    /// Last error from poll (seance-side; not from host).
-    #[serde(skip)]
+    /// Last error from poll (seance-side; not from host). Serialized so the
+    /// daemon-side poller's errors reach thin-client sidebars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip)]
     pub fetched_at: Option<Instant>,

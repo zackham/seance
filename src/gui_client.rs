@@ -28,7 +28,14 @@ pub struct GuiClient {
     tx: Mutex<Option<Sender<GuiRequest>>>,
     /// Shared with supervisor: once set, never open a new socket.
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// In-flight fs bridge calls awaiting their FsResult, keyed by id.
+    fs_pending: FsPending,
+    fs_next_id: std::sync::atomic::AtomicU64,
 }
+
+/// One fs result: (ok, data, error).
+type FsReply = (bool, Option<serde_json::Value>, Option<String>);
+type FsPending = Arc<Mutex<std::collections::HashMap<u64, Sender<FsReply>>>>;
 
 impl GuiClient {
     /// Connect, spawn the connection supervisor, return client + event receiver.
@@ -61,15 +68,19 @@ impl GuiClient {
         let (ev_tx, ev_rx) = mpsc::channel::<GuiEvent>();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_sup = Arc::clone(&stop);
+        let fs_pending: FsPending = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let fs_pending_sup = Arc::clone(&fs_pending);
 
         thread::Builder::new()
             .name("seance-gui-conn".into())
-            .spawn(move || connection_supervisor(req_rx, ev_tx, empty, stop_sup))
+            .spawn(move || connection_supervisor(req_rx, ev_tx, empty, stop_sup, fs_pending_sup))
             .context("spawn gui connection supervisor")?;
 
         let client = Arc::new(Self {
             tx: Mutex::new(Some(req_tx)),
             stop,
+            fs_pending,
+            fs_next_id: std::sync::atomic::AtomicU64::new(1),
         });
         Ok((client, ev_rx))
     }
@@ -250,7 +261,194 @@ impl GuiClient {
             answer: answer.to_string(),
         })
     }
+
+    /// Fire-and-forget event-log write in the DAEMON's flight recorder.
+    pub fn log_event(
+        &self,
+        actor: &str,
+        workspace: Option<&str>,
+        pane: Option<&str>,
+        kind: &str,
+        detail: String,
+    ) {
+        let _ = self.send(GuiRequest::Event {
+            actor: actor.to_string(),
+            workspace: workspace.map(str::to_string),
+            pane: pane.map(str::to_string),
+            kind: kind.to_string(),
+            detail,
+        });
+    }
+
+    // ── fs bridge (thin client: daemon-machine files/pads/layout/host) ──────
+
+    /// Synchronous daemon fs call. Blocks the calling thread up to `timeout`
+    /// (do not call on the render path with a long timeout). Ok(data) on
+    /// success, Err with the daemon's message otherwise.
+    pub fn fs_call(
+        &self,
+        op: crate::runtime::protocol::FsOp,
+        timeout: Duration,
+    ) -> Result<serde_json::Value> {
+        let id = self
+            .fs_next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (reply_tx, reply_rx) = mpsc::channel::<FsReply>();
+        self.fs_pending.lock().unwrap().insert(id, reply_tx);
+        if let Err(e) = self.send(GuiRequest::Fs { id, fs: op }) {
+            self.fs_pending.lock().unwrap().remove(&id);
+            return Err(e);
+        }
+        match reply_rx.recv_timeout(timeout) {
+            Ok((true, data, _)) => Ok(data.unwrap_or(serde_json::Value::Null)),
+            Ok((false, _, error)) => Err(anyhow::anyhow!(
+                "{}",
+                error.unwrap_or_else(|| "fs op failed".into())
+            )),
+            Err(_) => {
+                self.fs_pending.lock().unwrap().remove(&id);
+                Err(anyhow::anyhow!("fs op timed out after {timeout:?}"))
+            }
+        }
+    }
+
+    /// Read a daemon-side file as bytes (`{contents_b64, mtime_ms}` → bytes).
+    pub fn fs_read(&self, path: &str) -> Result<(Vec<u8>, Option<u64>)> {
+        let v = self.fs_call(
+            crate::runtime::protocol::FsOp::Read {
+                path: path.to_string(),
+            },
+            FS_TIMEOUT,
+        )?;
+        let b64 = v
+            .get("contents_b64")
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| anyhow::anyhow!("fs read: missing contents"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| anyhow::anyhow!("fs read: bad base64: {e}"))?;
+        Ok((bytes, v.get("mtime_ms").and_then(|m| m.as_u64())))
+    }
+
+    /// Read a daemon-side file as UTF-8 text.
+    pub fn fs_read_string(&self, path: &str) -> Result<(String, Option<u64>)> {
+        let (bytes, mtime) = self.fs_read(path)?;
+        Ok((String::from_utf8_lossy(&bytes).into_owned(), mtime))
+    }
+
+    /// Atomically write a daemon-side file; returns its new mtime_ms.
+    pub fn fs_write(&self, path: &str, contents: &[u8]) -> Result<Option<u64>> {
+        let v = self.fs_call(
+            crate::runtime::protocol::FsOp::Write {
+                path: path.to_string(),
+                contents_b64: base64::engine::general_purpose::STANDARD.encode(contents),
+            },
+            FS_TIMEOUT,
+        )?;
+        Ok(v.get("mtime_ms").and_then(|m| m.as_u64()))
+    }
+
+    /// Stat a daemon-side path: `None` when missing, `Some(mtime_ms)` when
+    /// present (mtime may itself be None on exotic filesystems).
+    pub fn fs_stat(&self, path: &str) -> Result<Option<Option<u64>>> {
+        let v = self.fs_call(
+            crate::runtime::protocol::FsOp::Stat {
+                path: path.to_string(),
+            },
+            FS_TIMEOUT,
+        )?;
+        if v.get("exists").and_then(|e| e.as_bool()) == Some(true) {
+            Ok(Some(v.get("mtime_ms").and_then(|m| m.as_u64())))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List a daemon-side directory: `(name, is_dir)` pairs.
+    pub fn fs_list(&self, path: &str) -> Result<Vec<(String, bool)>> {
+        let v = self.fs_call(
+            crate::runtime::protocol::FsOp::List {
+                path: path.to_string(),
+            },
+            FS_TIMEOUT,
+        )?;
+        Ok(v.get("entries")
+            .and_then(|e| e.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| {
+                        Some((
+                            e.get("name")?.as_str()?.to_string(),
+                            e.get("is_dir").and_then(|d| d.as_bool()).unwrap_or(false),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    pub fn fs_remove(&self, path: &str) -> Result<()> {
+        self.fs_call(
+            crate::runtime::protocol::FsOp::Remove {
+                path: path.to_string(),
+            },
+            FS_TIMEOUT,
+        )
+        .map(|_| ())
+    }
+
+    /// Load the shared layout JSON from the daemon (None = never saved).
+    pub fn layout_load(&self) -> Result<Option<String>> {
+        let v = self.fs_call(crate::runtime::protocol::FsOp::LayoutLoad, FS_TIMEOUT)?;
+        Ok(v.get("json").and_then(|j| j.as_str()).map(str::to_string))
+    }
+
+    pub fn layout_save(&self, json: &str) -> Result<()> {
+        self.fs_call(
+            crate::runtime::protocol::FsOp::LayoutSave {
+                json: json.to_string(),
+            },
+            FS_TIMEOUT,
+        )
+        .map(|_| ())
+    }
+
+    /// Run a shell command daemon-side (`sh -lc`); returns (status, stdout).
+    /// 30s budget — background threads only, never the UI thread.
+    pub fn shell(&self, cmd: &str) -> Result<(Option<i64>, String)> {
+        let v = self.fs_call(
+            crate::runtime::protocol::FsOp::Shell {
+                cmd: cmd.to_string(),
+            },
+            Duration::from_secs(30),
+        )?;
+        Ok((
+            v.get("status").and_then(|c| c.as_i64()),
+            v.get("stdout")
+                .and_then(|o| o.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        ))
+    }
+
+    /// Run a host widget select command daemon-side; returns its stdout.
+    pub fn host_select(&self, widget: &str, item: &str) -> Result<String> {
+        let v = self.fs_call(
+            crate::runtime::protocol::FsOp::HostSelect {
+                widget: widget.to_string(),
+                item: item.to_string(),
+            },
+            Duration::from_secs(30),
+        )?;
+        Ok(v.get("output")
+            .and_then(|o| o.as_str())
+            .unwrap_or_default()
+            .to_string())
+    }
 }
+
+/// Default budget for small fs bridge ops (reads, writes, stats).
+const FS_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // connection supervisor
@@ -275,10 +473,7 @@ fn other_gui_running() -> bool {
         if pid == self_pid {
             continue;
         }
-        let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-            .unwrap_or_default()
-            .replace('\0', " ");
-        if cmdline.contains("daemon") {
+        if crate::sysopen::process_cmdline(pid).contains("daemon") {
             continue;
         }
         return true;
@@ -291,6 +486,7 @@ fn connection_supervisor(
     ev_tx: Sender<GuiEvent>,
     empty: bool,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    fs_pending: FsPending,
 ) {
     use std::sync::atomic::Ordering;
     let mut pending: Option<GuiRequest> = None;
@@ -330,6 +526,7 @@ fn connection_supervisor(
         // Reader thread → ev_tx; signals death on EOF/error.
         let (death_tx, death_rx) = mpsc::channel::<()>();
         let ev_tx_reader = ev_tx.clone();
+        let fs_pending_reader = Arc::clone(&fs_pending);
         thread::Builder::new()
             .name("seance-gui-read".into())
             .spawn(move || {
@@ -340,6 +537,19 @@ fn connection_supervisor(
                         continue;
                     }
                     match serde_json::from_str::<GuiEvent>(&line) {
+                        // fs bridge replies go straight to their waiter — the
+                        // app event stream never sees them.
+                        Ok(GuiEvent::FsResult {
+                            id,
+                            ok,
+                            data,
+                            error,
+                        }) => {
+                            let waiter = fs_pending_reader.lock().unwrap().remove(&id);
+                            if let Some(w) = waiter {
+                                let _ = w.send((ok, data, error));
+                            }
+                        }
                         Ok(ev) => {
                             if ev_tx_reader.send(ev).is_err() {
                                 break;

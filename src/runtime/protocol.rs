@@ -178,9 +178,77 @@ pub enum GuiRequest {
     },
     /// Classic control plane ops from the GUI (status-set, etc.).
     Ctl(ControlRequest),
+    /// Daemon-side filesystem/config bridge (thin client: file panes, pads,
+    /// layout, host widgets all live on the daemon's machine). Correlated by
+    /// `id`; the reply is a [`GuiEvent::FsResult`] with the same id. Executed
+    /// off the request loop so slow ops never stall input.
+    Fs {
+        id: u64,
+        #[serde(flatten)]
+        fs: FsOp,
+    },
+    /// Fire-and-forget event-log write (human UI actions). Thin clients must
+    /// land these in the DAEMON's flight recorder, not a local file — agents
+    /// watch that timeline.
+    Event {
+        actor: String,
+        #[serde(default)]
+        workspace: Option<String>,
+        #[serde(default)]
+        pane: Option<String>,
+        kind: String,
+        detail: String,
+    },
     Ping,
     /// Window is closing — reassign workspaces and drop this connection.
     Bye,
+}
+
+/// Operations served by the daemon fs bridge. Paths are daemon-machine paths
+/// (same trust domain as the daemon itself — the control plane can already
+/// spawn arbitrary commands).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "fs_op", rename_all = "snake_case")]
+pub enum FsOp {
+    /// → `{contents_b64, mtime_ms}` or error when unreadable.
+    Read {
+        path: String,
+    },
+    /// Atomic write. → `{mtime_ms}`.
+    Write {
+        path: String,
+        contents_b64: String,
+    },
+    /// → `{exists, mtime_ms, size}` (`exists:false` is ok, not an error).
+    Stat {
+        path: String,
+    },
+    /// → `{entries: [{name, is_dir}]}`.
+    List {
+        path: String,
+    },
+    Remove {
+        path: String,
+    },
+    /// Shared GUI layout (split/weights), persisted in the daemon state dir so
+    /// every attached window — local or thin client — sees the same tiling.
+    /// → `{json: string|null}`.
+    LayoutLoad,
+    LayoutSave {
+        json: String,
+    },
+    /// Run a host widget's select command daemon-side. → `{output}` and a
+    /// refreshed [`GuiEvent::HostWidgets`] broadcast.
+    HostSelect {
+        widget: String,
+        item: String,
+    },
+    /// Run a shell command daemon-side (`sh -lc`). Same trust domain as the
+    /// control plane (which already spawns arbitrary commands). Output is
+    /// truncated to 64KiB per stream. → `{status, stdout, stderr}`.
+    Shell {
+        cmd: String,
+    },
 }
 
 fn default_true() -> bool {
@@ -289,6 +357,21 @@ pub enum GuiEvent {
         data: Option<serde_json::Value>,
         #[serde(default)]
         error: Option<String>,
+    },
+    /// Reply to [`GuiRequest::Fs`], correlated by id. Routed to the waiting
+    /// `fs_call` in the gui client, never into the app event stream.
+    FsResult {
+        id: u64,
+        ok: bool,
+        #[serde(default)]
+        data: Option<serde_json::Value>,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    /// Host sidebar widgets, polled daemon-side and pushed on attach + every
+    /// poll tick (`Vec<HostWidgetSnap>` as JSON).
+    HostWidgets {
+        widgets: serde_json::Value,
     },
     Pong,
 }

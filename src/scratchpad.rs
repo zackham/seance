@@ -22,11 +22,14 @@
 //!   pending local autosave win. Simple and predictable; noted here so the
 //!   integrator knows we are not attempting a merge.
 
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use gpui::AppContext as _;
+
+use crate::gui_client::GuiClient;
 use gpui::{
     div, Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     SharedString, Styled as _, Subscription, Task, WeakEntity,
@@ -113,6 +116,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn header_template_mentions_title_and_env_var() {
+        let body = header_template("worker-1");
+        assert!(body.starts_with("# worker-1 — scratchpad\n"));
+        assert!(body.contains("$SEANCE_SCRATCHPAD"));
+    }
+
+    #[test]
     fn sanitize_slug_replaces_hostile_chars() {
         assert_eq!(sanitize_slug("a/b c"), "a-b-c");
         assert_eq!(sanitize_slug("ok-slug_1.md"), "ok-slug_1.md");
@@ -144,28 +154,17 @@ mod tests {
     }
 }
 
-/// Read the file's modified-time, or `None` if it can't be stat'd.
-fn mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
-}
-
-/// Atomic-ish write: write to a sibling temp file, then rename over the target.
-///
-/// Rename-on-the-same-filesystem is atomic on Linux, so a reader (the agent)
-/// never sees a half-written scratchpad.
-fn atomic_write(path: &Path, contents: &str) -> Result<()> {
-    let tmp = path.with_extension("md.tmp");
-    std::fs::write(&tmp, contents)
-        .with_context(|| format!("writing temp scratchpad {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
-}
-
 /// A gpui view: an editable panel bound to one session's scratchpad file.
+///
+/// All IO goes through the daemon fs bridge ([`GuiClient`]) so the GUI can run
+/// on a different machine than the daemon. Bridge calls are synchronous (block
+/// up to 10s), so every one of them runs on the background executor; results
+/// hop back to the UI thread via `cx.update`.
 pub struct ScratchpadDrawer {
     title: String,
-    path: PathBuf,
+    /// Daemon-side pad path (from `PaneInfo.scratchpad`). Opaque to the GUI.
+    path: String,
+    client: Arc<GuiClient>,
 
     /// The multi-line text editor state (gpui-component).
     input: gpui::Entity<InputState>,
@@ -175,9 +174,14 @@ pub struct ScratchpadDrawer {
     /// to reload (we skip reload while dirty — last-writer-wins).
     dirty: bool,
 
-    /// Last mtime we are "in sync" with. Updated on load, on save, and on an
-    /// accepted external reload. Compared against the live mtime by the poller.
-    last_seen_mtime: Option<SystemTime>,
+    /// Bumped on every edit. An async flush captures the generation with the
+    /// contents and only clears `dirty` if no newer edit landed meanwhile.
+    edit_gen: u64,
+
+    /// Last daemon-reported mtime (ms) we are "in sync" with. Updated on load,
+    /// on save (fs_write returns the new mtime), and on an accepted external
+    /// reload. Compared against the live mtime by the poller.
+    last_seen_mtime: Option<u64>,
 
     /// The most recent pending debounced-save task. Dropping it cancels the
     /// prior timer, which is how the debounce collapses rapid keystrokes.
@@ -193,27 +197,21 @@ pub struct ScratchpadDrawer {
 }
 
 impl ScratchpadDrawer {
-    /// Build a drawer for `slug`, loading the file's current contents into the
-    /// editor and starting both the file watcher and (lazily) the autosave.
+    /// Build a drawer for the daemon-side pad at `path` (from
+    /// `PaneInfo.scratchpad`). The editor starts empty; the initial contents
+    /// load asynchronously through the fs bridge (seeding the header template
+    /// if the pad doesn't exist yet), then the 1s mtime watch loop takes over.
     pub fn new(
-        store: &ScratchpadStore,
-        slug: String,
+        client: Arc<GuiClient>,
+        path: String,
         title: String,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
-        let path = store.path_for(&slug);
-
-        // Load current contents (path_for guarantees the file exists, but be
-        // defensive in case it was removed between calls).
-        let initial = std::fs::read_to_string(&path).unwrap_or_default();
-        let last_seen_mtime = mtime(&path);
-
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
                 .placeholder("notes for this session — the agent can write here too")
-                .default_value(initial)
         });
 
         // Any real edit marks us dirty and (re)arms the debounced save.
@@ -230,9 +228,11 @@ impl ScratchpadDrawer {
         let mut this = Self {
             title,
             path,
+            client,
             input,
             dirty: false,
-            last_seen_mtime,
+            edit_gen: 0,
+            last_seen_mtime: None,
             _save_task: Task::ready(()),
             _watch_task: Task::ready(()),
             _subscriptions: vec![subscription],
@@ -250,100 +250,217 @@ impl ScratchpadDrawer {
     /// Called on every editor change: mark dirty and (re)arm the debounce.
     fn on_edit(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         self.dirty = true;
+        self.edit_gen = self.edit_gen.wrapping_add(1);
 
         // Replacing the task drops the previous one, cancelling its timer —
-        // that is the debounce. When the timer finally elapses we flush.
+        // that is the debounce. When the timer finally elapses we flush the
+        // editor contents through the fs bridge on the background executor.
         self._save_task = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             cx.background_executor().timer(AUTOSAVE_DEBOUNCE).await;
+
+            // Snapshot contents + generation on the UI thread.
+            let Ok(Some((client, path, contents, gen))) = cx.update(|_window, cx| {
+                this.upgrade().map(|entity| {
+                    entity.update(cx, |this, cx| {
+                        (
+                            this.client.clone(),
+                            this.path.clone(),
+                            this.input.read(cx).value().to_string(),
+                            this.edit_gen,
+                        )
+                    })
+                })
+            }) else {
+                return;
+            };
+
+            // Blocking bridge call, off the UI thread. Atomic daemon-side.
+            let written = cx
+                .background_executor()
+                .spawn(async move { client.fs_write(&path, contents.as_bytes()) })
+                .await;
+
             let _ = cx.update(|_window, cx| {
                 if let Some(this) = this.upgrade() {
-                    this.update(cx, |this, cx| this.flush(cx));
+                    this.update(cx, |this, _cx| this.finish_flush(gen, written));
                 }
             });
         });
     }
 
-    /// Write the current editor contents to disk (atomic) and clear dirty.
-    fn flush(&mut self, cx: &mut gpui::Context<Self>) {
-        let contents = self.input.read(cx).value().to_string();
-        match atomic_write(&self.path, &contents) {
-            Ok(()) => {
-                self.dirty = false;
+    /// Apply the result of an async flush back onto the drawer state.
+    fn finish_flush(&mut self, gen: u64, written: Result<Option<u64>>) {
+        match written {
+            Ok(new_mtime) => {
+                // Only go clean if no newer edit landed while we were writing;
+                // a newer edit has its own debounced flush pending.
+                if self.edit_gen == gen {
+                    self.dirty = false;
+                }
                 // Adopt our own write's mtime so the watcher doesn't treat this
                 // as an external change and pointlessly reload.
-                self.last_seen_mtime = mtime(&self.path);
+                self.last_seen_mtime = new_mtime;
             }
             Err(err) => {
-                // Non-fatal: keep dirty so the next debounce retries. Surface it
-                // for the integrator's logging rather than panicking the UI.
-                eprintln!(
-                    "scratchpad: failed to save {}: {err:#}",
-                    self.path.display()
-                );
+                // Non-fatal: keep dirty so a later edit's debounce retries.
+                // Surface it for the integrator's logging rather than
+                // panicking the UI.
+                eprintln!("scratchpad: failed to save {}: {err:#}", self.path);
             }
         }
     }
 
-    /// Start the 1s mtime poll loop. Self-reschedules until the entity drops.
+    /// Start the watch loop: first the initial load (seeding the header if the
+    /// pad is missing), then the 1s mtime poll. All bridge IO runs on the
+    /// background executor; the loop ends when the entity drops (the weak
+    /// handle stops upgrading).
     fn start_watch(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
-        self._watch_task = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
-            cx.background_executor().timer(WATCH_POLL_INTERVAL).await;
+        let client = self.client.clone();
+        let path = self.path.clone();
+        let title = self.title.clone();
 
-            // update() lands us back on the foreground thread with a Window, so
-            // we can call set_value. If the entity is gone, bail and end loop.
-            let keep_going = cx
+        self._watch_task = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            // ---- Initial load (with ensure-on-open header seeding). ----
+            let loaded = {
+                let (client, path) = (client.clone(), path.clone());
+                cx.background_executor()
+                    .spawn(async move { load_or_seed(&client, &path, &title) })
+                    .await
+            };
+            let alive = cx
                 .update(|window, cx| {
                     let Some(this) = this.upgrade() else {
                         return false;
                     };
-                    this.update(cx, |this, cx| this.poll_external(window, cx));
+                    this.update(cx, |this, cx| {
+                        if let Some((contents, mtime_ms)) = loaded {
+                            // Don't clobber keystrokes typed during the load.
+                            if !this.dirty {
+                                this.input.update(cx, |state, cx| {
+                                    state.set_value(contents, window, cx);
+                                });
+                            }
+                            this.last_seen_mtime = mtime_ms;
+                            cx.notify();
+                        }
+                    });
                     true
                 })
                 .unwrap_or(false);
+            if !alive {
+                return;
+            }
 
-            if !keep_going {
-                break;
+            // ---- 1s mtime poll for external (agent) writes. ----
+            loop {
+                cx.background_executor().timer(WATCH_POLL_INTERVAL).await;
+
+                // Stat through the bridge, off the UI thread.
+                let stat = {
+                    let (client, path) = (client.clone(), path.clone());
+                    cx.background_executor()
+                        .spawn(async move { client.fs_stat(&path) })
+                        .await
+                };
+                let current = match stat {
+                    Ok(exists) => exists.flatten(),
+                    Err(err) => {
+                        // Transport hiccup — don't advance state, just retry.
+                        eprintln!("scratchpad: failed to stat {path}: {err:#}");
+                        continue;
+                    }
+                };
+
+                // Decide on the UI thread whether this is a change we take.
+                let Ok(Some(reload)) = cx.update(|_window, cx| {
+                    this.upgrade().map(|entity| {
+                        let this = entity.read(cx);
+                        // Unsaved local edits win (last-writer-wins). Don't
+                        // clobber in-progress typing; the pending debounce will
+                        // overwrite the external change. We do NOT advance
+                        // last_seen_mtime, so once clean a later external write
+                        // is still picked up.
+                        current != this.last_seen_mtime && !this.dirty
+                    })
+                }) else {
+                    return; // entity gone — end the loop
+                };
+                if !reload {
+                    continue;
+                }
+
+                let read = {
+                    let (client, path) = (client.clone(), path.clone());
+                    cx.background_executor()
+                        .spawn(async move { client.fs_read_string(&path) })
+                        .await
+                };
+
+                let alive = cx
+                    .update(|window, cx| {
+                        let Some(this) = this.upgrade() else {
+                            return false;
+                        };
+                        this.update(cx, |this, cx| match read {
+                            Ok((contents, mtime_ms)) => {
+                                if this.dirty {
+                                    return; // went dirty during the read — local wins
+                                }
+                                let current_value = this.input.read(cx).value();
+                                if current_value.as_ref() != contents {
+                                    this.input.update(cx, |state, cx| {
+                                        state.set_value(contents, window, cx);
+                                    });
+                                }
+                                this.last_seen_mtime = mtime_ms;
+                                cx.notify();
+                            }
+                            Err(err) => {
+                                eprintln!("scratchpad: failed to reload {}: {err:#}", this.path);
+                                // Advance anyway so we don't spin re-reporting
+                                // the same unreadable state every second.
+                                this.last_seen_mtime = current;
+                            }
+                        });
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    return;
+                }
             }
         });
     }
+}
 
-    /// Poll the file's mtime; if it changed externally and we have no unsaved
-    /// local edits, reload the file into the editor.
-    fn poll_external(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
-        let current = mtime(&self.path);
-        if current == self.last_seen_mtime {
-            return; // no change since we last synced
-        }
-
-        // The file changed underneath us.
-        if self.dirty {
-            // Unsaved local edits win (last-writer-wins). Don't clobber the
-            // user's in-progress typing; our pending debounce will overwrite
-            // the external change on its next flush. We do NOT advance
-            // last_seen_mtime here, so once the user goes clean a later
-            // external write can still be picked up.
-            return;
-        }
-
-        match std::fs::read_to_string(&self.path) {
-            Ok(contents) => {
-                let current_value = self.input.read(cx).value();
-                if current_value.as_ref() != contents {
-                    self.input.update(cx, |state, cx| {
-                        state.set_value(contents, window, cx);
-                    });
+/// Read the pad through the bridge; if it doesn't exist yet, seed it with the
+/// header template (ensure-on-open, mirroring the old `path_for` behavior).
+///
+/// Returns `(contents, mtime_ms)` to adopt, or `None` when the pad could not
+/// be read or created (the watch loop will keep retrying via its stat poll).
+///
+/// Blocking — call on the background executor only.
+fn load_or_seed(client: &GuiClient, path: &str, title: &str) -> Option<(String, Option<u64>)> {
+    match client.fs_read_string(path) {
+        Ok((contents, mtime_ms)) => Some((contents, mtime_ms)),
+        Err(read_err) => {
+            // Only seed when the pad is genuinely missing; a transport error
+            // must not overwrite an existing pad with the template.
+            match client.fs_stat(path) {
+                Ok(None) => {
+                    let body = header_template(title);
+                    match client.fs_write(path, body.as_bytes()) {
+                        Ok(mtime_ms) => Some((body, mtime_ms)),
+                        Err(err) => {
+                            eprintln!("scratchpad: failed to seed {path}: {err:#}");
+                            None
+                        }
+                    }
                 }
-                self.last_seen_mtime = current;
-                cx.notify();
-            }
-            Err(err) => {
-                eprintln!(
-                    "scratchpad: failed to reload {}: {err:#}",
-                    self.path.display()
-                );
-                // Advance mtime anyway so we don't spin re-reporting the same
-                // unreadable state every second.
-                self.last_seen_mtime = current;
+                _ => {
+                    eprintln!("scratchpad: failed to load {path}: {read_err:#}");
+                    None
+                }
             }
         }
     }
@@ -357,7 +474,7 @@ impl Render for ScratchpadDrawer {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let title: SharedString = self.title.clone().into();
-        let path_hint: SharedString = self.path.display().to_string().into();
+        let path_hint: SharedString = self.path.clone().into();
 
         v_flex()
             .id("scratchpad-face")

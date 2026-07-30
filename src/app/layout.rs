@@ -1,11 +1,8 @@
-//! Persisted split-ratio / pane-weight layout file (`~/.local/share/seance/layout.json`).
+//! Split-ratio / pane-weight layout codec. Storage lives daemon-side (see
+//! `daemon::fsbridge` LayoutLoad/LayoutSave) so every window — local or thin
+//! client — shares the same tiling; this module is the pure parse/serialize.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-
-pub(super) fn layout_file_path() -> PathBuf {
-    PathBuf::from(shellexpand::tilde("~/.local/share/seance/layout.json").into_owned())
-}
 
 /// Defaults when the file is missing or unparseable.
 fn empty_layout() -> (f32, HashMap<String, f32>, HashMap<String, f32>) {
@@ -61,14 +58,17 @@ fn serialize_layout_json(
     serde_json::to_string_pretty(&v).unwrap_or_default()
 }
 
-pub(super) fn load_layout_file() -> (f32, HashMap<String, f32>, HashMap<String, f32>) {
-    let Ok(bytes) = std::fs::read_to_string(layout_file_path()) else {
+/// Decode daemon-provided layout JSON ("" / malformed → defaults).
+pub(super) fn load_layout_json(bytes: &str) -> (f32, HashMap<String, f32>, HashMap<String, f32>) {
+    if bytes.is_empty() {
         return empty_layout();
-    };
-    parse_layout_json(&bytes)
+    }
+    parse_layout_json(bytes)
 }
 
-pub(super) fn save_layout_file(
+/// Encode + persist via the daemon fs bridge (fire-and-forget).
+pub(super) fn save_layout_daemon(
+    client: &crate::gui_client::GuiClient,
     split_ratio: f32,
     weights: &HashMap<String, f32>,
     row_weights: &HashMap<String, f32>,
@@ -77,11 +77,9 @@ pub(super) fn save_layout_file(
     if s.is_empty() {
         return;
     }
-    let path = layout_file_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Err(e) = client.layout_save(&s) {
+        eprintln!("[seance] layout save failed: {e:#}");
     }
-    let _ = std::fs::write(path, s);
 }
 
 #[cfg(test)]

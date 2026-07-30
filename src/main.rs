@@ -21,6 +21,7 @@ mod remote_term_view;
 mod runtime;
 mod scratchpad;
 mod state;
+mod sysopen;
 mod term_font;
 mod term_shared;
 mod theme;
@@ -131,10 +132,7 @@ fn main() {
                     continue;
                 }
                 // Skip daemon processes (cmdline contains "daemon").
-                let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-                    .unwrap_or_default()
-                    .replace('\0', " ");
-                if cmdline.contains("daemon") {
+                if sysopen::process_cmdline(pid).contains("daemon") {
                     continue;
                 }
                 let _ = std::process::Command::new("kill").arg(pid_s).status();

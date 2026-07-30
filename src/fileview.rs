@@ -1,18 +1,28 @@
-//! A live, read-only file viewer pane with change history.
+//! A live, read-only file viewer pane with change history — thin-client edition.
 //!
 //! The second seance pane kind (terminals were the first). Use case: the human
 //! says "let's work on this report" and an agent pops open a [`FileView`] on the
 //! markdown file. The pane shows the file's content, live-updates as anyone
-//! edits it on disk, and lets you step back through the history of changes.
+//! edits it, and lets you step back through the history of changes.
 //!
 //! # Design notes for the integrator
 //!
-//! - **Watch mechanism: 1s mtime poll on a gpui background task.** Copied wholesale
-//!   from `scratchpad.rs` — a self-rescheduling `cx.spawn_in` loop that polls the
-//!   file's modified-time once a second and self-terminates when the entity is
-//!   dropped (the weak handle stops upgrading). We deliberately reuse the house
-//!   pattern rather than reach for `notify`: it needs only gpui primitives and
-//!   gives us the `&mut Window` the render path expects.
+//! - **All file IO goes through the daemon fs bridge.** The GUI may run on a
+//!   different machine than the daemon, so every read/stat/write here uses
+//!   [`crate::gui_client::GuiClient`]'s `fs_*` methods with daemon-side path
+//!   strings (`~` expands daemon-side). The bridge calls are synchronous and
+//!   can block up to 10s, so they only ever run on the background executor —
+//!   never on the render/UI thread.
+//!
+//! - **Watch mechanism: 1s mtime poll on a gpui background task.** Same cadence
+//!   as `scratchpad.rs` — a self-rescheduling `cx.spawn` loop that self-
+//!   terminates when the entity is dropped (the weak handle stops upgrading).
+//!   Each tick snapshots the entity's poll state, runs the bridge stat/read on
+//!   the background executor, and applies the outcome back on the UI thread.
+//!
+//! - **Async initial load.** `new()` returns immediately with a "loading…"
+//!   placeholder; a background task fetches the first content + snapshot list
+//!   and the view fills in when it lands.
 //!
 //! - **Read-only.** Unlike the scratchpad we never write the *watched* file. The
 //!   only files we write live under our own history dir (see [`history`] below).
@@ -29,15 +39,19 @@
 //!   monospace. See `docs/FILE-PANES.md`.
 //!
 //! - **History storage.** Plain file copies under
-//!   `~/.local/share/seance/filehist/<hash>/NNNN.snap`, capped at the most
-//!   recent [`MAX_SNAPSHOTS`]. Snapshot `0000` is taken at open; each observed
-//!   external change appends the next-numbered snapshot. Stepping ◀/▶ reads the
-//!   snapshot files back off disk. See [`history`].
+//!   `~/.local/share/seance/filehist/<hash>/NNNN.snap` **on the daemon
+//!   machine**, capped at the most recent [`MAX_SNAPSHOTS`]. Snapshot `0000` is
+//!   taken at open; each observed external change appends the next-numbered
+//!   snapshot. Stepping ◀/▶ reads the snapshot files back through the bridge
+//!   (asynchronously; the pinned snapshot and its predecessor are cached on the
+//!   view so render never touches the bridge). See [`history`].
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use std::sync::Arc;
+
+use crate::gui_client::GuiClient;
 
 use gpui::{
     div, list, prelude::*, px, rems, ListAlignment, ListState, SharedString, StyleRefinement, Task,
@@ -300,16 +314,26 @@ enum DiffLine {
     Skip(usize),
 }
 
-/// A gpui view: a live, read-only viewer bound to one file on disk.
+/// A gpui view: a live, read-only viewer bound to one file on the daemon
+/// machine, accessed exclusively through the fs bridge.
 pub struct FileView {
-    /// The file we are watching.
+    /// The file we are watching (a daemon-machine path).
     path: PathBuf,
 
-    /// Per-file history directory (`.../filehist/<hash>/`).
-    hist_dir: PathBuf,
+    /// Bridge to the daemon's filesystem. All IO goes through this, off the
+    /// UI thread.
+    client: Arc<GuiClient>,
+
+    /// Per-file history directory (`~/.local/share/seance/filehist/<hash>` on
+    /// the daemon machine; `~` expands daemon-side).
+    hist_dir: String,
 
     /// The content currently displayed in the body.
     content: String,
+
+    /// False until the initial background load lands; render shows a
+    /// "loading…" placeholder meanwhile.
+    loaded: bool,
 
     /// True when the live file could not be read (missing / permissions).
     unreadable: bool,
@@ -330,9 +354,14 @@ pub struct FileView {
     /// plain snapshot body). Toggled by clicking the history hint bar.
     show_diff: bool,
 
-    /// Last mtime we are "in sync" with. Compared against the live mtime by the
-    /// poller to detect external edits.
-    last_seen_mtime: Option<SystemTime>,
+    /// Content of the snapshot immediately before the pinned one, prefetched
+    /// when entering history so the diff/delta render path never blocks on the
+    /// bridge. `None` in live mode or at the oldest snapshot.
+    pinned_prev: Option<String>,
+
+    /// Last mtime (daemon ms-since-epoch) we are "in sync" with. Compared
+    /// against the bridge stat by the poller to detect external edits.
+    last_seen_mtime: Option<u64>,
 
     /// The self-rescheduling file-watch poll task. Held so it lives as long as
     /// the view; when the view drops, the weak handle stops upgrading and the
@@ -340,50 +369,137 @@ pub struct FileView {
     _watch_task: Task<()>,
 }
 
-impl FileView {
-    /// Build a viewer for `path`, loading its current contents, taking the
-    /// initial history snapshot (index 0), and starting the 1s file watcher.
-    pub fn new(path: PathBuf, cx: &mut gpui::Context<Self>) -> Self {
-        let hist_dir = history::dir_for(&path);
-        let _ = std::fs::create_dir_all(&hist_dir);
+/// Everything one background poll step needs, snapshotted off the entity so
+/// the blocking bridge calls run without touching UI state.
+struct PollInput {
+    client: Arc<GuiClient>,
+    path: String,
+    hist_dir: String,
+    last_seen_mtime: Option<u64>,
+    snapshots: Vec<u32>,
+}
 
-        // Load current contents. A missing/unreadable file is not an error —
-        // we show a friendly placeholder and keep watching for it to appear.
-        let (content, unreadable) = match std::fs::read_to_string(&path) {
-            Ok(c) => (c, false),
-            Err(_) => (String::new(), true),
-        };
-        let last_seen_mtime = history::mtime(&path);
+/// Result of one background poll step, applied back on the UI thread.
+enum PollOutcome {
+    /// mtime unchanged (or the bridge hiccuped — retry next tick).
+    NoChange,
+    /// mtime moved but the file can no longer be read.
+    Unreadable { mtime: Option<u64> },
+    /// The file changed; contents fetched and history recorded.
+    Changed {
+        mtime: Option<u64>,
+        contents: String,
+        snapshots: Vec<u32>,
+        differs: bool,
+    },
+}
 
-        // Snapshot 0 at open: the baseline the human/agent starts from. If a
-        // history dir already exists from a prior session we continue its
-        // numbering (history survives re-open) and skip recording when the
-        // current content already matches the newest snapshot — re-opening an
-        // unchanged file shouldn't grow history.
-        let mut snapshots = history::list(&hist_dir);
-        if !unreadable {
-            let already = snapshots
+/// One poll step: stat, and on an mtime change read + record history. All
+/// bridge calls — runs on the background executor only.
+fn poll_step(input: PollInput) -> PollOutcome {
+    let Ok(stat) = input.client.fs_stat(&input.path) else {
+        // Transport error (daemon busy / reconnecting): don't clobber the
+        // view; try again next tick.
+        return PollOutcome::NoChange;
+    };
+    let mtime = stat.flatten();
+    if mtime == input.last_seen_mtime {
+        return PollOutcome::NoChange;
+    }
+    match input.client.fs_read_string(&input.path) {
+        Ok((contents, _)) => {
+            // Record a snapshot only when the content actually differs from
+            // the newest one we hold (mtime can bump without a content
+            // change — e.g. `touch`).
+            let mut snapshots = input.snapshots;
+            let differs = snapshots
                 .last()
-                .and_then(|&idx| history::read(&hist_dir, idx))
-                .map(|prev| prev == content)
-                .unwrap_or(false);
-            if !already {
-                history::record(&hist_dir, &content, &mut snapshots);
+                .and_then(|&idx| history::read(&input.client, &input.hist_dir, idx))
+                .map(|prev| prev != contents)
+                .unwrap_or(true);
+            if differs {
+                history::record(&input.client, &input.hist_dir, &contents, &mut snapshots);
+            }
+            PollOutcome::Changed {
+                mtime,
+                contents,
+                snapshots,
+                differs,
             }
         }
+        Err(_) => PollOutcome::Unreadable { mtime },
+    }
+}
+
+/// Result of the initial background load.
+struct InitOutcome {
+    content: String,
+    unreadable: bool,
+    mtime: Option<u64>,
+    snapshots: Vec<u32>,
+}
+
+/// Initial load: current contents + mtime + snapshot list, recording snapshot
+/// 0 (or the next index) when the content is new. Bridge calls only — runs on
+/// the background executor.
+fn init_step(client: &GuiClient, path: &str, hist_dir: &str) -> InitOutcome {
+    // Load current contents. A missing/unreadable file is not an error — we
+    // show a friendly placeholder and keep watching for it to appear.
+    let (content, unreadable) = match client.fs_read_string(path) {
+        Ok((c, _)) => (c, false),
+        Err(_) => (String::new(), true),
+    };
+    let mtime = client.fs_stat(path).ok().flatten().flatten();
+
+    // Snapshot 0 at open: the baseline the human/agent starts from. If a
+    // history dir already exists from a prior session we continue its
+    // numbering (history survives re-open) and skip recording when the
+    // current content already matches the newest snapshot — re-opening an
+    // unchanged file shouldn't grow history. (The daemon's atomic write
+    // creates the history dir on first record; no explicit mkdir needed.)
+    let mut snapshots = history::list(client, hist_dir);
+    if !unreadable {
+        let already = snapshots
+            .last()
+            .and_then(|&idx| history::read(client, hist_dir, idx))
+            .map(|prev| prev == content)
+            .unwrap_or(false);
+        if !already {
+            history::record(client, hist_dir, &content, &mut snapshots);
+        }
+    }
+    InitOutcome {
+        content,
+        unreadable,
+        mtime,
+        snapshots,
+    }
+}
+
+impl FileView {
+    /// Build a viewer for `path` (a daemon-machine path). Returns immediately
+    /// showing a "loading…" placeholder; a background task fetches the initial
+    /// contents, takes the baseline history snapshot, and starts feeding the
+    /// 1s file watcher.
+    pub fn new(path: PathBuf, client: Arc<GuiClient>, cx: &mut gpui::Context<Self>) -> Self {
+        let hist_dir = history::dir_for(&path);
 
         let mut this = Self {
             path,
+            client,
             hist_dir,
-            content,
-            unreadable,
+            content: String::new(),
+            loaded: false,
+            unreadable: false,
             mode: ViewMode::Live,
-            snapshots,
+            snapshots: Vec::new(),
             changed_since_pin: false,
             show_diff: false,
-            last_seen_mtime,
+            pinned_prev: None,
+            last_seen_mtime: None,
             _watch_task: Task::ready(()),
         };
+        this.start_init(cx);
         this.start_watch(cx);
         this
     }
@@ -393,39 +509,88 @@ impl FileView {
         &self.path
     }
 
-    /// Start the 1s mtime poll loop. Self-reschedules until the entity drops.
-    /// (Lifted from `scratchpad.rs::start_watch` — proven working.)
+    /// Kick off the initial background load (fire-and-forget; if the entity
+    /// drops before it lands the update is a no-op).
+    fn start_init(&mut self, cx: &mut gpui::Context<Self>) {
+        let client = self.client.clone();
+        let path = self.path.to_string_lossy().into_owned();
+        let hist_dir = self.hist_dir.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { init_step(&client, &path, &hist_dir) })
+                .await;
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(cx, |this, cx| {
+                    this.content = outcome.content;
+                    this.unreadable = outcome.unreadable;
+                    this.last_seen_mtime = outcome.mtime;
+                    this.snapshots = outcome.snapshots;
+                    this.loaded = true;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Start the 1s poll loop. Each tick snapshots the poll state on the UI
+    /// thread, runs the bridge stat/read on the background executor, then
+    /// applies the outcome. Self-reschedules until the entity drops.
     fn start_watch(&mut self, cx: &mut gpui::Context<Self>) {
         self._watch_task = cx.spawn(async move |this: WeakEntity<Self>, cx| loop {
             cx.background_executor().timer(WATCH_POLL_INTERVAL).await;
-            let Some(this) = this.upgrade() else { break };
-            this.update(cx, |this: &mut FileView, cx| this.poll_external(cx));
+            let Some(entity) = this.upgrade() else { break };
+            let Some(input) = entity.update(cx, |this, _| this.poll_input()) else {
+                continue; // initial load hasn't landed yet
+            };
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { poll_step(input) })
+                .await;
+            let Some(entity) = this.upgrade() else { break };
+            entity.update(cx, |this, cx| this.apply_poll(outcome, cx));
         });
     }
 
-    /// Poll the file's mtime; on an external change, reload the live content and
-    /// append a history snapshot. We record history regardless of view mode, but
-    /// only yank the *displayed* content when we are in [`ViewMode::Live`].
-    fn poll_external(&mut self, cx: &mut gpui::Context<Self>) {
-        let current = history::mtime(&self.path);
-        if current == self.last_seen_mtime {
-            return; // no change since we last synced
+    /// Snapshot the state a background poll step needs. `None` until the
+    /// initial load lands (nothing to diff against yet).
+    fn poll_input(&self) -> Option<PollInput> {
+        if !self.loaded {
+            return None;
         }
-        self.last_seen_mtime = current;
+        Some(PollInput {
+            client: self.client.clone(),
+            path: self.path.to_string_lossy().into_owned(),
+            hist_dir: self.hist_dir.clone(),
+            last_seen_mtime: self.last_seen_mtime,
+            snapshots: self.snapshots.clone(),
+        })
+    }
 
-        match std::fs::read_to_string(&self.path) {
-            Ok(contents) => {
-                // Record a snapshot only when the content actually differs from
-                // the newest one we hold (mtime can bump without a content
-                // change — e.g. `touch`).
-                let differs = self
-                    .newest_snapshot_content()
-                    .map(|prev| prev != contents)
-                    .unwrap_or(true);
-                if differs {
-                    history::record(&self.hist_dir, &contents, &mut self.snapshots);
+    /// Apply a background poll outcome. We record history regardless of view
+    /// mode, but only yank the *displayed* content in [`ViewMode::Live`].
+    fn apply_poll(&mut self, outcome: PollOutcome, cx: &mut gpui::Context<Self>) {
+        match outcome {
+            PollOutcome::NoChange => {}
+            PollOutcome::Unreadable { mtime } => {
+                self.last_seen_mtime = mtime;
+                // The file went away or became unreadable. In live mode reflect
+                // that; in history mode keep showing the pinned snapshot.
+                if matches!(self.mode, ViewMode::Live) {
+                    self.unreadable = true;
+                    self.content = String::new();
+                    cx.notify();
                 }
-
+            }
+            PollOutcome::Changed {
+                mtime,
+                contents,
+                snapshots,
+                differs,
+            } => {
+                self.last_seen_mtime = mtime;
+                self.snapshots = snapshots;
                 match self.mode {
                     ViewMode::Live => {
                         // Following the tail: adopt the new content.
@@ -442,42 +607,48 @@ impl FileView {
                 }
                 cx.notify();
             }
-            Err(_) => {
-                // The file went away or became unreadable. In live mode reflect
-                // that; in history mode keep showing the pinned snapshot.
-                if matches!(self.mode, ViewMode::Live) {
-                    self.unreadable = true;
-                    self.content = String::new();
-                    cx.notify();
-                }
-            }
         }
-    }
-
-    /// Content of the newest recorded snapshot, if any (read off disk).
-    fn newest_snapshot_content(&self) -> Option<String> {
-        let idx = *self.snapshots.last()?;
-        history::read(&self.hist_dir, idx)
     }
 
     // ---- history navigation ----
 
-    /// Jump back to following the live file tail.
+    /// Jump back to following the live file tail. Flips the mode immediately
+    /// (keeping the pinned content on screen for the sub-second fetch) and
+    /// refreshes the body from the bridge in the background.
     fn go_live(&mut self, cx: &mut gpui::Context<Self>) {
         self.mode = ViewMode::Live;
         self.changed_since_pin = false;
         self.show_diff = false;
-        match std::fs::read_to_string(&self.path) {
-            Ok(c) => {
-                self.content = c;
-                self.unreadable = false;
-            }
-            Err(_) => {
-                self.unreadable = true;
-                self.content = String::new();
-            }
-        }
+        self.pinned_prev = None;
         cx.notify();
+
+        let client = self.client.clone();
+        let path = self.path.to_string_lossy().into_owned();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let read = cx
+                .background_executor()
+                .spawn(async move { client.fs_read_string(&path) })
+                .await;
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(cx, |this, cx| {
+                    if !matches!(this.mode, ViewMode::Live) {
+                        return; // user re-pinned history while we fetched
+                    }
+                    match read {
+                        Ok((c, _)) => {
+                            this.content = c;
+                            this.unreadable = false;
+                        }
+                        Err(_) => {
+                            this.unreadable = true;
+                            this.content = String::new();
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// Step to an older snapshot (◀).
@@ -510,35 +681,62 @@ impl FileView {
         }
     }
 
-    /// Pin the body to snapshot at `idx` (index into `snapshots`).
+    /// Pin the body to snapshot at `idx` (index into `snapshots`). The snapshot
+    /// and its predecessor (for the diff) are fetched through the bridge in the
+    /// background; the view flips once they land.
     fn show_history(&mut self, idx: usize, cx: &mut gpui::Context<Self>) {
         let Some(&snap) = self.snapshots.get(idx) else {
             return;
         };
-        match history::read(&self.hist_dir, snap) {
-            Some(c) => {
-                // Entering history from live → default to diff. Within history,
-                // keep the user's content/diff preference (except at the oldest
-                // snap, which has no predecessor).
-                let from_live = matches!(self.mode, ViewMode::Live);
-                self.content = c;
-                self.unreadable = false;
-                self.mode = ViewMode::History(idx);
-                // Fresh pin: clear the stale-since flag; the poller re-sets it if
-                // the live file moves while we sit here.
-                self.changed_since_pin = false;
-                if idx == 0 {
-                    self.show_diff = false;
-                } else if from_live {
-                    self.show_diff = true;
-                }
-                cx.notify();
+        let prev_snap = if idx > 0 {
+            self.snapshots.get(idx - 1).copied()
+        } else {
+            None
+        };
+        // Entering history from live → default to diff. Within history, keep
+        // the user's content/diff preference (except at the oldest snap, which
+        // has no predecessor). Decided at click time, applied when data lands.
+        let from_live = matches!(self.mode, ViewMode::Live);
+
+        let client = self.client.clone();
+        let hist_dir = self.hist_dir.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let (content, prev) = cx
+                .background_executor()
+                .spawn(async move {
+                    let content = history::read(&client, &hist_dir, snap);
+                    let prev = prev_snap.and_then(|s| history::read(&client, &hist_dir, s));
+                    (content, prev)
+                })
+                .await;
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(cx, |this, cx| {
+                    match content {
+                        Some(c) => {
+                            this.content = c;
+                            this.unreadable = false;
+                            this.mode = ViewMode::History(idx);
+                            this.pinned_prev = prev;
+                            // Fresh pin: clear the stale-since flag; the poller
+                            // re-sets it if the live file moves while we sit here.
+                            this.changed_since_pin = false;
+                            if idx == 0 || this.pinned_prev.is_none() {
+                                this.show_diff = false;
+                            } else if from_live {
+                                this.show_diff = true;
+                            }
+                            cx.notify();
+                        }
+                        None => {
+                            // Snapshot vanished — drop it and bail.
+                            this.snapshots.retain(|&s| s != snap);
+                            cx.notify();
+                        }
+                    }
+                });
             }
-            None => {
-                // Snapshot vanished — drop it and bail.
-                self.snapshots.retain(|&s| s != snap);
-            }
-        }
+        })
+        .detach();
     }
 
     /// Toggle the unified-diff body (history only, when a previous snapshot
@@ -553,17 +751,15 @@ impl FileView {
         cx.notify();
     }
 
-    /// Content of the snapshot immediately before the one being viewed.
-    /// `None` in live mode, at the oldest snapshot, or if the prior snap is gone.
-    fn predecessor_content(&self) -> Option<String> {
-        let viewed_idx = match self.mode {
-            ViewMode::Live => return None,
-            ViewMode::History(i) => i,
-        };
-        if viewed_idx == 0 {
-            return None;
+    /// Content of the snapshot immediately before the one being viewed, from
+    /// the cache prefetched when the pin was set (render must never hit the
+    /// bridge). `None` in live mode, at the oldest snapshot, or if the prior
+    /// snap couldn't be fetched.
+    fn predecessor_content(&self) -> Option<&str> {
+        match self.mode {
+            ViewMode::History(i) if i > 0 => self.pinned_prev.as_deref(),
+            _ => None,
         }
-        history::read(&self.hist_dir, *self.snapshots.get(viewed_idx - 1)?)
     }
 
     /// Is this file worth rendering as markdown?
@@ -584,7 +780,7 @@ impl FileView {
     /// meaningful predecessor (live tail, or the oldest snapshot).
     fn line_delta(&self) -> Option<(usize, usize)> {
         let prev = self.predecessor_content()?;
-        Some(line_count_delta(&prev, &self.content))
+        Some(line_count_delta(prev, &self.content))
     }
 
     // ---- rendering helpers ----
@@ -714,10 +910,14 @@ impl FileView {
     /// The scrollable body: markdown or monospace text, optional unified diff,
     /// or a placeholder.
     fn render_body(&self, cx: &mut gpui::Context<Self>) -> gpui::AnyElement {
-        // Empty / unreadable → friendly placeholder (skip when showing a diff
-        // of a non-empty predecessor → empty snap, which is still interesting).
-        if !self.show_diff && (self.unreadable || self.content.trim().is_empty()) {
-            let msg = if self.unreadable {
+        // Empty / unreadable / still-loading → friendly placeholder (skip when
+        // showing a diff of a non-empty predecessor → empty snap, which is
+        // still interesting).
+        if !self.loaded || (!self.show_diff && (self.unreadable || self.content.trim().is_empty()))
+        {
+            let msg = if !self.loaded {
+                "loading…"
+            } else if self.unreadable {
                 "can't read this file — it may have been moved or deleted"
             } else {
                 "this file is empty"
@@ -796,7 +996,7 @@ impl FileView {
         // Diff body (history only): monospace unified lines vs. previous snap.
         let content: gpui::AnyElement = if self.show_diff {
             if let Some(prev) = self.predecessor_content() {
-                self.render_diff_body(&prev)
+                self.render_diff_body(prev)
             } else {
                 // Race: predecessor vanished — fall through to normal body.
                 self.render_content_body()
@@ -1224,77 +1424,87 @@ impl Render for FileView {
     }
 }
 
-/// On-disk history: plain file copies under
-/// `~/.local/share/seance/filehist/<hash>/NNNN.snap`.
+/// Daemon-side history: plain file copies under
+/// `~/.local/share/seance/filehist/<hash>/NNNN.snap` on the daemon machine,
+/// accessed exclusively through the fs bridge (`~` expands daemon-side).
 ///
-/// `<hash>` is a stable FNV-1a hash of the absolute path, so the same file maps
-/// to the same directory across sessions (history persists across re-open) and
-/// two different files never collide. Snapshots are plain copies — no diffs, no
-/// compression — capped at [`MAX_SNAPSHOTS`]; the oldest are pruned past the cap.
+/// `<hash>` is a stable FNV-1a hash of the watched path string, so the same
+/// file maps to the same directory across sessions (history persists across
+/// re-open) and two different files never collide. Snapshots are plain copies —
+/// no diffs, no compression — capped at [`MAX_SNAPSHOTS`]; the oldest are
+/// pruned past the cap.
+///
+/// Every function here makes blocking bridge calls — background executor only.
 mod history {
     use super::*;
 
-    /// Root of the history store: `~/.local/share/seance/filehist/`.
-    fn root() -> PathBuf {
-        PathBuf::from(shellexpand::tilde("~/.local/share/seance/filehist").into_owned())
+    /// Root of the history store on the daemon machine.
+    const ROOT: &str = "~/.local/share/seance/filehist";
+
+    /// Per-file history directory: `<ROOT>/<fnv-hash-of-path>/`. The hash is
+    /// over the path string as given (no canonicalization — the file lives on
+    /// the daemon machine, so the GUI can't resolve it locally).
+    pub fn dir_for(path: &Path) -> String {
+        format!("{ROOT}/{:016x}", fnv1a(path.to_string_lossy().as_bytes()))
     }
 
-    /// Per-file history directory: `<root>/<fnv-hash-of-abs-path>/`.
-    pub fn dir_for(path: &Path) -> PathBuf {
-        // Canonicalize when possible so `./foo.md` and `/abs/foo.md` share a
-        // dir; fall back to the raw path (canonicalize fails on missing files).
-        let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        root().join(format!("{:016x}", fnv1a(key.to_string_lossy().as_bytes())))
+    /// List existing snapshot indices in `hist_dir`, oldest first. A missing
+    /// directory (never recorded) lists as empty.
+    pub fn list(client: &GuiClient, hist_dir: &str) -> Vec<u32> {
+        indices_from_names(
+            client
+                .fs_list(hist_dir)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, is_dir)| !is_dir)
+                .map(|(name, _)| name),
+        )
     }
 
-    /// Read the file's modified-time, or `None` if it can't be stat'd.
-    pub fn mtime(path: &Path) -> Option<SystemTime> {
-        std::fs::metadata(path).and_then(|m| m.modified()).ok()
-    }
-
-    /// List existing snapshot indices in `hist_dir`, oldest first.
-    pub fn list(hist_dir: &Path) -> Vec<u32> {
-        let mut idxs: Vec<u32> = std::fs::read_dir(hist_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| {
-                let name = entry.file_name();
-                let name = name.to_str()?;
-                let stem = name.strip_suffix(".snap")?;
-                stem.parse::<u32>().ok()
-            })
+    /// Parse `NNNN.snap` entry names into sorted snapshot indices (pure —
+    /// exercised by tests without any IO).
+    pub fn indices_from_names(names: impl Iterator<Item = String>) -> Vec<u32> {
+        let mut idxs: Vec<u32> = names
+            .filter_map(|name| name.strip_suffix(".snap").and_then(|s| s.parse().ok()))
             .collect();
         idxs.sort_unstable();
         idxs
     }
 
-    /// Path to snapshot `idx` inside `hist_dir`.
-    fn snap_path(hist_dir: &Path, idx: u32) -> PathBuf {
-        hist_dir.join(format!("{idx:04}.snap"))
+    /// Daemon-side path to snapshot `idx` inside `hist_dir`.
+    fn snap_path(hist_dir: &str, idx: u32) -> String {
+        format!("{hist_dir}/{idx:04}.snap")
     }
 
-    /// Read snapshot `idx` back off disk.
-    pub fn read(hist_dir: &Path, idx: u32) -> Option<String> {
-        std::fs::read_to_string(snap_path(hist_dir, idx)).ok()
+    /// Read snapshot `idx` back through the bridge.
+    pub fn read(client: &GuiClient, hist_dir: &str, idx: u32) -> Option<String> {
+        client
+            .fs_read_string(&snap_path(hist_dir, idx))
+            .ok()
+            .map(|(contents, _)| contents)
     }
 
     /// Append `content` as the next-numbered snapshot, prune past the cap, and
     /// update `snapshots` in place. Returns the new index, or `None` on write
-    /// failure. Idempotent-ish: callers gate on content differing from the
-    /// newest snapshot, so we don't record no-op `touch`es.
-    pub fn record(hist_dir: &Path, content: &str, snapshots: &mut Vec<u32>) -> Option<u32> {
-        let _ = std::fs::create_dir_all(hist_dir);
+    /// failure. The daemon's atomic write creates the history dir as needed.
+    /// Idempotent-ish: callers gate on content differing from the newest
+    /// snapshot, so we don't record no-op `touch`es.
+    pub fn record(
+        client: &GuiClient,
+        hist_dir: &str,
+        content: &str,
+        snapshots: &mut Vec<u32>,
+    ) -> Option<u32> {
         let next = snapshots.last().map(|n| n + 1).unwrap_or(0);
-        if std::fs::write(snap_path(hist_dir, next), content).is_err() {
-            return None;
-        }
+        client
+            .fs_write(&snap_path(hist_dir, next), content.as_bytes())
+            .ok()?;
         snapshots.push(next);
 
         // Prune oldest beyond the cap.
         while snapshots.len() > MAX_SNAPSHOTS {
             let old = snapshots.remove(0);
-            let _ = std::fs::remove_file(snap_path(hist_dir, old));
+            let _ = client.fs_remove(&snap_path(hist_dir, old));
         }
         Some(next)
     }
@@ -1307,6 +1517,19 @@ mod history {
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
         hash
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::history;
+
+    #[test]
+    fn parses_and_sorts_snapshot_names() {
+        let names = ["0002.snap", "junk.txt", "0000.snap", "0001.snap", "12.tmp"]
+            .into_iter()
+            .map(String::from);
+        assert_eq!(history::indices_from_names(names), vec![0, 1, 2]);
     }
 }
 

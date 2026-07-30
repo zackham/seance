@@ -6,8 +6,6 @@
 
 use gpui::{Context, Window};
 
-use crate::events;
-
 use super::util::{now_ms, title_looks_busy};
 use super::{RenameTarget, SeanceApp};
 
@@ -227,7 +225,7 @@ impl SeanceApp {
         let insert_at = before_slug
             .and_then(|b| self.panes.iter().position(|p| p.slug == b))
             .unwrap_or(self.panes.len());
-        events::log(
+        self.client.log_event(
             "human",
             Some(workspace),
             Some(slug),
@@ -367,7 +365,7 @@ impl SeanceApp {
         if self.selected_workspace.as_deref() == Some(ws.as_str()) {
             return;
         }
-        events::log(
+        self.client.log_event(
             "human",
             Some(&ws),
             None,
@@ -410,7 +408,7 @@ impl SeanceApp {
             .map(|n| crate::state::slugify(n))
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| format!("{src}-fork"));
-        events::log(
+        self.client.log_event(
             actor,
             Some(&new_ws),
             None,

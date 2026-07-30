@@ -17,14 +17,13 @@ use gpui_component::{
 
 use crate::{
     control::{ControlRequest, ControlResponse},
-    events,
     gui_client::GuiClient,
     pane::{Pane, PaneBody, SpawnRequest},
     remote_term::RemoteTerminal,
     remote_term_view::RemoteTerminalView,
     runtime::protocol::{ForeignWorkspace, GuiEvent, PaneInfo, WindowInfo},
     runtime::snapshot::GridSnapshot,
-    scratchpad::{ScratchpadDrawer, ScratchpadStore},
+    scratchpad::ScratchpadDrawer,
     theme::SeancePalette,
 };
 use std::sync::Arc;
@@ -121,7 +120,6 @@ pub struct SeanceApp {
     workspace_order: Vec<String>,
     renaming: Option<(RenameTarget, Entity<InputState>)>,
     drawer: Drawer,
-    store: ScratchpadStore,
     focus_handle: FocusHandle,
     session_counter: usize,
     /// Connection to the session daemon (owns PTYs).
@@ -215,8 +213,6 @@ impl SeanceApp {
     }
 
     fn new_inner(window: &mut Window, cx: &mut Context<Self>, empty: bool) -> Self {
-        let store = ScratchpadStore::new().expect("scratchpad dir");
-
         // Connect to the session daemon (PTYs live there).
         let (client, event_rx) = if empty {
             GuiClient::connect_empty().expect("gui client connect empty")
@@ -239,7 +235,6 @@ impl SeanceApp {
             workspace_order: Vec::new(),
             renaming: None,
             drawer: Drawer::Closed,
-            store,
             focus_handle: cx.focus_handle(),
             session_counter: 0,
             client,
@@ -270,42 +265,22 @@ impl SeanceApp {
             quicklaunch_editor: None,
         };
         let _ = crate::prompts::ensure_user_file();
-        let (split, weights, row_weights) = load_layout_file();
+        // Shared layout lives daemon-side (thin clients see the same tiling).
+        // One blocking bridge call at boot; defaults on any failure.
+        let (split, weights, row_weights) = load_layout_json(
+            app.client
+                .layout_load()
+                .ok()
+                .flatten()
+                .as_deref()
+                .unwrap_or(""),
+        );
         app.split_ratio = split;
         app.pane_weights = weights;
         app.row_weights = row_weights;
 
-        // Host bridge: poll optional sidebar widgets (claude accounts, …).
-        if app.host.enabled() {
-            let (host_tx, mut host_rx) =
-                futures::channel::mpsc::unbounded::<crate::host::HostState>();
-            let poll_secs = app.host.min_poll_secs();
-            std::thread::Builder::new()
-                .name("seance-host-poll".into())
-                .spawn(move || {
-                    let mut state = crate::host::HostState::load();
-                    loop {
-                        state.poll_all();
-                        if host_tx.unbounded_send(state.clone()).is_err() {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_secs(poll_secs));
-                    }
-                })
-                .ok();
-            cx.spawn(async move |this, cx| {
-                use futures::StreamExt as _;
-                while let Some(next) = host_rx.next().await {
-                    let Some(this) = this.upgrade() else { break };
-                    this.update(cx, |app: &mut SeanceApp, cx| {
-                        app.host.widgets = next.widgets;
-                        app.host.ever_ok = next.ever_ok || app.host.ever_ok;
-                        cx.notify();
-                    });
-                }
-            })
-            .detach();
-        }
+        // Host widgets are polled daemon-side and arrive as HostWidgets
+        // pushes (thin clients see the daemon machine's chips) — no GUI poll.
 
         // Bridge: std thread blocks on daemon events → unbounded mpsc → gpui task.
         let (async_tx, mut async_rx) = futures::channel::mpsc::unbounded::<GuiEvent>();
@@ -668,7 +643,19 @@ impl SeanceApp {
             GuiEvent::Error { message } => {
                 eprintln!("[seance gui] daemon error: {message}");
             }
-            GuiEvent::Ack { .. } | GuiEvent::Pong => {}
+            GuiEvent::HostWidgets { widgets } => {
+                // Daemon-side poller push: replace chip state wholesale.
+                if let Ok(snaps) =
+                    serde_json::from_value::<Vec<crate::host::HostWidgetSnap>>(widgets)
+                {
+                    self.host.ever_ok = self.host.ever_ok || !snaps.is_empty();
+                    self.host.widgets = snaps;
+                    cx.notify();
+                }
+            }
+            // FsResult is routed to fs_call waiters inside gui_client and
+            // never reaches the app stream; ignore defensively.
+            GuiEvent::FsResult { .. } | GuiEvent::Ack { .. } | GuiEvent::Pong => {}
         }
     }
 
@@ -1048,13 +1035,15 @@ impl SeanceApp {
                 p.tiled = info.tiled;
                 p.command = info.command.clone();
                 p.cwd = info.cwd.clone();
+                p.scratchpad = info.scratchpad.clone();
             }
             return;
         }
         if info.kind == "file" {
             let path =
                 std::path::PathBuf::from(info.file.clone().unwrap_or_else(|| info.command.clone()));
-            let view = cx.new(|cx| crate::fileview::FileView::new(path.clone(), cx));
+            let view =
+                cx.new(|cx| crate::fileview::FileView::new(path.clone(), self.client.clone(), cx));
             self.panes.push(Pane {
                 name: info.name.clone(),
                 slug: info.slug.clone(),
@@ -1062,6 +1051,7 @@ impl SeanceApp {
                 cwd: info.cwd.clone(),
                 command: info.command.clone(),
                 tiled: info.tiled,
+                scratchpad: info.scratchpad.clone(),
                 body: PaneBody::File { view },
                 popped: None,
             });
@@ -1077,6 +1067,7 @@ impl SeanceApp {
             cwd: info.cwd.clone(),
             command: info.command.clone(),
             tiled: info.tiled,
+            scratchpad: info.scratchpad.clone(),
             body: PaneBody::Remote { terminal, view },
             popped: None,
         });
@@ -1414,7 +1405,7 @@ impl SeanceApp {
                 .iter()
                 .find(|p| p.slug == slug)
                 .map(|p| p.workspace.clone());
-            events::log(
+            self.client.log_event(
                 "human",
                 ws.as_deref(),
                 Some(slug),
@@ -1603,7 +1594,7 @@ impl SeanceApp {
             if let Some(pane) = self.panes.iter().find(|p| p.slug == slug) {
                 pane.focus_content(window, cx);
             }
-            events::log(
+            self.client.log_event(
                 "human",
                 self.panes
                     .iter()
@@ -1628,13 +1619,14 @@ impl SeanceApp {
         if self.whisper.as_ref().is_some_and(|(s, _)| s == slug) {
             self.whisper = None;
         }
+        let pad_path = pane.scratchpad.clone();
         let drawer =
-            cx.new(|cx| ScratchpadDrawer::new(&self.store, slug.to_string(), title, window, cx));
+            cx.new(|cx| ScratchpadDrawer::new(self.client.clone(), pad_path, title, window, cx));
         // Focus the notes editor.
         let focus = drawer.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         self.flipped = Some((slug.to_string(), drawer));
-        events::log(
+        self.client.log_event(
             "human",
             Some(&ws),
             Some(slug),
@@ -1705,7 +1697,8 @@ impl SeanceApp {
         cx: &mut Context<Self>,
     ) {
         if let Some(pane) = self.panes.iter().find(|p| p.slug == slug) {
-            events::log("human", Some(&pane.workspace), Some(slug), kind, detail);
+            self.client
+                .log_event("human", Some(&pane.workspace), Some(slug), kind, detail);
             if let Some(rt) = pane.remote_terminal() {
                 rt.read(cx).inject(text.to_string(), true);
                 self.touch(slug, "whispered", "you", cx);
@@ -1957,7 +1950,12 @@ impl Render for SeanceApp {
                 cx.listener(|this, _, _, cx| {
                     if this.sash_drag.is_some() {
                         this.sash_drag = None;
-                        save_layout_file(this.split_ratio, &this.pane_weights, &this.row_weights);
+                        save_layout_daemon(
+                            &this.client,
+                            this.split_ratio,
+                            &this.pane_weights,
+                            &this.row_weights,
+                        );
                         cx.notify();
                     }
                 }),
