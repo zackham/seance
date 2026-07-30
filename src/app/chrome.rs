@@ -323,6 +323,7 @@ pub(super) fn render_pane(
     whisper: Option<&Entity<InputState>>,
     flipped: Option<&Entity<ScratchpadDrawer>>,
     is_zoomed: bool,
+    phone_linked: bool,
     cx: &Context<SeanceApp>,
 ) -> impl IntoElement {
     let is_active = active == Some(pane.slug.as_str());
@@ -582,7 +583,7 @@ pub(super) fn render_pane(
                 })
                 // Phone: one-button telegram topic (vita seam).
                 .when(has_terminal, |d| {
-                    let linked = SeanceApp::phone_linked(&slug).is_some();
+                    let linked = phone_linked;
                     d.child(
                         div()
                             .id(SharedString::from(format!("phone-{slug}")))

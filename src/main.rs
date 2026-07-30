@@ -16,6 +16,7 @@ mod pane;
 mod picker;
 mod popout;
 mod prompts;
+mod remote_cache;
 mod remote_term;
 mod remote_term_view;
 mod runtime;

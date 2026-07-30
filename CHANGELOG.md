@@ -19,6 +19,35 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+### Added
+
+- **Thin-client / remote mode** (docs/REMOTE.md) — run the GUI on one machine
+  (including macOS) against a daemon on another, over a supervised
+  ssh-forwarded unix socket. VNC-substitute intent: identical experience on
+  both ends.
+  - **Launch picker**: with no daemon reachable, choose "connect to remote
+    host" (type an ssh destination) or "run locally"; the choice persists at
+    `~/.config/seance/launch.json` and prefills next launch. CLI overrides:
+    `seance --remote <host>` / `seance --local`.
+  - **Tunnel supervisor**: seance spawns and supervises the
+    `ssh -N -L` forward (BatchMode, keepalives, respawn with backoff),
+    auto-starts the remote daemon (`seance _ensure-daemon` over ssh), and
+    tears the tunnel down with the GUI (quit hook; PDEATHSIG on Linux).
+    Auth failures print a copy-pasteable `autossh` stopgap.
+  - **Strict version handshake**: the daemon refuses `ctl`/`gui` clients whose
+    build doesn't exactly match — cross-machine skew fails loudly instead of
+    corrupting the protocol (`handoff`/`upgrade` roles exempt).
+  - **Everything from the daemon** (fs bridge): file panes (content, watch,
+    snapshot history), scratchpads, the shared layout (all windows now share
+    tiling via the daemon state dir), host widget chips (polled + selected
+    daemon-side, pushed to every window), and GUI event-log writes (human UI
+    actions land in the daemon's flight recorder). No GUI-side workspace IO
+    remains; bridge ops run off the input path on both ends.
+  - **macOS support**: portable uid/socket paths, `open` vs `xdg-open`,
+    `ps` vs `/proc`; the pinned gpui revs build clean on darwin.
+  - `SEANCE_SOCKET` targets any `seance ctl` at a forwarded socket; the
+    daemon always binds its own local path (`bind_socket_path`).
+
 ### Fixed
 
 - **Focus after new workspace / summon** — finishing the workspace-name

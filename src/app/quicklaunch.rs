@@ -1,7 +1,8 @@
 //! Configurable quicklaunch strip: one-click "terminal in DIR running CMD"
 //! buttons in the sidebar, above the host-bridge (claude accounts) strip.
 //!
-//! Config: `~/.config/seance/quicklaunch.json` — a JSON array:
+//! Config: `~/.config/seance/quicklaunch.json` on the DAEMON machine (read
+//! and written over the fs bridge, off the UI thread) — a JSON array:
 //! ```json
 //! [
 //!   {"name": "vita", "cwd": "~/work/vita", "command": "claude"},
@@ -55,9 +56,9 @@ pub(super) struct QuickLaunchEditor {
     pub command: Entity<InputState>,
 }
 
-fn quicklaunch_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(shellexpand::tilde("~/.config/seance/quicklaunch.json").into_owned())
-}
+/// Bridge path (tilde expands DAEMON-side): the config lives on the daemon
+/// machine so every thin client sees the same strip.
+const QUICKLAUNCH_PATH: &str = "~/.config/seance/quicklaunch.json";
 
 fn parse_quicklaunch(s: &str) -> Result<Vec<QuickLaunchEntry>, serde_json::Error> {
     serde_json::from_str(s)
@@ -123,9 +124,12 @@ pub(super) fn reorder_entry(entries: &mut Vec<QuickLaunchEntry>, moved: &str, be
 }
 
 impl SeanceApp {
-    /// Cheap hot-reload: stat at most every 2s, re-parse only on mtime change.
-    /// Called from render() — a bad edit keeps the last good entries.
-    pub(super) fn reload_quicklaunch_if_stale(&mut self) {
+    /// Hot-reload of the DAEMON-side config: called from render(), but the
+    /// bridge stat/read runs on the background executor — render only
+    /// schedules a check (throttled to ~2s) and applies results on a later
+    /// frame. A bad edit keeps the last good entries; a bridge failure keeps
+    /// current state and retries next tick.
+    pub(super) fn reload_quicklaunch_if_stale(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         if self
             .quicklaunch_checked
@@ -134,41 +138,66 @@ impl SeanceApp {
             return;
         }
         self.quicklaunch_checked = Some(now);
-        let path = quicklaunch_path();
-        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        if mtime == self.quicklaunch_mtime {
-            return;
-        }
-        self.quicklaunch_mtime = mtime;
-        if mtime.is_none() {
-            self.quicklaunch.clear();
-            return;
-        }
-        match std::fs::read_to_string(&path) {
-            Ok(s) => match parse_quicklaunch(&s) {
-                Ok(v) => self.quicklaunch = v,
-                Err(e) => {
-                    eprintln!("[seance gui] quicklaunch.json parse error: {e} (keeping previous)")
+        let client = std::sync::Arc::clone(&self.client);
+        let known = self.quicklaunch_mtime;
+        cx.spawn(async move |this, cx| {
+            // (new mtime, parsed entries; entries None = keep previous).
+            type Outcome = (Option<u64>, Option<Vec<QuickLaunchEntry>>);
+            let outcome: Option<Outcome> = cx
+                .background_executor()
+                .spawn(async move {
+                    // File-missing = None; exists-with-unreadable-mtime = Some(0).
+                    let cur = match client.fs_stat(QUICKLAUNCH_PATH) {
+                        Ok(stat) => stat.map(|m| m.unwrap_or(0)),
+                        Err(_) => return None, // bridge down — retry later
+                    };
+                    if cur == known {
+                        return None;
+                    }
+                    if cur.is_none() {
+                        return Some((None, Some(Vec::new())));
+                    }
+                    match client.fs_read_string(QUICKLAUNCH_PATH) {
+                        Ok((s, _)) => match parse_quicklaunch(&s) {
+                            Ok(v) => Some((cur, Some(v))),
+                            Err(e) => {
+                                eprintln!(
+                                    "[seance gui] quicklaunch.json parse error: {e} \
+                                     (keeping previous)"
+                                );
+                                Some((cur, None))
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("[seance gui] quicklaunch.json read error: {e}");
+                            None
+                        }
+                    }
+                })
+                .await;
+            let Some((mtime, entries)) = outcome else {
+                return;
+            };
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |app: &mut SeanceApp, cx| {
+                app.quicklaunch_mtime = mtime;
+                if let Some(v) = entries {
+                    if app.quicklaunch != v {
+                        app.quicklaunch = v;
+                        cx.notify();
+                    }
                 }
-            },
-            Err(e) => eprintln!("[seance gui] quicklaunch.json read error: {e}"),
-        }
+            });
+        })
+        .detach();
     }
 
-    /// Persist `self.quicklaunch` to disk (pretty JSON, atomic temp+rename in
-    /// the same dir — mirrors `state.rs::save`) and re-arm the mtime so the next
-    /// `reload_quicklaunch_if_stale` doesn't re-read our own write. Best-effort:
-    /// a write failure logs and leaves in-memory state intact.
-    pub(super) fn save_quicklaunch(&mut self) {
-        let path = quicklaunch_path();
-        let Some(dir) = path.parent() else {
-            eprintln!("[seance gui] quicklaunch.json path has no parent dir");
-            return;
-        };
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("[seance gui] quicklaunch.json mkdir error: {e}");
-            return;
-        }
+    /// Persist `self.quicklaunch` to the DAEMON config (bridge write is
+    /// atomic daemon-side) from a background task, then adopt the returned
+    /// mtime so the hot-reload doesn't re-read our own write. Best-effort: a
+    /// failure logs and leaves in-memory state intact (the strip keeps
+    /// working; the edit just isn't durable).
+    pub(super) fn save_quicklaunch(&mut self, cx: &mut Context<Self>) {
         let json = match serde_json::to_string_pretty(&self.quicklaunch) {
             Ok(j) => j,
             Err(e) => {
@@ -176,26 +205,33 @@ impl SeanceApp {
                 return;
             }
         };
-        // Temp file in the SAME directory so the rename is atomic (same fs).
-        let tmp = dir.join(format!(".quicklaunch.json.tmp.{}", std::process::id()));
-        if let Err(e) = std::fs::write(&tmp, &json) {
-            let _ = std::fs::remove_file(&tmp);
-            eprintln!("[seance gui] quicklaunch.json write error: {e}");
-            return;
-        }
-        if let Err(e) = std::fs::rename(&tmp, &path) {
-            let _ = std::fs::remove_file(&tmp);
-            eprintln!("[seance gui] quicklaunch.json rename error: {e}");
-            return;
-        }
-        // Re-arm mtime so the hot-reload sees no change (harmless if it did).
-        self.quicklaunch_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let client = std::sync::Arc::clone(&self.client);
+        cx.spawn(async move |this, cx| {
+            let written = cx
+                .background_executor()
+                .spawn(async move {
+                    match client.fs_write(QUICKLAUNCH_PATH, json.as_bytes()) {
+                        Ok(mtime) => Some(mtime.unwrap_or(0)),
+                        Err(e) => {
+                            eprintln!("[seance gui] quicklaunch.json write error: {e}");
+                            None
+                        }
+                    }
+                })
+                .await;
+            let Some(mtime) = written else { return };
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |app: &mut SeanceApp, _| {
+                app.quicklaunch_mtime = Some(mtime);
+            });
+        })
+        .detach();
     }
 
     /// Context-menu "remove": drop the entry and persist.
     pub(super) fn quicklaunch_remove(&mut self, name: &str, cx: &mut Context<Self>) {
         remove_entry(&mut self.quicklaunch, name);
-        self.save_quicklaunch();
+        self.save_quicklaunch(cx);
         cx.notify();
     }
 
@@ -210,7 +246,7 @@ impl SeanceApp {
             return;
         }
         reorder_entry(&mut self.quicklaunch, moved, before);
-        self.save_quicklaunch();
+        self.save_quicklaunch(cx);
         cx.notify();
     }
 
@@ -304,7 +340,7 @@ impl SeanceApp {
         };
         let original = ed.original.clone();
         upsert_entry(&mut self.quicklaunch, original.as_deref(), entry);
-        self.save_quicklaunch();
+        self.save_quicklaunch(cx);
         self.quicklaunch_editor = None;
         cx.notify();
     }

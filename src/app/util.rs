@@ -2,8 +2,6 @@
 //! grid decode, tooltips, selection/DnD hygiene, status colors, time, and the
 //! best-effort telegram status bridge.
 
-use std::path::PathBuf;
-
 use gpui::{div, prelude::*, Context, Render, Window};
 use gpui_component::{GlobalState, WindowExt as _};
 
@@ -144,63 +142,48 @@ pub(super) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// If `~/.local/share/seance/scratch/<slug>.telegram.json` exists, post status
-/// to that topic via vita (best-effort, never blocks the GUI).
-pub(super) fn telegram_status_bridge(slug: &str, state: &str, note: Option<&str>) {
-    let path = PathBuf::from(
-        shellexpand::tilde(&format!(
-            "~/.local/share/seance/scratch/{slug}.telegram.json"
-        ))
-        .into_owned(),
-    );
-    let Ok(bytes) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes) else {
-        return;
-    };
-    let Some(topic_id) = v
-        .get("topic_id")
-        .and_then(|t| t.as_str())
-        .map(|s| s.to_string())
-    else {
-        return;
-    };
+/// Single-quote a string for `sh -c` embedding.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// If `~/.local/share/seance/scratch/<slug>.telegram.json` exists on the
+/// DAEMON machine, post status to that topic via vita — bind read and vita
+/// call both run daemon-side over the fs bridge (agents + sidecars live
+/// there). Best-effort, fire-and-forget on a plain thread: never blocks the
+/// GUI, all failures are silently dropped.
+pub(super) fn telegram_status_bridge(
+    client: std::sync::Arc<crate::gui_client::GuiClient>,
+    slug: &str,
+    state: &str,
+    note: Option<&str>,
+) {
+    let path = super::SeanceApp::phone_bind_path(slug);
     let text = match note {
         Some(n) if !n.is_empty() => format!("seance `{slug}` → *{state}*: {n}"),
         _ => format!("seance `{slug}` → *{state}*"),
     };
     std::thread::spawn(move || {
-        let input = serde_json::json!({"topic_id": topic_id, "text": text});
-        let input_s = input.to_string();
-        let vita = PathBuf::from(shellexpand::tilde("~/work/vita").into_owned());
-        let run = vita.join("run");
-        let mut cmd = if run.exists() {
-            let mut c = std::process::Command::new(&run);
-            c.current_dir(&vita);
-            c.args([
-                "capabilities",
-                "call",
-                "vita.telegram.send",
-                "--input",
-                &input_s,
-            ]);
-            c
-        } else {
-            let mut c = std::process::Command::new("vita");
-            c.args([
-                "capabilities",
-                "call",
-                "vita.telegram.send",
-                "--input",
-                &input_s,
-            ]);
-            c
+        let Ok((bytes, _)) = client.fs_read_string(&path) else {
+            return;
         };
-        let _ = cmd
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes) else {
+            return;
+        };
+        let Some(topic_id) = v.get("topic_id").and_then(|t| t.as_str()) else {
+            return;
+        };
+        let input = serde_json::json!({"topic_id": topic_id, "text": text});
+        let args = format!(
+            "capabilities call vita.telegram.send --input {}",
+            sh_quote(&input.to_string())
+        );
+        // Prefer ~/work/vita/run on the daemon box; fall back to a PATH vita.
+        let cmd = format!(
+            "if [ -x \"$HOME/work/vita/run\" ]; then cd \"$HOME/work/vita\" && ./run {args}; \
+             else vita {args}; fi >/dev/null 2>&1"
+        );
+        let _ = client.shell(&cmd);
     });
 }
 
@@ -261,6 +244,14 @@ mod tests {
         assert!(!same_color(idle, unknown));
         // blocked/risky share danger by design.
         assert!(same_color(blocked, risky));
+    }
+
+    #[test]
+    fn sh_quote_escapes_single_quotes() {
+        assert_eq!(sh_quote("plain"), "'plain'");
+        assert_eq!(sh_quote("a'b"), r"'a'\''b'");
+        // JSON payloads (double quotes) ride through untouched inside 's.
+        assert_eq!(sh_quote(r#"{"k":"v"}"#), r#"'{"k":"v"}'"#);
     }
 
     #[test]

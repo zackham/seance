@@ -1,8 +1,8 @@
 //! Scratchpad / pad drawer and the one-button telegram "phone" spine for a
-//! pane: reading the pad + task sidecar off disk, the phone-bind sidecar, and
-//! rendering the pad inspector drawer.
-
-use std::path::PathBuf;
+//! pane: reading the pad + task sidecar (DAEMON-machine files, via the
+//! render-safe `RemoteCache`), the phone-bind sidecar, and rendering the pad
+//! inspector drawer. Data is at most one ~2s refresh tick stale — same feel
+//! as the old local-disk poll.
 
 use gpui::{div, prelude::*, Context, SharedString};
 
@@ -19,46 +19,48 @@ impl SeanceApp {
         cx.notify();
     }
 
-    /// Read pad body + task sidecar from disk (daemon-owned paths).
-    fn load_pad_bundle(slug: &str) -> (String, Option<String>, Option<serde_json::Value>) {
-        let base = PathBuf::from(shellexpand::tilde("~/.local/share/seance/scratch").into_owned());
-        let pad_path = base.join(format!("{slug}.md"));
-        let pad = std::fs::read_to_string(&pad_path).unwrap_or_else(|_| String::new());
-        let task_id = std::fs::read_to_string(base.join(format!("{slug}.taskid")))
-            .ok()
+    /// Bridge path (tilde expands DAEMON-side) for a scratch sidecar.
+    fn scratch_path(slug: &str, ext: &str) -> String {
+        format!("~/.local/share/seance/scratch/{slug}.{ext}")
+    }
+
+    /// Read pad body + task sidecar (daemon files, via cache — render-safe).
+    fn load_pad_bundle(&self, slug: &str) -> (String, Option<String>, Option<serde_json::Value>) {
+        let pad = self
+            .remote_cache
+            .get(&Self::scratch_path(slug, "md"))
+            .unwrap_or_default();
+        let task_id = self
+            .remote_cache
+            .get(&Self::scratch_path(slug, "taskid"))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let task_json = std::fs::read_to_string(base.join(format!("{slug}.task.json")))
-            .ok()
+        let task_json = self
+            .remote_cache
+            .get(&Self::scratch_path(slug, "task.json"))
             .and_then(|s| serde_json::from_str(&s).ok());
         (pad, task_id, task_json)
     }
 
-    fn phone_bind_path(slug: &str) -> PathBuf {
-        PathBuf::from(
-            shellexpand::tilde(&format!(
-                "~/.local/share/seance/scratch/{slug}.telegram.json"
-            ))
-            .into_owned(),
-        )
+    pub(super) fn phone_bind_path(slug: &str) -> String {
+        Self::scratch_path(slug, "telegram.json")
     }
 
-    fn phone_bind_json(slug: &str) -> Option<serde_json::Value> {
-        let p = Self::phone_bind_path(slug);
-        let bytes = std::fs::read_to_string(&p).ok()?;
+    fn phone_bind_json(&self, slug: &str) -> Option<serde_json::Value> {
+        let bytes = self.remote_cache.get(&Self::phone_bind_path(slug))?;
         serde_json::from_str(&bytes).ok()
     }
 
-    pub(super) fn phone_linked(slug: &str) -> Option<String> {
-        Self::phone_bind_json(slug).and_then(|v| {
+    pub(super) fn phone_linked(&self, slug: &str) -> Option<String> {
+        self.phone_bind_json(slug).and_then(|v| {
             v.get("topic_id")
                 .and_then(|t| t.as_str())
                 .map(|s| s.to_string())
         })
     }
 
-    fn phone_link(slug: &str) -> Option<String> {
-        Self::phone_bind_json(slug).and_then(|v| {
+    fn phone_link(&self, slug: &str) -> Option<String> {
+        self.phone_bind_json(slug).and_then(|v| {
             v.get("link")
                 .and_then(|t| t.as_str())
                 .map(|s| s.to_string())
@@ -69,8 +71,8 @@ impl SeanceApp {
     pub(super) fn phone_pane(&mut self, slug: &str, cx: &mut Context<Self>) {
         let slug = slug.to_string();
         // If already linked, open telegram if we have a link + pad drawer.
-        if let Some(tid) = Self::phone_linked(&slug) {
-            if let Some(link) = Self::phone_link(&slug) {
+        if let Some(tid) = self.phone_linked(&slug) {
+            if let Some(link) = self.phone_link(&slug) {
                 crate::sysopen::open_detached(&link);
             }
             crate::desktop_notify::notify(
@@ -80,25 +82,34 @@ impl SeanceApp {
             self.open_pad_drawer(&slug, cx);
             return;
         }
-        // Off UI thread — vita open_topic can take seconds.
+        // Off UI thread — vita open_topic can take seconds. The local `seance`
+        // binary is correct here: it inherits SEANCE_SOCKET and reaches the
+        // right daemon. After success, pull the fresh bind file over the
+        // bridge (still on the background executor) so the UI update below
+        // sees the new topic without waiting for a refresh tick.
         let slug_bg = slug.clone();
+        let cache = std::sync::Arc::clone(&self.remote_cache);
         cx.spawn(async move |this, cx| {
             let out = cx
                 .background_executor()
                 .spawn(async move {
-                    std::process::Command::new("seance")
+                    let out = std::process::Command::new("seance")
                         .args(["ctl", "phone", &slug_bg])
-                        .output()
+                        .output();
+                    if matches!(&out, Ok(o) if o.status.success()) {
+                        let _ = cache.fetch_now(&SeanceApp::phone_bind_path(&slug_bg));
+                    }
+                    out
                 })
                 .await;
             let Some(this) = this.upgrade() else { return };
             this.update(cx, |app, cx| {
                 match out {
                     Ok(o) if o.status.success() => {
-                        let topic = Self::phone_linked(&slug).unwrap_or_else(|| {
+                        let topic = app.phone_linked(&slug).unwrap_or_else(|| {
                             String::from_utf8_lossy(&o.stdout).trim().to_string()
                         });
-                        if let Some(link) = Self::phone_link(&slug) {
+                        if let Some(link) = app.phone_link(&slug) {
                             crate::sysopen::open_detached(&link);
                         }
                         crate::desktop_notify::notify(
@@ -139,8 +150,8 @@ impl SeanceApp {
             .map(|p| p.name.clone())
             .unwrap_or_else(|| slug.to_string());
         let st = self.statuses.get(slug);
-        let (pad, task_id, task_json) = Self::load_pad_bundle(slug);
-        let phone = Self::phone_linked(slug);
+        let (pad, task_id, task_json) = self.load_pad_bundle(slug);
+        let phone = self.phone_linked(slug);
         let status_line = match st {
             Some(s) => match &s.note {
                 Some(n) if !n.is_empty() => format!("{} · {n}", s.state),

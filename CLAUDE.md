@@ -50,7 +50,12 @@ src/runtime/           protocol.rs (wire types), pty_session.rs (daemon PTY
                        via alacritty_terminal), snapshot.rs (grid encoding)
 src/ctl/               the CLI client: mod.rs, parse.rs, wait.rs, print.rs, phone.rs
 src/control.rs         control-plane wire types + serde
-src/gui_client.rs      GUI→daemon request client
+src/gui_client.rs      GUI→daemon request client + fs-bridge fs_call plumbing
+src/tunnel.rs          thin-client ssh -N -L forward supervisor (docs/REMOTE.md)
+src/launch.rs          launch preference (local vs remote host, persisted)
+src/picker.rs          startup picker window (choose daemon location)
+src/sysopen.rs         portability helpers (open/xdg-open, ps//proc, getuid)
+src/daemon/fsbridge.rs daemon side of the fs bridge + host widget poller
 src/remote_term*.rs    daemon-backed terminal model + GPUI view
 src/term_shared.rs     TerminalEvent/Ghost/keystroke_bytes shared by remote path
 ```
@@ -59,6 +64,16 @@ There is **no local-PTY path**: the old in-GUI `terminal.rs`/`terminal_view.rs`
 were deleted 2026-07-22 as unreachable (git history has them). All PTYs live
 in the daemon; the GUI renders `PaneBody::Remote`/`File` only. Do not
 reintroduce a local terminal without a product decision.
+
+**Thin-client invariant (0.10+, docs/REMOTE.md): the GUI never touches the
+local filesystem for workspace content or behavior-affecting config.** Files,
+pads, layout, host widgets, event-log writes all go through the daemon fs
+bridge (`GuiRequest::Fs` / `daemon/fsbridge.rs`); bridge calls are blocking
+and must never run on the render/UI thread (background executor + update —
+see fileview.rs / scratchpad.rs for the idiom). The GUI may run on macOS
+against a remote daemon; keep new code portable (use `sysopen.rs`, never
+`/proc` or `xdg-open` directly) and keep client/daemon versions in lockstep
+(strict hello gate).
 
 ## Module conventions (the split's contract — follow it)
 

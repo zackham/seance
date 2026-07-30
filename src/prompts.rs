@@ -99,19 +99,52 @@ fn builtins() -> Vec<PromptEntry> {
     ]
 }
 
-/// Load merged library (builtins + user file). User ids override builtins.
-pub fn load_all() -> Vec<PromptEntry> {
+/// Merge builtins with an optional user-file JSON blob (user ids win).
+/// Pure — the GUI feeds this daemon-fetched bytes from the remote cache;
+/// `load_all` feeds it the local file (ctl path).
+pub fn merge_with_user(user_json: Option<&str>) -> Vec<PromptEntry> {
     let mut by_id: std::collections::BTreeMap<String, PromptEntry> =
         builtins().into_iter().map(|p| (p.id.clone(), p)).collect();
-    let path = config_path();
-    if let Ok(bytes) = std::fs::read_to_string(&path) {
-        if let Ok(file) = serde_json::from_str::<PromptFile>(&bytes) {
+    if let Some(bytes) = user_json {
+        if let Ok(file) = serde_json::from_str::<PromptFile>(bytes) {
             for p in file.prompts {
                 by_id.insert(p.id.clone(), p);
             }
         }
     }
     by_id.into_values().collect()
+}
+
+/// Load merged library (builtins + LOCAL user file). CLI/ctl path — the GUI
+/// reads through `RemoteCache` + [`merge_with_user`] instead (daemon file).
+pub fn load_all() -> Vec<PromptEntry> {
+    merge_with_user(std::fs::read_to_string(config_path()).ok().as_deref())
+}
+
+/// Config path as a bridge string for the DAEMON machine (tilde expands
+/// daemon-side). Honors `SEANCE_STATE_DIR` when set (shared-env launches).
+pub fn remote_config_path() -> String {
+    if let Ok(dir) = std::env::var("SEANCE_STATE_DIR") {
+        if !dir.is_empty() {
+            return format!("{}/prompts.json", dir.trim_end_matches('/'));
+        }
+    }
+    "~/.config/seance/prompts.json".into()
+}
+
+/// Pretty JSON body for a fresh user file (example entry). Shared by the
+/// local `ensure_user_file` and the GUI's bridge write-if-missing.
+pub fn default_user_file_json() -> String {
+    let example = PromptFile {
+        prompts: vec![PromptEntry {
+            id: "my-standup".into(),
+            title: "my standup dump".into(),
+            body: "Dump a terse standup for the last day of work in this pane's cwd.".into(),
+            tags: vec!["personal".into()],
+            when_command: None,
+        }],
+    };
+    serde_json::to_string_pretty(&example).unwrap_or_else(|_| "{\"prompts\":[]}".into())
 }
 
 /// Fuzzy filter: all query tokens must appear in title/body/tags/id (case-insensitive).
@@ -146,18 +179,7 @@ pub fn ensure_user_file() -> PathBuf {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let example = PromptFile {
-            prompts: vec![PromptEntry {
-                id: "my-standup".into(),
-                title: "my standup dump".into(),
-                body: "Dump a terse standup for the last day of work in this pane's cwd.".into(),
-                tags: vec!["personal".into()],
-                when_command: None,
-            }],
-        };
-        if let Ok(s) = serde_json::to_string_pretty(&example) {
-            let _ = std::fs::write(&path, s);
-        }
+        let _ = std::fs::write(&path, default_user_file_json());
     }
     path
 }
@@ -173,6 +195,21 @@ mod tests {
         assert!(hit.iter().any(|p| p.id == "finish-remind"));
         let miss = filter(&all, "zzzz-nope");
         assert!(miss.is_empty());
+    }
+
+    #[test]
+    fn merge_user_overrides_builtin_and_adds() {
+        let user = r#"{"prompts":[
+            {"id":"arm","title":"custom arm","body":"x"},
+            {"id":"mine","title":"mine","body":"y"}
+        ]}"#;
+        let merged = merge_with_user(Some(user));
+        let arm = merged.iter().find(|p| p.id == "arm").unwrap();
+        assert_eq!(arm.title, "custom arm");
+        assert!(merged.iter().any(|p| p.id == "mine"));
+        // No user file → builtins only, and bad JSON degrades the same way.
+        assert_eq!(merge_with_user(None).len(), builtins().len());
+        assert_eq!(merge_with_user(Some("[not json")).len(), builtins().len());
     }
 
     #[test]

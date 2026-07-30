@@ -171,12 +171,16 @@ pub struct SeanceApp {
     empty_window: bool,
     /// Quicklaunch strip entries (~/.config/seance/quicklaunch.json).
     quicklaunch: Vec<QuickLaunchEntry>,
-    /// mtime of the config at last load — reload only on change.
-    quicklaunch_mtime: Option<std::time::SystemTime>,
+    /// Daemon-side mtime_ms of the config at last load — reload only on
+    /// change (None = file absent / never fetched).
+    quicklaunch_mtime: Option<u64>,
     /// Last stat check — throttles the mtime probe to every ~2s.
     quicklaunch_checked: Option<std::time::Instant>,
     /// Open quicklaunch create/edit modal (None = closed).
     quicklaunch_editor: Option<quicklaunch::QuickLaunchEditor>,
+    /// Render-safe cache of daemon-side files (pad sidecars, phone binds,
+    /// prompt library) — refreshed by a ~2s background loop.
+    remote_cache: Arc<crate::remote_cache::RemoteCache>,
 }
 
 /// Active sash drag state.
@@ -219,6 +223,7 @@ impl SeanceApp {
         } else {
             GuiClient::connect().expect("gui client connect to daemon")
         };
+        let remote_cache = Arc::new(crate::remote_cache::RemoteCache::new(Arc::clone(&client)));
 
         let mut app = SeanceApp {
             panes: Vec::new(),
@@ -263,8 +268,26 @@ impl SeanceApp {
             quicklaunch_mtime: None,
             quicklaunch_checked: None,
             quicklaunch_editor: None,
+            remote_cache,
         };
-        let _ = crate::prompts::ensure_user_file();
+        // Seed the prompt-library user file on the DAEMON machine (write-if-
+        // missing) and pre-warm the cache so the palette has user prompts by
+        // the first refresh tick. Plain thread: bridge calls block.
+        {
+            let client = Arc::clone(&app.client);
+            let cache = Arc::clone(&app.remote_cache);
+            std::thread::Builder::new()
+                .name("seance-prompts-seed".into())
+                .spawn(move || {
+                    let path = crate::prompts::remote_config_path();
+                    if let Ok(None) = client.fs_stat(&path) {
+                        let _ = client
+                            .fs_write(&path, crate::prompts::default_user_file_json().as_bytes());
+                    }
+                    let _ = cache.fetch_now(&path);
+                })
+                .ok();
+        }
         // Shared layout lives daemon-side (thin clients see the same tiling).
         // One blocking bridge call at boot; defaults on any failure.
         let (split, weights, row_weights) = load_layout_json(
@@ -302,6 +325,25 @@ impl SeanceApp {
                 this.update(cx, |app: &mut SeanceApp, cx| {
                     app.apply_gui_event_no_window(ev, cx);
                 });
+            }
+        })
+        .detach();
+
+        // Remote-cache refresh loop: every 2s, pull wanted daemon files on
+        // the background executor; repaint only when something changed.
+        let cache = Arc::clone(&app.remote_cache);
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(2000))
+                .await;
+            let c = Arc::clone(&cache);
+            let changed = cx
+                .background_executor()
+                .spawn(async move { c.refresh() })
+                .await;
+            let Some(this) = this.upgrade() else { break };
+            if changed {
+                this.update(cx, |_, cx| cx.notify());
             }
         })
         .detach();
@@ -573,7 +615,12 @@ impl SeanceApp {
                 if state == "needs-human" || state == "blocked" {
                     crate::desktop_notify::needs_human(&slug, note.as_deref());
                     // If this pane is phoned to telegram, post a one-liner.
-                    telegram_status_bridge(&slug, &state, note.as_deref());
+                    telegram_status_bridge(
+                        Arc::clone(&self.client),
+                        &slug,
+                        &state,
+                        note.as_deref(),
+                    );
                 }
                 self.note_workspace_status_event(&slug, &state);
                 self.statuses.insert(slug, PaneStatus { state, note });
@@ -1789,8 +1836,8 @@ impl Render for SeanceApp {
         let theme_bg = cx.theme().background;
         let _ = theme_bg;
 
-        // Quicklaunch config hot-reload (stat throttled to ~2s).
-        self.reload_quicklaunch_if_stale();
+        // Quicklaunch config hot-reload (background bridge stat, ~2s throttle).
+        self.reload_quicklaunch_if_stale(cx);
 
         // Summon arrives without a Window on the event path; open rename here.
         if self.pending_rename.is_some() {

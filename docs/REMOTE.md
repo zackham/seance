@@ -71,3 +71,4 @@ compile on darwin). Platform notes: `open` instead of `xdg-open`, `ps`
 instead of `/proc`, `libc::getuid()` for the socket suffix. Build the same
 way as Linux (`scripts/bootstrap-deps.sh` symlinks `deps/zed`, then
 `cargo build --release`).
+- known limitation: `seance ctl new -a <agent>` resolves the agent binary on the machine running ctl, not the daemon; use quicklaunch/GUI spawns (daemon-side) for cross-machine agent panes.

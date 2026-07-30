@@ -1,6 +1,7 @@
 //! Desktop notifications for attention routing (needs-human / ask).
 //!
-//! Fire-and-forget `notify-send` on Linux. Silent no-op if the binary is missing.
+//! Fire-and-forget `notify-send` on Linux, `osascript` on macOS. Silent
+//! no-op if the binary is missing.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +29,21 @@ pub fn notify(summary: &str, body: &str) {
     let summary = summary.to_string();
     let body = body.to_string();
     std::thread::spawn(move || {
+        if cfg!(target_os = "macos") {
+            // Quotes are escaped for the AppleScript string literals.
+            let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+            let script = format!(
+                "display notification \"{}\" with title \"{}\"",
+                esc(&body),
+                esc(&summary)
+            );
+            let _ = Command::new("osascript")
+                .args(["-e", &script])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            return;
+        }
         let _ = Command::new("notify-send")
             .args([
                 "--app-name=seance",

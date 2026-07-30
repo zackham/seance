@@ -155,6 +155,7 @@ impl SeanceApp {
                         None,
                         flipped,
                         true, // is_zoomed
+                        self.phone_linked(&pane.slug).is_some(),
                         cx,
                     )),
             )
@@ -281,6 +282,7 @@ impl SeanceApp {
                             None,
                             flipped_l,
                             false,
+                            self.phone_linked(&left.slug).is_some(),
                             cx,
                         )),
                 )
@@ -318,6 +320,7 @@ impl SeanceApp {
                             None,
                             flipped_r,
                             false,
+                            self.phone_linked(&right.slug).is_some(),
                             cx,
                         )),
                 )
@@ -405,6 +408,7 @@ impl SeanceApp {
                             None, // whisper retired
                             flipped,
                             false,
+                            self.phone_linked(&pane.slug).is_some(),
                             cx,
                         )),
                 );

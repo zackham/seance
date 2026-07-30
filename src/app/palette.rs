@@ -10,6 +10,14 @@ use crate::theme::SeancePalette;
 use super::{Drawer, PaletteMode, PaneStatus, SeanceApp};
 
 impl SeanceApp {
+    /// Prompt library, render-safe: builtins merged with the DAEMON-side user
+    /// file via the remote cache (seeded at boot, refreshed every ~2s — never
+    /// a blocking read on the UI thread).
+    fn prompt_entries(&self) -> Vec<crate::prompts::PromptEntry> {
+        let user = self.remote_cache.get(&crate::prompts::remote_config_path());
+        crate::prompts::merge_with_user(user.as_deref())
+    }
+
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = PaletteMode::Closed;
         // Return keys to the active terminal after overlay.
@@ -24,7 +32,7 @@ impl SeanceApp {
     pub(super) fn palette_move(&mut self, delta: i32) {
         let n = match &self.palette {
             PaletteMode::Prompts { query, .. } => {
-                crate::prompts::filter(&crate::prompts::load_all(), query).len()
+                crate::prompts::filter(&self.prompt_entries(), query).len()
             }
             PaletteMode::Jump { query, .. } => {
                 let q = query.trim().to_ascii_lowercase();
@@ -123,7 +131,7 @@ impl SeanceApp {
         match &self.palette {
             PaletteMode::Closed => {}
             PaletteMode::Prompts { query, selected } => {
-                let hits = crate::prompts::filter(&crate::prompts::load_all(), query);
+                let hits = crate::prompts::filter(&self.prompt_entries(), query);
                 if let Some(p) = hits.get(*selected) {
                     let body = p.body.clone();
                     self.inject_prompt_into_active(&body, cx);
@@ -168,7 +176,7 @@ impl SeanceApp {
             match &self.palette {
                 PaletteMode::Closed => return None,
                 PaletteMode::Prompts { query, selected } => {
-                    let all = crate::prompts::load_all();
+                    let all = self.prompt_entries();
                     let hits = crate::prompts::filter(&all, query);
                     let items: Vec<_> = hits
                         .into_iter()
