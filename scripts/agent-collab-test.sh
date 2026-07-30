@@ -4,7 +4,7 @@
 # This script does NOT drive workers itself. It only:
 #   1. opens a workspace + product task file panes
 #   2. spawns one orchestrator agent pane (claude by default)
-#   3. ⚡-arms it with SEANCE_ARM_PROMPT (exact text from src/app.rs — same as
+#   3. ⚡-arms it with SEANCE_ARM_PROMPT (exact text from src/app/actions.rs — same as
 #      the arm button), then sends a short task: spawn claude/grok/codex,
 #      run the product task, synthesize, finish
 #   4. waits for the orchestrator to status=done
@@ -90,14 +90,14 @@ via seance ctl (finish or pad + status-set — follow seance orientation if arme
 Stay in this repo. Do not spawn siblings.
 EOF
 
-# --- ⚡ arm prompt: EXACT copy of SEANCE_ARM_PROMPT in src/app.rs ---
+# --- ⚡ arm prompt: EXACT copy of SEANCE_ARM_PROMPT in src/app/actions.rs ---
 # Extracted at run time so the harness always tests the real arm button text.
 ARM_FILE="$RUN_DIR/arm-prompt.md"
 python3 - "$REPO" "$ARM_FILE" <<'PY'
 import re, sys
 from pathlib import Path
 repo, out = sys.argv[1], sys.argv[2]
-src = (Path(repo) / "src/app.rs").read_text()
+src = (Path(repo) / "src/app/actions.rs").read_text()
 i = src.index('const SEANCE_ARM_PROMPT')
 i = src.index('= "', i) + 3
 chunk = src[i:]
@@ -156,7 +156,7 @@ ORCH_SLUG=$(parse_created_slug "$out")
 log "orchestrator slug=$ORCH_SLUG"
 
 # Phase A: same inject as the ⚡ arm button
-log "⚡ arm orchestrator (SEANCE_ARM_PROMPT from src/app.rs)"
+log "⚡ arm orchestrator (SEANCE_ARM_PROMPT from src/app/actions.rs)"
 ctl send "$ORCH_SLUG" --file "$ARM_FILE" 2>&1 || {
   log "arm send failed — Enter nudge"
   ctl send-raw "$ORCH_SLUG" $'\r' 2>&1 || true

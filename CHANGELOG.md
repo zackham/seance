@@ -19,6 +19,8 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-30
+
 ### Added
 
 - **Thin-client / remote mode** (docs/REMOTE.md) — run the GUI on one machine

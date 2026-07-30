@@ -72,3 +72,11 @@ instead of `/proc`, `libc::getuid()` for the socket suffix. Build the same
 way as Linux (`scripts/bootstrap-deps.sh` symlinks `deps/zed`, then
 `cargo build --release`).
 - known limitation: `seance ctl new -a <agent>` resolves the agent binary on the machine running ctl, not the daemon; use quicklaunch/GUI spawns (daemon-side) for cross-machine agent panes.
+
+## Workspaces on a second machine
+
+A thin-client window follows the normal multi-window model: workspaces are
+exclusively owned by one window. A fresh mac window starts empty — pull the
+circles you want (sidebar pull menu, or collect-all to grab everything);
+back at the desk, collect-all there to bring them home. Sessions never move
+or restart — only which window renders them.

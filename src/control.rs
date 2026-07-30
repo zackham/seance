@@ -769,11 +769,16 @@ mod tests {
     }
 
     #[test]
-    fn socket_path_prefers_xdg_runtime_dir() {
-        // Note: this test reads the ambient env; it asserts the shape, not a
-        // specific dir, to stay hermetic across machines.
-        let p = socket_path();
-        assert!(p.to_string_lossy().ends_with("seance.sock"));
+    fn socket_path_has_seance_sock_shape() {
+        // Reads the ambient env; asserts the shape only, hermetic across
+        // machines: `$XDG_RUNTIME_DIR/seance.sock` on Linux desktops,
+        // `/tmp/seance-<uid>.sock` where XDG_RUNTIME_DIR is unset (macOS).
+        let p = socket_path().to_string_lossy().into_owned();
+        let name = p.rsplit('/').next().unwrap_or_default();
+        assert!(
+            name.starts_with("seance") && name.ends_with(".sock"),
+            "unexpected socket path: {p}"
+        );
     }
 
     #[test]
