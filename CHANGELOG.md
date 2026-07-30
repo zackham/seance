@@ -19,6 +19,14 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.10.3] — 2026-07-30
+
+### Added
+
+- **cmd+c / cmd+v in terminals on macOS** — native copy/paste chords work
+  alongside ctrl+shift+c/v (cmd never reaches the PTY, so nothing is stolen
+  from TUIs).
+
 ## [0.10.2] — 2026-07-30
 
 ### Fixed

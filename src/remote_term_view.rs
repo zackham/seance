@@ -446,7 +446,11 @@ impl RemoteTerminalView {
         }
 
         // Terminal paste/copy before other ctrl+shift app chords.
-        if ks.modifiers.control && ks.modifiers.shift {
+        // macOS: cmd+c / cmd+v are the native chords — same handlers. (cmd
+        // never reaches the PTY anyway, so this steals nothing from TUIs.)
+        let copy_paste_chord = (ks.modifiers.control && ks.modifiers.shift)
+            || (cfg!(target_os = "macos") && ks.modifiers.platform && !ks.modifiers.control);
+        if copy_paste_chord {
             match ks.key.as_str() {
                 "v" => {
                     if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
