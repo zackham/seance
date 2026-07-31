@@ -396,6 +396,14 @@ impl App {
     }
 
     fn on_keydown(self: &Rc<Self>, ev: web_sys::KeyboardEvent) {
+        // A focused text input (inline rename, quicklaunch editor, ask reply,
+        // login) owns the keyboard — its own handlers deal with Enter/Escape.
+        if let Some(active) = document().active_element() {
+            let tag = active.tag_name();
+            if tag == "INPUT" || tag == "TEXTAREA" {
+                return;
+            }
+        }
         // Chrome commands first (native keymap + alt-fallbacks; keymap.rs).
         if let Some(cmd) = keymap::command_for(&ev) {
             let actions = AppActions(Rc::clone(self));

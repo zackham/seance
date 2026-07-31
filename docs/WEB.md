@@ -71,9 +71,23 @@ error (by design).
   the web path. Future: daemon-side immediate push for the originating client
   (the native GUI's "typing hot" equivalent, moved daemon-side).
 
+## Chrome parity (2026-07-31)
+
+The native chrome is replicated sincerely: auto-sorted workspace lister
+(working band + touch recency, attention badges, inline rename, banish ×),
+◈+ create-workspace, quicklaunch strip (daemon-side json via the fs bridge,
+chips, editor modal, right-click), the claude-accounts host strip, footer
+(+ summon / ≋ activity / ? grimoire), per-row and per-tile context menus,
+zoom, and the native chord table — every ctrl+shift chord also binds its
+`alt+` twin because browsers reserve ctrl+shift+n/w (the grimoire documents
+both spellings; web ctrl+shift+p/alt+p = probe). Deliberate divergences:
+CSS pulse instead of the braille spinner, context-menu moves instead of
+drag-and-drop, no "send to new window".
+
 ## Not yet (honest gaps)
 
-- Scratchpad/file panes, host widgets, overview mode (all Fs-bridge chrome).
+- Scratchpad/file panes, overview mode, prompt/jump palettes, notes flip,
+  popout (native-only; listed in the grimoire).
 - Double-click word select; IME composition untested.
 - Touch/mobile keyboard (iOS Safari needs a hidden-input shim) — the intended
   base for the future native iOS client is `seance-core`, same as this client.
