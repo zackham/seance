@@ -19,6 +19,34 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.10.6] — 2026-07-30
+
+### Fixed
+
+- **Typing lag, part 3: the daemon's PTY I/O loop was the latency floor —
+  now event-driven.** Every PTY session thread ran a `sleep(8ms)` poll loop:
+  a keystroke waited up to 8ms just to be *written* to the PTY, and its echo
+  waited up to another 8ms to be *read* back — measured keystroke→grid-push
+  p50 11.7ms / p95 15.8ms inside the daemon, before the GUI ever saw a frame.
+  The loop now blocks in `poll(2)` on the PTY master + a self-pipe that every
+  write enqueue pokes. Measured after: **p50 0.3ms / p95 0.4ms** idle, and
+  **p50 0.4ms / p95 0.7ms / max 3.4ms** while three panes flooded full-rate
+  output (engine-mutex wait stayed ≤0.7ms — no contention). Side effect: 22
+  session threads no longer wake 125×/s each while idle.
+- **Keystroke echo frames bypass the 16ms selected-workspace grid throttle.**
+  A human `Input` clears the pane's last-push stamp, so the echo's Wakeup
+  pushes immediately instead of riding the coalescing timer. Bounded by
+  typing rate — output storms still throttle exactly as before.
+
+### Added
+
+- **Always-on typing-latency probes** (`src/latency_probe.rs`), reported as
+  5s aggregates tagged `[seance lat]`: daemon `input lockwait` / `input
+  handle` / `input→gridpush` (daemon stderr → daemon-upgrade.log), GUI
+  `key→grid-apply` / `key→paint` (gui.stderr.log). Per-session-event pump
+  probes are additionally gated behind `SEANCE_DEBUG_RENDER=1` (storms drive
+  that loop at 100k+ events/s).
+
 ## [0.10.5] — 2026-07-30
 
 ### Fixed

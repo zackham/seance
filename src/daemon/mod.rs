@@ -59,8 +59,26 @@ fn run_daemon_inner(args: Vec<String>) -> Result<()> {
         thread::Builder::new()
             .name("seance-events".into())
             .spawn(move || {
+                // Per-event probes only under SEANCE_DEBUG_RENDER: an output
+                // storm drives this loop at 100k+ events/s and the aggregate
+                // lock would become its own overhead.
+                let debug = std::env::var_os("SEANCE_DEBUG_RENDER").is_some();
                 while let Ok(ev) = event_rx.recv() {
-                    if let Ok(mut e) = eng.lock() {
+                    if debug {
+                        let t0 = std::time::Instant::now();
+                        if let Ok(mut e) = eng.lock() {
+                            crate::latency_probe::record(
+                                "daemon pump lockwait",
+                                t0.elapsed().as_micros() as u64,
+                            );
+                            let t1 = std::time::Instant::now();
+                            e.handle_session_event(ev);
+                            crate::latency_probe::record(
+                                "daemon pump handle",
+                                t1.elapsed().as_micros() as u64,
+                            );
+                        }
+                    } else if let Ok(mut e) = eng.lock() {
                         e.handle_session_event(ev);
                     }
                 }
@@ -395,7 +413,23 @@ fn serve_gui(
             continue;
         }
         let is_bye = matches!(req, GuiRequest::Bye);
-        let reply = engine.lock().unwrap().handle_gui(req, &window_id);
+        let is_input = if let GuiRequest::Input { pane, .. } = &req {
+            crate::latency_probe::mark("d_input", pane);
+            true
+        } else {
+            false
+        };
+        let t0 = std::time::Instant::now();
+        let mut eng = engine.lock().unwrap();
+        if is_input {
+            crate::latency_probe::record("daemon input lockwait", t0.elapsed().as_micros() as u64);
+        }
+        let t1 = std::time::Instant::now();
+        let reply = eng.handle_gui(req, &window_id);
+        if is_input {
+            crate::latency_probe::record("daemon input handle", t1.elapsed().as_micros() as u64);
+        }
+        drop(eng);
         if let Some(ev) = reply {
             let _ = tx.send(ev);
         }

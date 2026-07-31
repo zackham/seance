@@ -62,7 +62,7 @@ struct Listener {
     slug: String,
     tx: Sender<SessionEvent>,
     /// Write-back path for OSC replies / PtyWrite (must reach the PTY).
-    write_tx: Sender<IoMsg>,
+    write_tx: IoSender,
     title: Arc<Mutex<Option<String>>>,
 }
 
@@ -104,16 +104,15 @@ impl EventListener for Listener {
             // Ignoring these makes colors look wrong vs ghostty/alacritty.
             AlacEvent::ColorRequest(index, formatter) => {
                 let rgb = color_for_index(index);
-                let _ = self
-                    .write_tx
+                self.write_tx
                     .send(IoMsg::Write(formatter(rgb).into_bytes()));
             }
             AlacEvent::PtyWrite(s) => {
-                let _ = self.write_tx.send(IoMsg::Write(s.into_bytes()));
+                self.write_tx.send(IoMsg::Write(s.into_bytes()));
             }
             AlacEvent::ClipboardLoad(_, formatter) => {
                 // Best-effort empty clipboard (GUI owns the real clipboard).
-                let _ = self.write_tx.send(IoMsg::Write(formatter("").into_bytes()));
+                self.write_tx.send(IoMsg::Write(formatter("").into_bytes()));
             }
             _ => {}
         }
@@ -162,11 +161,33 @@ enum IoMsg {
     Shutdown { kill_child: bool },
 }
 
+/// Sender half of the io thread's mailbox plus its wake pipe. The io thread
+/// blocks in `poll(2)` on the PTY master + the wake pipe; every enqueue pokes
+/// the pipe so writes reach the PTY immediately instead of on the next poll
+/// tick (the old loop slept 8ms per iteration — that sleep WAS the typing
+/// latency floor: up to 8ms to write the key + up to 8ms to read the echo).
+#[derive(Clone)]
+struct IoSender {
+    tx: Sender<IoMsg>,
+    wake: Arc<OwnedFd>,
+}
+
+impl IoSender {
+    fn send(&self, msg: IoMsg) {
+        let _ = self.tx.send(msg);
+        // Non-blocking pipe; a full pipe already guarantees a pending wake.
+        let b = [1u8];
+        unsafe {
+            libc::write(self.wake.as_raw_fd(), b.as_ptr() as *const libc::c_void, 1);
+        }
+    }
+}
+
 /// One live terminal session.
 pub struct PtySession {
     pub slug: String,
     term: Arc<FairMutex<Term<Listener>>>,
-    io_tx: Sender<IoMsg>,
+    io_tx: IoSender,
     _io_thread: Option<JoinHandle<()>>,
     // Session-side owner of the child handle; the actual reap happens on the io
     // thread's clone. Held (not read) so the `Child` isn't solely owned by a
@@ -293,7 +314,7 @@ impl PtySession {
         thread::spawn(move || {
             // Let the I/O thread apply the bounce before restoring.
             thread::sleep(Duration::from_millis(30));
-            let _ = io_tx.send(IoMsg::Resize { cols, rows });
+            io_tx.send(IoMsg::Resize { cols, rows });
         });
     }
 
@@ -310,7 +331,12 @@ impl PtySession {
     ) -> Result<Self> {
         let title = Arc::new(Mutex::new(title_init));
         // I/O channel first so the Term listener can write OSC replies back.
-        let (io_tx, io_rx) = mpsc::channel::<IoMsg>();
+        let (tx, io_rx) = mpsc::channel::<IoMsg>();
+        let (wake_r, wake_w) = make_wake_pipe()?;
+        let io_tx = IoSender {
+            tx,
+            wake: Arc::new(wake_w),
+        };
         let listener = Listener {
             slug: slug.clone(),
             tx: event_tx.clone(),
@@ -359,6 +385,7 @@ impl PtySession {
                     master_fd_slot_io,
                     term_io,
                     io_rx,
+                    wake_r,
                     child_io,
                     child_pid_io,
                     exited_io,
@@ -408,7 +435,7 @@ impl PtySession {
     }
 
     pub fn write_bytes(&self, bytes: Vec<u8>) {
-        let _ = self.io_tx.send(IoMsg::Write(bytes));
+        self.io_tx.send(IoMsg::Write(bytes));
     }
 
     /// Record who last wrote stdin (for causal tint + event origin).
@@ -445,10 +472,10 @@ impl PtySession {
             let extra_enter = text.contains('\n');
             thread::spawn(move || {
                 thread::sleep(Duration::from_millis(180));
-                let _ = tx.send(IoMsg::Write(b"\r".to_vec()));
+                tx.send(IoMsg::Write(b"\r".to_vec()));
                 if extra_enter {
                     thread::sleep(Duration::from_millis(80));
-                    let _ = tx.send(IoMsg::Write(b"\r".to_vec()));
+                    tx.send(IoMsg::Write(b"\r".to_vec()));
                 }
             });
         }
@@ -459,7 +486,7 @@ impl PtySession {
         let rows = rows.max(2);
         *self.cols.lock().unwrap() = cols;
         *self.rows.lock().unwrap() = rows;
-        let _ = self.io_tx.send(IoMsg::Resize { cols, rows });
+        self.io_tx.send(IoMsg::Resize { cols, rows });
     }
 
     pub fn scroll_lines(&self, delta: i32) {
@@ -621,7 +648,7 @@ impl PtySession {
 
     /// Kill the child and stop the I/O thread.
     pub fn shutdown(&self) {
-        let _ = self.io_tx.send(IoMsg::Shutdown { kill_child: true });
+        self.io_tx.send(IoMsg::Shutdown { kill_child: true });
     }
 
     /// Prepare for handoff: stop I/O without killing the child; return the
@@ -634,7 +661,7 @@ impl PtySession {
     pub fn prepare_handoff(&self) -> Result<(OwnedFd, u32)> {
         self.handoff_release.store(true, Ordering::SeqCst);
         self.io_released.store(false, Ordering::SeqCst);
-        let _ = self.io_tx.send(IoMsg::Shutdown { kill_child: false });
+        self.io_tx.send(IoMsg::Shutdown { kill_child: false });
         // Wait until I/O thread has transferred the FD (not merely "slot empty",
         // which never happened on the old handoff path and burned 1s/pane).
         for _ in 0..200 {
@@ -669,7 +696,7 @@ impl Drop for PtySession {
     fn drop(&mut self) {
         if self.handoff_release.load(Ordering::SeqCst) || upgrade_in_progress() {
             // Don't kill the child — upgrade owns it now.
-            let _ = self.io_tx.send(IoMsg::Shutdown { kill_child: false });
+            self.io_tx.send(IoMsg::Shutdown { kill_child: false });
             return;
         }
         self.shutdown();
@@ -684,6 +711,7 @@ fn io_loop(
     master_fd_slot: Arc<Mutex<Option<RawFd>>>,
     term: Arc<FairMutex<Term<Listener>>>,
     io_rx: Receiver<IoMsg>,
+    wake_r: OwnedFd,
     child: Arc<Mutex<Option<Child>>>,
     child_pid: Arc<Mutex<Option<u32>>>,
     exited: Arc<AtomicBool>,
@@ -696,6 +724,9 @@ fn io_loop(
     let mut parser: Processor = Processor::new();
     let mut buf = [0u8; 65536];
     *master_fd_slot.lock().unwrap() = Some(master.as_raw_fd());
+    // Once the master EOFs/errors we stop polling it (a HUP'd fd would spin
+    // the poll loop); the loop stays alive on the wake pipe for Shutdown.
+    let mut master_open = true;
 
     loop {
         // Prefer control messages (esp. handoff Shutdown) over PTY reads so
@@ -761,29 +792,33 @@ fn io_loop(
         }
 
         // Non-blocking read from PTY.
-        match master.read(&mut buf) {
-            Ok(0) => {
-                if !exited.swap(true, Ordering::SeqCst) {
-                    let _ = event_tx.send(SessionEvent::Exited {
-                        slug: slug.clone(),
-                        code: None,
-                    });
+        if master_open {
+            match master.read(&mut buf) {
+                Ok(0) => {
+                    master_open = false;
+                    if !exited.swap(true, Ordering::SeqCst) {
+                        let _ = event_tx.send(SessionEvent::Exited {
+                            slug: slug.clone(),
+                            code: None,
+                        });
+                    }
                 }
-            }
-            Ok(n) => {
-                {
-                    let mut t = term.lock();
-                    parser.advance(&mut *t, &buf[..n]);
+                Ok(n) => {
+                    {
+                        let mut t = term.lock();
+                        parser.advance(&mut *t, &buf[..n]);
+                    }
+                    let _ = event_tx.send(SessionEvent::Wakeup { slug: slug.clone() });
                 }
-                let _ = event_tx.send(SessionEvent::Wakeup { slug: slug.clone() });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => {
-                if !exited.swap(true, Ordering::SeqCst) {
-                    let _ = event_tx.send(SessionEvent::Exited {
-                        slug: slug.clone(),
-                        code: None,
-                    });
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => {
+                    master_open = false;
+                    if !exited.swap(true, Ordering::SeqCst) {
+                        let _ = event_tx.send(SessionEvent::Exited {
+                            slug: slug.clone(),
+                            code: None,
+                        });
+                    }
                 }
             }
         }
@@ -821,8 +856,53 @@ fn io_loop(
             }
         }
 
-        thread::sleep(Duration::from_millis(8));
+        // Event-driven wait: PTY output or a wake-pipe poke returns instantly;
+        // the 250ms timeout only bounds child-exit detection for children that
+        // die without closing the PTY. This replaces the old 8ms sleep-poll,
+        // which put 0–8ms on every PTY write and another 0–8ms on the echo.
+        let mut fds = [
+            libc::pollfd {
+                fd: wake_r.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let nfds = if master_open { 2 } else { 1 };
+        unsafe {
+            libc::poll(fds.as_mut_ptr(), nfds as libc::nfds_t, 250);
+        }
+        if fds[0].revents & libc::POLLIN != 0 {
+            // Drain all pending pokes — one wake serves any number of sends.
+            let mut junk = [0u8; 64];
+            loop {
+                let r = unsafe {
+                    libc::read(
+                        wake_r.as_raw_fd(),
+                        junk.as_mut_ptr() as *mut libc::c_void,
+                        junk.len(),
+                    )
+                };
+                if r < junk.len() as isize {
+                    break;
+                }
+            }
+        }
     }
+}
+
+/// Non-blocking self-pipe for waking the io thread's `poll(2)`.
+fn make_wake_pipe() -> Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0 as libc::c_int; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
+    if rc != 0 {
+        bail!("pipe2 failed: {}", std::io::Error::last_os_error());
+    }
+    unsafe { Ok((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))) }
 }
 
 fn open_pty(cols: u16, rows: u16) -> Result<(OwnedFd, OwnedFd)> {

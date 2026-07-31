@@ -110,6 +110,9 @@ impl RemoteTerminal {
             g.seen = (snap.cols, snap.rows);
             g.stable = 2;
         }
+        if let Some(t0) = crate::latency_probe::transfer("g_key", "g_paint", &self.slug) {
+            crate::latency_probe::record("gui key→grid-apply", t0.elapsed().as_micros() as u64);
+        }
         self.snapshot = Arc::new(snap);
         cx.emit(TerminalEvent::Wakeup);
         // All visible panes paint live. Visibility is enforced upstream
@@ -146,6 +149,7 @@ impl RemoteTerminal {
     }
 
     pub fn write_bytes(&self, bytes: Vec<u8>) {
+        crate::latency_probe::mark("g_key", &self.slug);
         let _ = self.client.input(&self.slug, &bytes);
     }
 

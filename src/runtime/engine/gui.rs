@@ -409,6 +409,7 @@ impl Engine {
         if skip {
             return;
         }
+        crate::latency_probe::complete("d_input", &snap.pane, "daemon input→gridpush");
         let pane = snap.pane.clone();
         let ev = Self::grid_event(snap, damage.as_deref());
         self.send_grid_to_owners(&pane, ev);
@@ -885,6 +886,11 @@ impl Engine {
                         s.write_bytes(bytes);
                         s.bump_rev();
                     }
+                    // Human keystroke: let the echo frame bypass the 16ms grid
+                    // throttle — drop the last-push stamp so the next Wakeup
+                    // pushes immediately. Bounded by typing rate, so this never
+                    // reopens the output-storm path the throttle exists for.
+                    self.last_grid_push.remove(&pane);
                     if n >= 2 || is_ctrl {
                         events::log_ex(
                             "human",

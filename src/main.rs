@@ -11,6 +11,7 @@ mod events;
 mod fileview;
 mod gui_client;
 mod host;
+mod latency_probe;
 mod launch;
 mod pane;
 mod picker;
