@@ -397,7 +397,7 @@ impl SeanceApp {
                     .gap_1()
                     .children(by_workspace.into_iter().map(|(workspace, panes)| {
                         let selected = self.selected_workspace.as_deref() == Some(workspace.as_str());
-                        let pane_n = panes.len();
+                        let _pane_n = panes.len();
                         let ws_for_click = workspace.clone();
                         let ws_for_group_drop = workspace.clone();
                         let ws_for_pane_drop = workspace.clone();
@@ -417,6 +417,7 @@ impl SeanceApp {
                         } else {
                             div()
                                 .id(SharedString::from(format!("ws-{workspace}")))
+                                .group(SharedString::from(format!("wsgrp-{workspace}")))
                                 .px_2()
                                 .py_1p5()
                                 .flex()
@@ -572,14 +573,19 @@ impl SeanceApp {
                                     })
                                 })
                                 .child(
-                                    // Hover × to banish (only when selected header shows count otherwise).
+                                    // Banish ×: revealed only while the row is hovered
+                                    // (group-hover), so idle rows stay quiet.
                                     div()
                                         .id(SharedString::from(format!("ws-banish-{workspace}")))
                                         .flex_none()
                                         .px_1()
                                         .rounded_sm()
                                         .text_xs()
-                                        .text_color(SeancePalette::text_faint())
+                                        .text_color(gpui::transparent_black())
+                                        .group_hover(
+                                            SharedString::from(format!("wsgrp-{workspace}")),
+                                            |s| s.text_color(SeancePalette::text_faint()),
+                                        )
                                         .hover(|s| {
                                             s.text_color(SeancePalette::danger())
                                                 .bg(SeancePalette::surface())
@@ -594,17 +600,20 @@ impl SeanceApp {
                                         .tooltip(tip("banish workspace (kill all panes)"))
                                         .child("×"),
                                 )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_xs()
-                                        .text_color(if selected {
-                                            SeancePalette::text_dim()
-                                        } else {
-                                            SeancePalette::text_faint()
-                                        })
-                                        .child(format!("{pane_n}")),
-                                )
+                                .children({
+                                    // Time since last output (was: pane count).
+                                    self.workspace_activity_label(&workspace, cx).map(|label| {
+                                        div()
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(if selected {
+                                                SeancePalette::text_dim()
+                                            } else {
+                                                SeancePalette::text_faint()
+                                            })
+                                            .child(label)
+                                    })
+                                })
                                 .into_any_element()
                         };
                         div()

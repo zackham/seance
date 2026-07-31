@@ -73,6 +73,8 @@ pub struct ClientState {
     pub activity: std::collections::VecDeque<ActivityItem>,
     /// Slug of the most recent PaneSpawned (summon's rename-on-arrival hook).
     pub last_spawned: Option<String>,
+    /// Last pane output per workspace (ms) — sidebar shows time-since-update.
+    pub workspace_activity: HashMap<String, f64>,
 }
 
 /// One row of the host-bridge widget strip (native `HostWidgetSnap` shape).
@@ -140,6 +142,18 @@ pub struct ActivityItem {
 }
 
 const ACTIVITY_CAP: usize = 200;
+
+/// Coarse one-unit relative time for sidebar labels ("now","42s","3m","2h","4d").
+pub fn rel_label(delta_ms: f64) -> String {
+    let s = (delta_ms / 1000.0).max(0.0) as u64;
+    match s {
+        0..=4 => "now".into(),
+        5..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s / 60),
+        3600..=86_399 => format!("{}h", s / 3600),
+        _ => format!("{}d", s / 86_400),
+    }
+}
 
 /// Busy TUI title: braille spinner (U+2800..=U+28FF) as first non-space char —
 /// same detector as the native `title_looks_busy`.
@@ -256,6 +270,24 @@ impl ClientState {
         }
     }
 
+    fn note_pane_output(&mut self, slug: &str, now_ms: f64) {
+        if let Some(ws) = self.pane(slug).map(|p| p.workspace.clone()) {
+            self.workspace_activity.insert(ws, now_ms);
+        }
+    }
+
+    /// Sidebar right-edge label: time since last pane output; empty while a
+    /// working spinner owns the slot or before any output was observed.
+    pub fn activity_label(&self, ws: &str, now_ms: f64) -> String {
+        if self.workspace_has_working_agent(ws) {
+            return String::new();
+        }
+        match self.workspace_activity.get(ws) {
+            Some(at) => rel_label(now_ms - at),
+            None => String::new(),
+        }
+    }
+
     /// Local select bookkeeping: clear sticky unread for the circle.
     pub fn note_selected(&mut self, ws: &str) {
         self.workspace_unread.remove(ws);
@@ -349,6 +381,7 @@ impl ClientState {
             GuiEvent::Grid(snap) => {
                 let pane = snap.pane.clone();
                 self.grids.insert(pane.clone(), snap);
+                self.note_pane_output(&pane, now_ms);
                 Applied::Grid { pane }
             }
             GuiEvent::GridBin { pane, data_b64 } => {
@@ -360,6 +393,7 @@ impl ClientState {
                 match decode_grid_bin_onto(&data, base) {
                     Ok(snap) => {
                         self.grids.insert(pane.clone(), snap);
+                        self.note_pane_output(&pane, now_ms);
                         Applied::Grid { pane }
                     }
                     Err(_) => Applied::NeedRefresh { pane },

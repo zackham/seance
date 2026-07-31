@@ -448,7 +448,7 @@ fn content_type(path: &Path) -> &'static str {
 fn no_cache(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str(),
-        "html" | "htm" | "js" | "mjs"
+        "html" | "htm" | "js" | "mjs" | "wasm" | "css"
     )
 }
 

@@ -7,6 +7,18 @@
 use gpui::{Context, Window};
 
 use super::util::{now_ms, title_looks_busy};
+
+/// Coarse one-unit relative time for sidebar labels.
+pub(super) fn rel_label(delta_ms: u64) -> String {
+    let s = delta_ms / 1000;
+    match s {
+        0..=4 => "now".into(),
+        5..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s / 60),
+        3600..=86_399 => format!("{}h", s / 3600),
+        _ => format!("{}d", s / 86_400),
+    }
+}
 use super::{RenameTarget, SeanceApp};
 
 /// Badge on an *inactive* workspace header in the sidebar.
@@ -202,6 +214,17 @@ impl SeanceApp {
             return Some(WorkspaceAttention::Working);
         }
         self.workspace_unread.get(workspace).copied()
+    }
+
+    /// Sidebar right-edge label: relative time since the last pane output in
+    /// this circle ("now", "42s", "3m", "2h", "4d"); None while a working
+    /// agent's spinner owns the slot, or when nothing was ever observed.
+    pub(super) fn workspace_activity_label(&self, ws: &str, cx: &gpui::App) -> Option<String> {
+        if self.workspace_has_working_agent(ws, cx) {
+            return None;
+        }
+        let at = *self.workspace_activity.get(ws)?;
+        Some(rel_label(now_ms().saturating_sub(at)))
     }
 
     /// Move `slug` into `workspace`, positioned before pane `before_slug`

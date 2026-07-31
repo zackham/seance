@@ -161,6 +161,9 @@ pub struct SeanceApp {
     foreign_workspaces: Vec<ForeignWorkspace>,
     /// Last activity timestamp (ms) per workspace — input/inject/status, not click.
     workspace_touch: std::collections::HashMap<String, u64>,
+    /// Last observed pane output per workspace (ms) — sidebar shows "time
+    /// since last update" instead of a pane count.
+    workspace_activity: std::collections::HashMap<String, u64>,
     /// Workspaces that currently have a live-working agent (for falling-edge
     /// touch when work finishes → top of the non-working band).
     workspace_was_working: std::collections::HashSet<String>,
@@ -331,6 +334,7 @@ impl SeanceApp {
             windows: Vec::new(),
             foreign_workspaces: Vec::new(),
             workspace_touch: std::collections::HashMap::new(),
+            workspace_activity: std::collections::HashMap::new(),
             workspace_was_working: std::collections::HashSet::new(),
             workspace_unread: std::collections::HashMap::new(),
             overview: false,
@@ -722,16 +726,10 @@ impl SeanceApp {
                 self.pending_focus = Some(slug.clone());
                 let _ = self.client.set_focus(Some(slug.clone()), Some(ws));
                 self.focus_pane_if_possible(&slug, cx);
-                // UI summon: open the sidebar title in edit mode so the human
-                // can name it immediately. External `ctl new` leaves the flag
-                // false and does not steal rename focus. After rename, Enter
-                // restores focus to this pane via restore_keyboard_focus.
-                if self.rename_next_spawn {
-                    self.rename_next_spawn = false;
-                    // Rename steals focus; Enter restores via restore_keyboard_focus.
-                    self.pending_rename = Some(RenameTarget::Pane(slug));
-                }
-                // else: pending_focus above lands keys on the terminal next render.
+                // Summon lands keys on the TERMINAL immediately (pending_focus
+                // above) — no auto-rename steal; naming is a double-click away.
+                // (Was: open pane rename, which ate the first keystrokes.)
+                self.rename_next_spawn = false;
                 cx.notify();
             }
             GuiEvent::PaneKilled { slug } => {
@@ -889,6 +887,9 @@ impl SeanceApp {
     /// stay correct without the old 90%+ CPU tax from spinning TUIs.
     fn apply_grid_snap(&mut self, snap: GridSnapshot, cx: &mut Context<Self>) {
         let slug = snap.pane.clone();
+        if let Some(ws) = self.panes.iter().find(|p| p.slug == slug).map(|p| p.workspace.clone()) {
+            self.workspace_activity.insert(ws, crate::app::util::now_ms());
+        }
         if !self.overview {
             let ws = self.selected_workspace.as_deref();
             let visible = self.panes.iter().any(|p| {
@@ -1643,7 +1644,18 @@ impl SeanceApp {
             self.selected_workspace = Some(ws.clone());
             self.workspace_focus.insert(ws.clone(), slug.to_string());
             let _ = self.client.set_focus(Some(slug.to_string()), Some(ws));
-            pane.focus_content(window, cx);
+            // Flipped to notes: keep focus IN the editor — focusing the
+            // terminal here stole the caret on every click inside notes
+            // (the input's own mousedown places the cursor; we must not
+            // yank focus back to the face).
+            if self.flipped.as_ref().is_some_and(|(s, _)| s == slug) {
+                if let Some((_, drawer)) = self.flipped.as_ref() {
+                    let fh = drawer.read(cx).focus_handle(cx);
+                    window.focus(&fh, cx);
+                }
+            } else {
+                pane.focus_content(window, cx);
+            }
         }
         cx.notify();
     }

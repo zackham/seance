@@ -492,7 +492,7 @@ impl SeanceApp {
                         div()
                             .text_xs()
                             .text_color(SeancePalette::text_faint())
-                            .child("── quicklaunch ──"),
+                            .child("── vita quicklaunch ──"),
                     )
                     .child(
                         div()

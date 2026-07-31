@@ -85,6 +85,8 @@ pub struct App {
     blink_t0: Cell<f64>,
     /// Last blink on/off we painted the focused pane with.
     blink_last: Cell<bool>,
+    /// Last sidebar time-label refresh (ms) — ticked every ~30s.
+    labels_refreshed: Cell<f64>,
     /// Summon: the next PaneSpawned opens an inline rename on its tile header
     /// (native `rename_next_spawn`).
     rename_next_spawn: Cell<bool>,
@@ -108,6 +110,7 @@ impl App {
             input_hot_ms: RefCell::new(HashMap::new()),
             blink_t0: Cell::new(0.0),
             blink_last: Cell::new(true),
+            labels_refreshed: Cell::new(0.0),
             rename_next_spawn: Cell::new(false),
             session_counter: Cell::new(0),
         })
@@ -342,19 +345,23 @@ impl App {
             let mut st = self.state.borrow_mut();
             st.sync_working_touches(now_ms());
         }
+        // Idle circles' "3m ago" labels tick without any daemon event.
+        if now_ms() - self.labels_refreshed.get() > 30_000.0 {
+            self.labels_refreshed.set(now_ms());
+            self.badges_dirty.set(true);
+        }
         if self.need_rebuild.get() {
             self.need_rebuild.set(false);
             self.rebuild();
             self.badges_dirty.set(false);
-            // Summon: the freshly arrived pane opens an inline header rename.
+            // Summon: focus the freshly arrived pane so typing lands in the
+            // TERMINAL immediately (rename is a double-click away — an
+            // auto-opened rename input ate the first keystrokes).
             if self.rename_next_spawn.get() {
                 let spawned = self.state.borrow_mut().last_spawned.take();
                 if let Some(slug) = spawned {
                     self.rename_next_spawn.set(false);
                     self.focus_pane(&slug);
-                    if let Some(ch) = self.chrome.borrow_mut().as_mut() {
-                        ch.begin_rename_pane(&slug);
-                    }
                 }
             }
         } else if self.badges_dirty.get() {

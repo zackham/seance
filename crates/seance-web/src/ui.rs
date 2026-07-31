@@ -572,7 +572,7 @@ impl Chrome {
     ) -> Result<(), JsValue> {
         let doc = self.doc.clone();
         let is_selected = Some(ws) == selected;
-        let count = state.panes_in(ws).len();
+        let activity = state.activity_label(ws, self.now_ms());
         let att = state.workspace_attention(ws);
         let working = matches!(att, Some(Attention::Working));
 
@@ -596,7 +596,7 @@ impl Chrome {
         let att_el = text_el(&doc, "span", att_class, att_text)?;
         let banish = text_el(&doc, "button", "ws-banish", "×")?;
         banish.set_attribute("title", "banish workspace (kill all panes) — click twice")?;
-        let count_el = text_el(&doc, "span", "ws-count", &count.to_string())?;
+        let count_el = text_el(&doc, "span", "ws-count", &activity)?;
 
         main.append_child(&glyph)?;
         main.append_child(&name)?;
@@ -784,7 +784,7 @@ impl Chrome {
         let strip = mk(&doc, "div", "ql-strip")?;
         let head = mk(&doc, "div", "ql-head")?;
         head.append_child(
-            text_el(&doc, "span", "ql-title", "── quicklaunch ──")?.unchecked_ref(),
+            text_el(&doc, "span", "ql-title", "── vita quicklaunch ──")?.unchecked_ref(),
         )?;
         let add = text_el(&doc, "button", "ql-add", "+")?;
         add.set_attribute("title", "add quicklaunch entry")?;
@@ -1343,7 +1343,7 @@ impl Chrome {
             refs.att.set_text_content(Some(text));
             refs.att.set_class_name(class);
             refs.count
-                .set_text_content(Some(&state.panes_in(ws).len().to_string()));
+                .set_text_content(Some(&state.activity_label(ws, self.now_ms())));
         }
     }
 
