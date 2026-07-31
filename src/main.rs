@@ -28,6 +28,7 @@ mod term_font;
 mod term_shared;
 mod theme;
 mod tunnel;
+mod webbridge;
 
 use gpui::*;
 use gpui_component::Root;
@@ -79,6 +80,17 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("[seance] ensure-daemon failed: {e:#}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // `seance web` — websocket bridge + static server for the web client.
+    if args.get(1).map(String::as_str) == Some("web") {
+        match webbridge::run(&args[2..]) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("[seance web] {e:#}");
                 std::process::exit(1);
             }
         }

@@ -17,7 +17,7 @@ base64 = { workspace = true }
 wasm-bindgen = "=0.2.126"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
-  "Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement",
+  "Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "Node",
   "HtmlInputElement", "HtmlTextAreaElement", "CssStyleDeclaration", "DomRect",
   "WebSocket", "BinaryType", "MessageEvent", "CloseEvent", "ErrorEvent",
   "KeyboardEvent", "MouseEvent", "WheelEvent", "FocusEvent", "InputEvent",
@@ -27,7 +27,7 @@ web-sys = { version = "0.3", features = [
   "CanvasRenderingContext2d", "TextMetrics", "ImageData",
   "Performance", "Storage", "Location", "History",
   "ResizeObserver", "ResizeObserverEntry", "MediaQueryList",
-  "Navigator", "VisibilityState", "AddEventListenerOptions",
+  "Navigator", "VisibilityState", "AddEventListenerOptions", "console",
 ] }
 
 [profile.release]

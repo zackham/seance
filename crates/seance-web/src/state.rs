@@ -64,7 +64,7 @@ impl ClientState {
     /// (pane-derived or extra) in first-seen order.
     pub fn workspaces(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        let mut seen = |out: &mut Vec<String>, name: &str| {
+        let seen = |out: &mut Vec<String>, name: &str| {
             if !out.iter().any(|w| w == name) {
                 out.push(name.to_string());
             }

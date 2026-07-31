@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#131111" />
+    <title>seance</title>
+    <link rel="stylesheet" href="./style.css" />
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Token gate. Hidden until ui::Chrome::show_login is called. -->
+      <div id="login" hidden>
+        <div id="login-card">
+          <div id="login-mark">seance</div>
+          <div id="login-sub">a circle of agents, one shared room</div>
+          <label class="field-label" for="login-token">access token</label>
+          <input id="login-token" type="password" placeholder="••••••••••••" spellcheck="false" />
+          <button id="login-join" type="button">join the circle</button>
+          <div id="login-error" class="hidden"></div>
+        </div>
+      </div>
+
+      <div id="topbar"></div>
+      <div id="asks"></div>
+      <div id="sidebar"></div>
+      <div id="tiles"></div>
+      <div id="toasts"></div>
+    </div>
+
+    <script type="module">
+      import init from './seance_web.js';
+      init();
+    </script>
+  </body>
+</html>
