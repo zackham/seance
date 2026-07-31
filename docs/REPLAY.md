@@ -16,15 +16,17 @@ a busy hour is ~5–15 MB before gzip. Format: `seance-core::replay` (SRR1).
 
 The **editor** (web, one implementation for every surface) previews the exact
 bytes that would ship: trim handles + set-start/end-to-playhead, per-chapter
-include/exclude + inline title fixes, a review pass that steps every prompt,
-and the standing warning — everything on those screens ships. Publish POSTs
+include/exclude + inline title fixes, a review pass (seek + pause on the first
+included chapter), and the standing warning — everything on those screens ships. Publish POSTs
 to the bridge, which exports a bundle and runs your configured publisher.
 
 ## the player
 
 Panes render at their RECORDED resolution, scaled to fit (never reflowed —
-the terminal you share is the terminal you had). Chapters = your prompts
-(reconstructed from keystrokes; injected tasks verbatim). Controls: prev/next
+the terminal you share is the terminal you had). Chapters = the prompts a pane
+received — yours, reconstructed from keystrokes; anything injected (`ctl send`,
+an accepted propose) verbatim. Chapters carry no attribution, so an agent's
+`ctl send` reads like a human prompt. Controls: prev/next
 prompt fly-to (animated ~0.6s scrub, lands paused with the prompt typed),
 play/pause, speeds 1×/1.5×/2×/5× shown only while playing. The timeline is
 ACTIVITY time — idle gaps >3s collapse to a 1.5s beat (dim hash marks; hover

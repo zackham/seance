@@ -16,6 +16,11 @@ cargo build --release         # first build ~10 min
 ./target/release/seance
 ```
 
+The web client is a separate, optional build (`./scripts/build-web.sh release`,
+needs `wasm32-unknown-unknown` + wasm-bindgen 0.2.126); its output is committed
+under `crates/seance-web/dist`, so a plain `cargo build` is enough to run
+`seance web`. See docs/WEB.md.
+
 Or point `deps/zed` at an existing checkout of that rev:
 
 ```bash
@@ -50,7 +55,7 @@ gpui_macros = { path = "deps/zed/crates/gpui_macros" }
 
 - Features on `gpui_platform`: `font-kit`, `x11`, `wayland`, `runtime_shaders`
 - Dev profile: `opt-level = 3` for `gpui` / `gpui_platform` / `taffy` (unoptimized GPUI is unusable)
-- Default term font: `CaskaydiaMono Nerd Font Mono` (`src/term_font.rs`)
+- Default term font: `JetBrainsMono Nerd Font` (`src/term_font.rs`)
 - Set `WindowOptions.app_id` (seance uses `"seance"`) so the desktop entry matches
 
 ## API discipline

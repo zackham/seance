@@ -40,28 +40,14 @@ hex below is computed from that HSL (sRGB round). Authored with
 
 ## ANSI terminal palette (16-color)
 
-Agent CLIs and shells render inside the embedded terminal using these. Tuned to
-feel native: readable on `bg`, amber-warm yellows, violet-tinted magenta/blue.
-Black (0) is `bg_elevated`, not pure black; white (15) is the primary `text`.
-
-| # | name            | HSL           | hex       |
-|---|-----------------|---------------|-----------|
-| 0 | black           | 345°  8% 10%  | `#1C1718` |
-| 1 | red             |   6° 52% 54%  | `#C7594D` |
-| 2 | green           | 108° 24% 55%  | `#7CA871` |
-| 3 | yellow          |  35° 80% 57%  | `#E9A03A` |
-| 4 | blue            | 224° 43% 64%  | `#7C91CB` |
-| 5 | magenta         | 260° 45% 70%  | `#A790D5` |
-| 6 | cyan            | 178° 27% 56%  | `#71ADAB` |
-| 7 | white           |  30° 18% 74%  | `#C9BDB1` |
-| 8 | bright-black    | 345°  6% 27%  | `#494143` |
-| 9 | bright-red      |   6° 66% 65%  | `#E1776B` |
-|10 | bright-green    | 108° 34% 65%  | `#94C487` |
-|11 | bright-yellow   |  38° 87% 67%  | `#F4BE62` |
-|12 | bright-blue     | 224° 55% 73%  | `#94A8E0` |
-|13 | bright-magenta  | 262° 55% 78%  | `#BFA8E6` |
-|14 | bright-cyan     | 178° 37% 68%  | `#8FCCCA` |
-|15 | bright-white    |  30° 27% 89%  | `#EBE3DB` |
+**Not this module.** Agent CLIs and shells render inside the embedded terminal
+against the **ghostty** 16-color palette, resolved daemon-side: `ANSI16` in
+`src/runtime/pty_session.rs` (`#181818` bg / `#d8d8d8` fg, base16-ish
+`#ab4642 #a1b56c #f7ca88 #7cafc2 #ba8baf #86c1b9` …), overridable by the
+program via OSC 4/10/11. The seance-tinted ANSI table that used to live here
+described `theme.rs::ansi_palette()`, which was removed 2026-07-22 with the
+dead local-PTY path — nothing read it. Change terminal colors in
+`pty_session.rs`; change chrome colors here.
 
 ## Public API (`src/theme.rs`)
 
@@ -91,7 +77,9 @@ runtime cost (`#[inline]`, trivial arithmetic).
 Call order in `main`: `gpui_component::init(cx)` → **`theme::init(cx)`** →
 open window.
 
-`init()` does three steps (see `src/theme.rs::init`):
+`init()` does four steps (see `src/theme.rs::init`); step 4 is font-family
+hygiene on non-macOS — pick the first installed sans/mono rather than letting
+gpui probe, which is load-bearing for typing latency:
 
 1. **`Theme::change(ThemeMode::Dark, None, cx)`** — activates dark mode.
    `Theme::change` lazily creates the `Theme` global if absent and calls
@@ -140,15 +128,17 @@ Color transforms (`.opacity/.lighten/.darken`) come from `gpui_component`'s
    (ghostty palette in `runtime/pty_session.rs`), not by the theme module.
    If a component you add reads those, extend `apply_palette`.
    (`ansi_palette()` was removed 2026-07-22 with the dead local-PTY path.)
-4. **No `window_border` on non-Linux**, per gpui-component docs
+3. **No `window_border` on non-Linux**, per gpui-component docs
    (`theme_color.rs:314-319`). seance is Linux-only, so this is fine; we set it
    to `border`.
-5. **`Theme::change` re-seeds from Default Dark, then we override.** If a future
+4. **`Theme::change` re-seeds from Default Dark, then we override.** If a future
    gpui-component rev renames/removes a `ThemeColor` field this file sets, that
    line won't compile — the field list is pinned to rev
    `b5eef62336f88bb6c1ee45bf32f73c9895d49f8d`. Verified against the local
    checkout, not training data.
-6. **Not compiled here** (deps still building, per task constraint). API usage
-   was matched line-by-line against the local checkout; the integrator runs the
-   first `cargo build`.
+5. **The web client re-declares this palette by hand.** `crates/seance-web`
+   has no access to `theme.rs`: the same values appear as GL constants
+   (`renderer.rs`) and as hex literals in the chrome CSS (`ui.rs`, `help.rs`,
+   `activity.rs`, `menus.rs`, `probe.rs`). Values currently match; there is no
+   compile-time link, so a change here must be mirrored there by hand.
 ```

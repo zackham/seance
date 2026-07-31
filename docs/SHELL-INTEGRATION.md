@@ -33,15 +33,16 @@ Two files own the pieces that already exist:
   `CommandRecord`s (cap 500/pane), gpui-free and unit-tested. `begin` opens a
   record and returns its `seq`; `end` closes the most-recent-open record.
 
-**Status (0.9.1):** the protocol ops, CLI, engine wiring, and event-bus
-emission (`cmd_start` / `cmd_end` with span ids) **are built**. The sections
-below remain useful as the contract. Remaining future work: OSC-133
-shell-agnostic markers (optional replacement for bash DEBUG traps), durable
-cmdlog across daemon handoff, jump-to-failed-command UI.
+**Status (0.11):** the protocol ops, CLI, engine wiring, and event-bus
+emission (`cmd_start` / `cmd_end` with span ids) **are built**; the cmdlog is
+persisted in `AppState` and carried across daemon handoff, and the
+jump-to-failed-command UI shipped as `ctrl+shift+f`. The sections below remain
+useful as the contract. Remaining future work: OSC-133 shell-agnostic markers
+(optional replacement for bash DEBUG traps).
 
 ---
 
-## 1. Protocol ops to add (`src/control.rs`)
+## 1. Protocol ops (`crates/seance-core/src/control.rs`)
 
 Four new `ControlRequest` variants, tagged `snake_case` by `op` like the rest.
 Every op carries the standard `from` (calling pane, auto-filled from
@@ -84,7 +85,8 @@ pane id explicitly, which is why `assets/seance.bash` calls plain
 `seance ctl cmd-begin "$CMD" --cwd "$PWD"` with no pane argument.
 
 A `CmdBegin`/`CmdEnd` whose `from` is `None` (a ctl run outside any seance pane)
-has no pane to attribute to — the app should drop it (no-op, `ok_empty()`).
+has no pane to attribute to — it is refused with
+`"cmd-begin: must run inside a pane"`.
 
 ### Query ops (the read-back direction)
 
@@ -94,7 +96,7 @@ Commands {
     #[serde(alias = "session")]
     pane: String,
     #[serde(default)]
-    limit: Option<usize>,   // default e.g. 20; cap at CAP_PER_PANE app-side
+    limit: Option<usize>,   // default 50; cap at CAP_PER_PANE app-side
     #[serde(default)]
     scope: Option<String>,
     #[serde(default)]
@@ -124,17 +126,19 @@ the dispatch `match` in `main`.
 
 ---
 
-## 2. App-side handling (`src/app.rs`)
+## 2. Daemon-side handling (`src/runtime/engine/control.rs`)
 
-The app owns one `CommandLog` (from `src/cmdlog.rs`) alongside its other
-per-session state. Wire it on the gpui loop where control requests are applied:
+The daemon engine owns one `CommandLog` (from `src/cmdlog.rs`) alongside its
+other per-pane state — it lives in `AppState`, so it is persisted and survives
+handoff. Control requests are applied there (the in-GUI server was retired in
+the daemon split):
 
 | op | app action |
 |----|-----------|
-| `CmdBegin` | resolve `from` → pane slug; if none, no-op. `log.begin(slug, command, cwd.unwrap_or_default())`. Emit **one** `events.jsonl` line: `kind: "cmd_start"`, `pane: slug`, `actor: "agent:<slug>"` (or `human`/`cli` per the actor rules), `detail: "$ <command>"`. Respond `ok_empty()`. |
-| `CmdEnd` | resolve `from`; if none, no-op. `log.end(slug, exit)`. Look up the just-closed record's `duration_ms()` and emit **one** `events.jsonl` line: `kind: "cmd_end"`, `pane: slug`, `detail` including exit + duration, e.g. `"exit 1 · 2.4s: cargo test"`. Respond `ok_empty()`. |
-| `Commands` | scope-check `pane`, resolve slug, `log.list(slug, limit.unwrap_or(20))`, respond `ok(json!({ "commands": [...] }))`. |
-| `LastCommand` | scope-check `pane`, resolve slug, `log.last(slug, failed_only)`, respond `ok(json!({ "command": <record-or-null> }))`. |
+| `CmdBegin` | resolve `from` → pane slug; if none, error. `log.begin(slug, command, cwd.unwrap_or_default())`. Emit **one** `events.jsonl` line: `kind: "cmd_start"`, `pane: slug`, `actor: "agent:<slug>"` (the shell hook always runs inside a pane), `origin: "shell_hook"`, `span: "cmd:<pane>:<seq>"`, `detail: "$ <command>"`. Respond `ok_empty()`. |
+| `CmdEnd` | resolve `from`; if none, error. `log.end(slug, exit)`. Look up the just-closed record's `duration_ms()` and emit **one** `events.jsonl` line: `kind: "cmd_end"`, `pane: slug`, same `span`, `detail: "exit <code> · <ms>ms · $ <command>"`. Also clears a `working`/`planning` pane back to `idle`. Respond `ok_empty()`. |
+| `Commands` | scope-check `pane`, resolve slug, `log.list(slug, limit.unwrap_or(50))`, respond `ok` with a **bare array** of records. |
+| `LastCommand` | scope-check `pane`, resolve slug, `log.last(slug, failed_only)`, respond `ok` with the **bare record**; error `"no matching command"` when there is none. |
 
 **Two events per command, matching the existing flight-recorder convention.**
 `events.rs` already documents a `kind` vocabulary (`ctl_send`, `pane_spawned`,
@@ -163,12 +167,12 @@ Serialized straight from `src/cmdlog.rs`:
 }
 ```
 
-`Commands` → `{ "commands": [ <record>, ... ] }` (oldest-first).
-`LastCommand` → `{ "command": <record> | null }`.
+`Commands` → a bare JSON array of records (oldest-first).
+`LastCommand` → a bare record, or an error when there is no match.
 
 ---
 
-## 3. CLI verbs to add (`src/ctl.rs`)
+## 3. CLI verbs (`src/ctl/`)
 
 Two new subcommands, hand-parsed in the same style as `timeline`/`read`:
 
@@ -203,7 +207,7 @@ Notes for the parsers:
 
 ---
 
-## 4. Spawn-side change (`src/pane.rs` + `src/app.rs`)
+## 4. Spawn-side change (`src/pane.rs` + `src/runtime/engine/spawn.rs`)
 
 Default shell panes must launch bash pointed at the rc file; explicit
 `--command` panes are untouched.
@@ -220,8 +224,8 @@ fall back to a plain shell, which is the graceful-degradation contract anyway).
 
 ### Point the default command at it
 
-`pane.rs` has `DEFAULT_COMMAND = "bash -l"`. The default-shell spawn should
-instead launch:
+`DEFAULT_COMMAND = "bash -l"` (now in `src/runtime/engine/mod.rs`). The
+default-shell spawn should instead launch:
 
 ```
 bash --init-file ~/.local/share/seance/seance.bash
@@ -241,7 +245,10 @@ path to the installed rc file. **Explicit `--command` panes** (`claude`, a
 one-off script, `--command "bash -l"` typed deliberately) get exactly what was
 asked for — no rc injection. The discriminator is "did the caller specify a
 command?", which `SpawnRequest.command: Option<String>` already carries (`None`
-⇒ default shell ⇒ inject; `Some(_)` ⇒ verbatim).
+⇒ default shell ⇒ inject; `Some(_)` ⇒ verbatim). **Caveat as built:** the
+restore/respawn path in `spawn.rs` re-injects the rc into *any* stored command
+that starts with `bash`, so an explicit `--command "bash -l"` pane picks up the
+hooks after a restart even though its first spawn did not.
 
 The pane already gets `SEANCE_SESSION`/`SEANCE_SOCKET`/`SEANCE_WORKSPACE` in its
 env (see `spawn_pane`), which is exactly what the hooks and `seance ctl` need —

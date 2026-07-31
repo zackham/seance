@@ -19,18 +19,39 @@ is in `README.md` and `seance ctl skill` — not "Claude wrapper."
    (`./scripts/bootstrap-deps.sh`), `gpui-component` @
    `b5eef62336f88bb6c1ee45bf32f73c9895d49f8d`. Grep `deps/zed` for real APIs —
    GPUI training data is stale; **never write GPUI calls from memory**.
-4. **Stay on `master`; never push** unless explicitly asked.
-5. **Checkpoint-commit before any multi-hundred-line mechanical change.**
+4. **Version lockstep is one rule, stated once.** Every workspace crate
+   inherits `workspace.package.version`, and the hello line carries it: the
+   daemon refuses any ctl/GUI/web client whose version isn't an exact match.
+   So a version bump means, in the same breath: `./scripts/build-web.sh
+   release` (rebuild the committed `crates/seance-web/dist`), `cargo build
+   --release && seance upgrade` (daemon), then restart the GUI and any running
+   `seance web` bridge. Skip one and that surface fails with version skew —
+   by design, not a bug.
+5. **Stay on `master`; never push** unless explicitly asked.
+6. **Checkpoint-commit before any multi-hundred-line mechanical change.**
    A big-bang split of app.rs failed once and had to be rolled back from git.
    The discipline that then succeeded: one slice → `cargo test` → commit →
    next slice. Nothing bigger than one green step at a time.
 
-## Architecture map (post-0.9.14 modular split)
+## Architecture map (post-0.9.14 modular split; 0.11 workspace carve)
 
 ```
-src/main.rs            entry: version/ctl/daemon dispatch, SIGPIPE, window setup
+crates/seance-core/    sans-io shared crate — MUST compile native AND wasm32:
+                       protocol.rs (wire types), snapshot.rs (SCG3 codec),
+                       input.rs (key encoding), control.rs, auth.rs,
+                       replay.rs (SRR1 format), util.rs (slugify)
+crates/seance-web/     the wasm browser client: lib.rs (app core, rAF loop),
+                       renderer.rs (WebGL2 atlas), conn.rs / state.rs / input.rs,
+                       ui.rs + menus.rs + keymap.rs + help.rs (chrome),
+                       activity.rs, probe.rs, replay.rs (player),
+                       replay_edit.rs (editor); dist/ is committed
+src/webbridge.rs       `seance web`: ws↔unix pump, token auth, static files,
+                       /ws + /healthz + /replay/{list,manifest,pane,publish}
+src/replayexport.rs    `seance replay` CLI + bundle exporter + publisher seam
+src/runtime/recorder.rs  daemon-side replay ring recorder (48h DVR)
+src/main.rs            entry: version/ctl/daemon/web/replay dispatch, SIGPIPE, window setup
 src/app/               the GPUI app, split by surface:
-  mod.rs      (~1.9k)  SeanceApp struct, boot, GuiEvent loop, key capture,
+  mod.rs      (~2.3k)  SeanceApp struct, boot, GuiEvent loop, key capture,
                        focus/rename/pane lifecycle, render() entry
   actions.rs           all Act* gpui actions + SEANCE_ARM_PROMPT
   layout.rs            layout.json load/save (pure parse/serialize split)
@@ -41,13 +62,16 @@ src/app/               the GPUI app, split by surface:
   sidebar.rs           left rail: workspace rows, context menus, host list
   tiles.rs             tile grid + sashes + zoom
   palette.rs           command palette
+  quicklaunch.rs       quicklaunch strip + create/edit modal (daemon-side json)
   workspaces.rs        workspace state ops + WorkspaceAttention
 src/runtime/engine/    the daemon: mod.rs (~0.6k: Engine, persist, upgrade
                        handoff) + gui.rs (conn registry, state/grid push,
                        handle_gui) + spawn.rs (PTY lifecycle) + control.rs
                        (handle_control) + helpers.rs + tests.rs + gui_tests.rs
-src/runtime/           protocol.rs (wire types), pty_session.rs (daemon PTY
-                       via alacritty_terminal), snapshot.rs (grid encoding)
+src/runtime/           protocol.rs (re-exports seance-core wire types + the
+                       native-only handoff types), snapshot.rs (re-export),
+                       pty_session.rs (daemon PTY via alacritty_terminal),
+                       recorder.rs
 src/ctl/               the CLI client: mod.rs, parse.rs, wait.rs, print.rs, phone.rs
 src/control.rs         control-plane wire types + serde
 src/gui_client.rs      GUI→daemon request client + fs-bridge fs_call plumbing
@@ -72,8 +96,9 @@ bridge (`GuiRequest::Fs` / `daemon/fsbridge.rs`); bridge calls are blocking
 and must never run on the render/UI thread (background executor + update —
 see fileview.rs / scratchpad.rs for the idiom). The GUI may run on macOS
 against a remote daemon; keep new code portable (use `sysopen.rs`, never
-`/proc` or `xdg-open` directly) and keep client/daemon versions in lockstep
-(strict hello gate).
+`/proc` or `xdg-open` directly). Version lockstep across all clients is hard
+rule 4. The web client (`crates/seance-web`) is a third client on the same
+protocol and the same invariant: it has no filesystem at all.
 
 ## Module conventions (the split's contract — follow it)
 
@@ -91,14 +116,16 @@ against a remote daemon; keep new code portable (use `sysopen.rs`, never
 - Dead-code deletions must be compiler-verified (rustc "never used" + zero
   grep hits incl. `scripts/*.sh` and docs) — see the 0.9.14 CHANGELOG entries
   for the precedent.
-- `fileview.rs` (~1.5k) and `remote_term_view.rs` (~1.3k) are the two
-  remaining large files — cohesive and tested; split only with cause.
+- `fileview.rs` (~1.7k) and `remote_term_view.rs` (~1.5k) are the largest
+  files left in `src/` outside `app/mod.rs` — cohesive and tested; split only
+  with cause. Same rule holds for `seance-web`'s `ui.rs` / `replay*.rs`.
 
 ## Build / test / run
 
 ```bash
 ./scripts/bootstrap-deps.sh   # once, if deps/zed missing
-./scripts/check.sh            # THE gate: fmt + deny-warnings + tests (143)
+./scripts/check.sh            # THE gate: fmt + deny-warnings + workspace tests
+./scripts/build-web.sh release             # rebuild crates/seance-web/dist
 cargo build --release && seance upgrade    # deploy runtime, sessions live
 seance restart-gui                         # deploy UI only
 seance ctl skill              # agent-facing engagement protocol
@@ -110,7 +137,8 @@ First cold build ~10 min (gpui at opt-level 3 even in dev — do not remove the
 
 ### Tests
 
-143 tests, all hermetic. Engine tests use `Engine::bare_for_test` +
+300+ tests across the workspace (`src` ~200, `seance-core` ~35,
+`seance-web` ~80), all hermetic. Engine tests use `Engine::bare_for_test` +
 `push_stub_pane`; multi-window `handle_gui` coverage lives in
 `engine/gui_tests.rs` (captured GuiEvent payloads on fake conns). Any test
 touching `SEANCE_STATE_DIR` must go through `state::test_env_lock()` — env
@@ -166,9 +194,11 @@ re-run it and read orch + worker pads before claiming done. Pure refactors
   section at top, clear `[Unreleased]`. Product deltas, not commit dumps.
 - `docs/PLAYBOOK.md` (pins) · `docs/CONTROL.md` (protocol) ·
   `docs/DAEMON.md` (upgrade) · `docs/THEME.md` (palette; `SeancePalette`) ·
-  `docs/WEB.md` (web client + bridge; `crates/seance-core` is the sans-io
-  wire crate shared native/wasm — it must always compile for both targets;
-  rebuild `dist/` via `scripts/build-web.sh` on any version bump).
+  `docs/REMOTE.md` (thin client) · `docs/PERF-TERMINAL.md` (render path,
+  both native and web numbers) · `docs/WEB.md` (web client + bridge;
+  `crates/seance-core` is the sans-io wire crate shared native/wasm — it must
+  always compile for both targets) · `docs/REPLAY.md` (recorder, SRR1, player,
+  editor, publisher seam).
 
 ## Conventions
 

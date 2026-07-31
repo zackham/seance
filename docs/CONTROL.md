@@ -15,8 +15,9 @@ multi-line prompt lands intact instead of triggering per-line submits.
 
 Two surfaces expose the same protocol:
 
-- a **Unix-socket server** the app runs (`src/control.rs`),
-- a **CLI client**, `seance ctl …` (`src/ctl.rs`), which a master session
+- a **Unix-socket server** the daemon runs (`src/daemon/` +
+  `Engine::handle_control`; wire types in `crates/seance-core/src/control.rs`),
+- a **CLI client**, `seance ctl …` (`src/ctl/`), which a master session
   shells out to.
 
 ---
@@ -24,15 +25,16 @@ Two surfaces expose the same protocol:
 ## Transport
 
 - **Socket:** `$XDG_RUNTIME_DIR/seance.sock`, falling back to
-  `/tmp/seance-$UID.sock` when `XDG_RUNTIME_DIR` is unset.
+  `/tmp/seance-$UID.sock` when `XDG_RUNTIME_DIR` is unset. `$SEANCE_SOCKET`
+  overrides both (it is exported into every pane).
 - **Wire format:** **JSON lines.** One request JSON object per `\n`-terminated
   line in; one response JSON object per line out. A connection may stay open and
   carry many request/response pairs in order — a master session can keep one
   socket and pipeline `send`/`read` without reconnecting.
 - **Concurrency:** the server accepts on one thread and handles each connection
-  on its own thread (blocking IO, no async runtime). Each request is forwarded
-  onto the gpui main loop and answered from there, with a **10-second timeout**
-  per request — a wedged main loop yields an `ok: false` error, never a hang.
+  on its own thread (blocking IO, no async runtime). Each request is answered
+  under the engine mutex — there is no timeout, so a wedged engine blocks the
+  caller rather than returning an error.
 - **Single instance:** on startup the server try-connects to an existing socket
   file. If a live server answers, it refuses to start (two seances would fight
   over the socket); a stale file left by a crash is removed and rebound.
@@ -66,14 +68,14 @@ success. Response payloads by op (best-effort shapes the app fills in):
 
 | op | `data` on success |
 |----|-------------------|
-| `list` | array of session objects: `{name, workspace?, command?, running, title?}` |
-| `new` | `{name, slug}` (or the slug string) of the created session |
-| `send` | omitted / `null` |
-| `send_raw` | omitted / `null` |
-| `read` | the screen text — a string, or `{screen: "..."}` |
-| `status` | `{name, workspace?, command, running, title?}` |
+| `list` | `{panes: [...], scope, event_seq, focused_pane, selected_workspace}` |
+| `new` | `{slug, workspace, scratchpad}` |
+| `send` | `{slug, task_id, inject_pad_rev, inject_pad_bytes, status}` |
+| `send_raw` | `null` |
+| `read` | `{screen: "..."}` |
+| `status` | `{slug, name, kind, workspace?, command, running, title?}` |
 | `kill` | omitted / `null` |
-| `scratchpad` | the file path — a string, or `{path: "..."}` |
+| `scratchpad` | `{path: "..."}` |
 
 ---
 
@@ -103,7 +105,8 @@ kind-agnostic so markdown/graph/etc panes can land without breaking clients.
 
 - Every op now carries `from` (the calling pane's slug, auto-filled from
   `$SEANCE_SESSION`) — actions are **attributed**: `human` / `agent:<pane>` /
-  `cli` in one event log at `~/.local/share/seance/events.jsonl`.
+  `cli` in one event log at `~/.local/share/seance/events.jsonl`. (`human`
+  never comes from the control plane — only from GUI input.)
 - `timeline` — query the log (`since_secs`, `pane`, `actor`, `limit`).
 - `status_set` — agent self-reported status; badge on the pane + colored
   sidebar dot (planning|working|blocked|needs-human|done|idle).
@@ -122,7 +125,7 @@ kind-agnostic so markdown/graph/etc panes can land without breaking clients.
 1. the app **bracketed-pastes** `text` into the session's terminal
    (`\x1b[200~` + text + `\x1b[201~`) — the paste wrapping happens app-side, you
    just supply the raw text,
-2. waits a **~150 ms settle delay**, then
+2. waits a **180 ms settle delay**, then
 3. sends a **carriage return** (`\r`) to submit.
 
 The settle delay matters: TUI agents (claude / codex / grok CLIs) need a beat to
@@ -162,10 +165,12 @@ single screen and that the human can watch update in real time.
 
 ### Session environment
 
-Spawned sessions get two env vars so the agent inside knows it's under seance:
+Spawned sessions get four env vars so the agent inside knows it's under seance:
 
 - `SEANCE_SESSION` — the session's slug/id,
-- `SEANCE_SCRATCHPAD` — absolute path to its own scratchpad file.
+- `SEANCE_WORKSPACE` — its workspace (this is what makes scoping automatic),
+- `SEANCE_SCRATCHPAD` — absolute path to its own scratchpad file,
+- `SEANCE_SOCKET` — the control socket to talk back on.
 
 ---
 
@@ -257,6 +262,18 @@ Every meaningful action publishes an `Event` with:
 | `caused_by` / `span` | causal chain + span id (e.g. command runs) |
 
 Durable: `~/.local/share/seance/events.jsonl`. Live: in-process subscribers.
+
+### Replay attribution (0.11)
+
+The daemon also records every pane into the replay ring (docs/REPLAY.md), and
+control-plane traffic lands there attributed: `ctl send` writes a
+`ReplayEvent::Send { from: "agent:<slug>" | "cli", text, submit }` with the
+prompt verbatim, `ctl send-raw` writes `ReplayEvent::Input { origin:
+"agent:<slug>" | "cli" }`. GUI human input is the only thing stamped `human`.
+Caveat worth knowing when reading a replay: the player's **chapters** are built
+from human keystroke lines *and* from any submitting `Send`, and `Chapter`
+carries no attribution — so an agent's `ctl send` shows up in the prompt rail
+looking exactly like a human prompt.
 
 ### `seance ctl watch`
 

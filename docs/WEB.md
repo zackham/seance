@@ -52,7 +52,7 @@ browser (wasm)                      native
 ## Build
 
 ```bash
-./scripts/build-web.sh release   # → crates/seance-web/dist (~800K, committed)
+./scripts/build-web.sh release   # → crates/seance-web/dist (~1.4M, committed)
 ```
 
 Needs the rustup toolchain (`wasm32-unknown-unknown`) and `wasm-bindgen-cli`
@@ -64,12 +64,15 @@ and the daemon enforces an exact build match on hello — rebuild the web bundle
 whenever the version bumps, or web clients are refused with a version-skew
 error (by design).
 
-## Measured (2026-07-30, first light)
+## Measured (2026-07-31)
 
 - paint p50 0.3ms / p95 0.4ms; ws rtt 0.6ms (localhost)
-- echo p50 ~51ms — dominated by the daemon's ~30fps grid-push coalescing, not
-  the web path. Future: daemon-side immediate push for the originating client
-  (the native GUI's "typing hot" equivalent, moved daemon-side).
+- echo p50 9.1ms / p95 16.3ms (was 51.5 / 53.2 at first light) — two fixes:
+  the bridge polls the ws for daemon→client traffic every 2ms (`WS_POLL`,
+  `src/webbridge.rs`) instead of coalescing, and the client paints a grid
+  arriving within 250ms of a keystroke *immediately* rather than waiting for
+  the next rAF (typing hot — the native `term_shared::typing_hot` equivalent,
+  `crates/seance-web/src/lib.rs`).
 
 ## Chrome parity (2026-07-31)
 

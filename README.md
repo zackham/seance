@@ -56,6 +56,8 @@ the keyboard). Point `--command` at whatever agent CLI you use.
 - **Orchestrator A+** — `--agent` profiles, evidence-bound `wait --status done`, `send --file`, task envelopes, `harvest`, event-driven wait, boot-clear
 - **Human-in-the-loop** — `ask`, `propose`, seize/release/drive
 - **Phone a pane** — ☎ / `ctl phone` opens a telegram topic and seeds a **stage card** (workspace, roster, ctl how-to). No participant claim — you drive panes with normal `seance ctl` on this host. Optional needs-human one-liners post to the topic when linked.
+- **Browser thin client** — `seance web` serves a wasm/WebGL2 client with native-parity chrome over a token-authed websocket
+- **Session replay** — always-on 48h DVR; prompt-chapter player, trim/publish editor, shareable static bundles
 - **Daemon architecture** — upgrade binary without killing the circle (concurrent-upgrade gate)
 - **Event bus** — sequenced, attributable events + `seance ctl watch`
 - **Capabilities** — `policy open|propose_required|locked` + per-principal grants
@@ -71,7 +73,7 @@ ln -sf "$(pwd)/target/release/seance" ~/.local/bin/seance   # optional
 ```
 
 Requirements: recent Rust, Vulkan-capable drivers, a monospace font
-(default *CaskaydiaMono Nerd Font Mono* — change in `src/term_font.rs`).
+(default *JetBrainsMono Nerd Font* — change in `src/term_font.rs`).
 
 ```bash
 seance ctl skill                 # agent-facing protocol (⚡ arm / paste)
@@ -99,6 +101,8 @@ Upgrade load test: `./scripts/upgrade-load-test.sh` (upgrades live daemon)
 | ctrl+shift+k | precanned prompt palette |
 | ctrl+shift+j | fuzzy jump (pane / workspace) |
 | ctrl+shift+z | focus-zoom active pane |
+| ctrl+shift+space | overview (live map) |
+| ctrl+shift+r | rename selected workspace |
 | ctrl+shift+f | last failed shell command |
 | ctrl+pageup / pagedown | cycle workspaces |
 | ctrl+shift+pageup / pagedown | cycle panes in this workspace |
@@ -118,6 +122,7 @@ Upgrade load test: `./scripts/upgrade-load-test.sh` (upgrades live daemon)
 | `seance daemon` | owns PTYs, grids, state; Unix socket |
 | `seance` (GUI) | shared space UI; reconnects safely |
 | `seance ctl …` | JSON-lines client for agents, shells, scripts |
+| `seance web` | ws↔socket bridge + static client; browsers attach as GUI clients |
 
 **Do not** `pkill -x seance` to reload — that kills every session. Prefer
 `cargo build --release && seance upgrade`, or `seance restart-gui` for UI-only.
@@ -144,7 +149,9 @@ pane — agents only see their circle unless you pass `--all`.
 | [docs/DAEMON.md](docs/DAEMON.md) | daemon / GUI split, upgrade path |
 | [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md) | multi-agent swarm playbook |
 | [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md) | structured command boundaries |
-| [docs/PERF-TERMINAL.md](docs/PERF-TERMINAL.md) | multi-pane paint notes |
+| [docs/REMOTE.md](docs/REMOTE.md) | thin client against a remote daemon (ssh forward) |
+| [docs/PERF-TERMINAL.md](docs/PERF-TERMINAL.md) | multi-pane paint notes (native + web) |
+| [docs/THEME.md](docs/THEME.md) | candlelit palette, `SeancePalette` |
 | [CLAUDE.md](CLAUDE.md) | notes for coding agents working *on* this repo |
 
 Canonical agent instructions: **`seance ctl skill`**.
@@ -164,9 +171,8 @@ Pin discipline: `gpui-component` rev-pinned; zed patched to `deps/zed` at
 ## Not yet
 
 - OSC-133 shell-agnostic markers (bash hooks + cmdlog work today; OSC-8 open shipped)
-- **Full continuous session replay** (grid recorder + browser player) — filed in vita
-  working doc; not the retired timeline HTML export
-- GPU glyph atlas (CPU path is multi-pane smooth — explicit non-goal for now)
+- GPU glyph atlas **in the native app** (CPU path is multi-pane smooth — explicit
+  non-goal for now; the web client is WebGL2 already)
 - worktree-backed agent rooms, best-of-N
 
 ## License

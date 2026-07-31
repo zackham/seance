@@ -18,6 +18,10 @@ window is a disposable client. That is the use→develop→use loop.
   - `{"role":"ctl"}` — classic JSON-lines request/response (`seance ctl`)
   - `{"role":"gui"}` — bidirectional GUI protocol (snapshots + input)
   - `{"role":"handoff"}` — daemon upgrade only
+
+  The hello also carries the client's version, and the daemon requires an
+  **exact** match — a stale GUI, `ctl`, or `seance web` bundle is refused with
+  a version-skew error rather than talking a drifted protocol.
 - Override: `SEANCE_SOCKET` or `SEANCE_STATE_DIR` (state dir also moves data).
 
 ## Phases
@@ -49,6 +53,18 @@ still subscribed to a dead connection.
    fails (respawn used to hide dead children and look like “only claude survived”).
 5. Old process exits. Children never saw SIGHUP when step 2 succeeded.
 
+**Recorder across upgrade.** The replay ring recorder is armed unconditionally
+at daemon startup — fresh boot *and* `--takeover` alike — so a new daemon
+always comes up recording. It is not handed over: the old daemon's recorder
+thread dies with the process, and whatever it had buffered but not yet flushed
+(writes are flushed per record batch) is lost. The new recorder opens the
+current hour's segment with `create(true).append(true)`, so it *appends to the
+same file* rather than truncating it, and writes the `SRR1` magic only when the
+file is new. Its damage chain starts clean (no inherited last-cells state), so
+the first frame after an upgrade is a FULL keyframe — a player seeking across
+the upgrade boundary never replays a broken damage chain. Net effect: a
+sub-second seam in the recording, no lost segment.
+
 If you see a shell die across upgrade while an agent pane lives, check
 `~/.local/share/seance/daemon-upgrade.log` for `handoff prepare failed` /
 `not respawning` lines — that is a failed FD transfer, not intentional.
@@ -66,14 +82,16 @@ Client → daemon:
 
 Daemon → client (push):
 - `state` — full pane list + workspace chrome
-- `grid { pane, rev, cols, rows, cells…, cursor, title, ghost? }`
+- `grid_bin { pane, rev, … }` — SCG3 FULL/damage blob, base64 (docs/PERF-TERMINAL.md)
 - `pane_spawned` / `pane_killed` (process exit auto-kills the pane)
 - `ask` / `status` / `touch` events
 
 ## Layout on disk
 
 Unchanged paths under `~/.local/share/seance/` (or `SEANCE_STATE_DIR`):
-state.json, scratch/, events.jsonl, plus `daemon.pid` for the live daemon,
+state.json, scratch/, events.jsonl, `replay/<pane>/<hour>.srr[.gz]` (the 48h
+ring — docs/REPLAY.md), `web-token` (the `seance web` bearer token, 0600),
+plus `daemon.pid` for the live daemon,
 and **`gui.stderr.log`** — durable GUI stderr (panics/backtraces). Rotates to
 `gui.stderr.log.1` above ~5 MiB. After a mysterious window death, `tail` that
 file first.

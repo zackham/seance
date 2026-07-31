@@ -5,7 +5,8 @@ How a master agent (or human at a shell) runs Claude / Codex / Grok as
 human can watch and jump into any session without restarting it.
 
 Validated live 2026-07-20 on seance **0.9.7+** (in-seance orchestrator + ⚡ arm);
-through **0.9.12**:
+through **0.9.12**. Not re-validated end-to-end since the daemon split; the ctl
+surface it uses is unchanged as of **0.11.0**:
 
 | Agent | Profile (`--agent`) | Result |
 |-------|---------------------|--------|
@@ -179,7 +180,7 @@ in a **shell** pane (less visible TUI, but functional).
 |-----------------|-------------------|
 | Real PTY via forkpty | daemon `PtySession` |
 | libghostty-vt screen state | alacritty grid → `ctl read` rendered text |
-| Bracketed paste inject | `ctl send` (app-side `\x1b[200~…\x1b[201~` + settle + CR) |
+| Bracketed paste inject | `ctl send` (daemon-side `\x1b[200~…\x1b[201~` + 180ms settle + CR) |
 | SessionStart / Stop hooks | **missing** — we poll screens / titles / scratchpads |
 | Transcript offset parse | **missing** — no structured turn boundary |
 | print/json/stream-json | not the product; human watches the TUI |
