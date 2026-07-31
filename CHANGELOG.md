@@ -15,6 +15,44 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]
 
+## [0.11.0] — 2026-07-31
+
+The web era: seance from anywhere, and sessions you can share.
+
+### Added
+
+- **Web client** (`seance web`): a wasm thin client speaking the daemon's GUI
+  protocol over a websocket bridge (token-auth'd, tailscale-transport policy).
+  WebGL2 glyph-atlas terminal renderer (paint p95 0.4ms), native chrome parity
+  (auto-sorted workspace rail, quicklaunch, accounts strip, context menus,
+  keymap with `alt+` twins, grimoire, activity drawer), pull-workspace from
+  the sidebar. `crates/seance-core` carve: the sans-io wire protocol, SCG3
+  codec, and input encoding shared by every client. `docs/WEB.md`.
+- **Session replay** (`docs/REPLAY.md`): an always-on 48h ring recorder in the
+  daemon (output-driven; keyframes before every human prompt), a player that
+  treats the timeline as ACTIVITY (idle collapses to a beat, typing plays at
+  real cadence; recorded-resolution letterboxed panes; prompts rail +
+  Previous/Next fly-to; `#t=` deep links), a web trim/publish editor shared by
+  all GUIs (workspace right-click → *share replay…*), `seance replay`
+  export/list/edit CLI, and an arms-length publisher seam
+  (`~/.config/seance/publish.json`; bundles are self-contained static sites
+  by default).
+
+### Changed
+
+- Echo latency on the web path: p50 51.5ms → 9.1ms (bridge 2ms poll +
+  typing-hot immediate paint; the daemon already bypassed its throttle).
+- Sidebar shows time-since-last-output instead of pane counts; banish × is
+  hover-only; summon focuses the terminal immediately (rename moved to
+  double-click); quicklaunch strip renamed "vita quicklaunch"; notes-flip
+  keeps editor focus on click (native).
+
+### Fixed
+
+- Bridge no-cache on `.wasm`/`.css` (stale-module ABI breaks).
+- Replay export resolves workspaces of exited panes from the ring's own
+  `Spawned` events — sharing after the work is done is the normal case.
+
 ## [0.10.9] — 2026-07-30
 
 ### Fixed

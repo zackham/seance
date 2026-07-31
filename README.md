@@ -13,9 +13,17 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.10.9
+**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.11.0
 
 Release notes: [`CHANGELOG.md`](CHANGELOG.md).
+
+**New in 0.11**: **seance from anywhere** — `seance web` serves a wasm thin
+client (WebGL2 terminal, native-parity chrome, token auth) to any browser on
+your tailnet; and **session replay** — an always-on 48h DVR with a
+prompt-chapter player (idle collapses, typing plays real) and a trim/publish
+editor that turns any workspace into a shareable static site behind a secret
+link. Right-click a workspace → *share replay…*. See [docs/WEB.md](docs/WEB.md)
+and [docs/REPLAY.md](docs/REPLAY.md).
 
 ## Why it exists
 
