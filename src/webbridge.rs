@@ -52,8 +52,11 @@ const TOKEN_FILE: &str = "web-token";
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// How long to wait for a complete header block to land.
 const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
-/// ws read poll interval — bounds outbound latency when the client is silent.
-const WS_POLL: Duration = Duration::from_millis(50);
+/// ws read poll interval — bounds outbound latency when the client is silent
+/// (daemon→client frames queue until the ws-owning thread wakes from read()).
+/// 2ms keeps echo frames under a rAF frame; the wakeup cost (~500/s/conn,
+/// two syscalls each) is noise. Measured: 50ms here put echo p50 at ~51ms.
+const WS_POLL: Duration = Duration::from_millis(2);
 /// Close code for "you presented no/!valid token". Client contract.
 const CLOSE_BAD_TOKEN: u16 = 4401;
 

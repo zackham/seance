@@ -74,6 +74,9 @@ pub struct App {
     selection: RefCell<Option<(String, usize, usize, bool)>>,
     /// Wheel fractional-row accumulator per pane.
     wheel_accum: RefCell<HashMap<String, f64>>,
+    /// Last input send per pane (ms) — echo frames for a hot pane paint
+    /// immediately on apply instead of waiting for the next rAF.
+    input_hot_ms: RefCell<HashMap<String, f64>>,
     /// Blink phase origin — reset on input so the cursor is solid while typing.
     blink_t0: Cell<f64>,
     /// Last blink on/off we painted the focused pane with.
@@ -94,6 +97,7 @@ impl App {
             structure_rev_bound: Cell::new(0),
             selection: RefCell::new(None),
             wheel_accum: RefCell::new(HashMap::new()),
+            input_hot_ms: RefCell::new(HashMap::new()),
             blink_t0: Cell::new(0.0),
             blink_last: Cell::new(true),
         })
@@ -111,7 +115,18 @@ impl App {
             Applied::Nothing => {}
             Applied::Grid { pane } => {
                 self.probe.borrow_mut().record_grid(&pane);
-                self.dirty_grids.borrow_mut().insert(pane);
+                self.dirty_grids.borrow_mut().insert(pane.clone());
+                // Typing hot: this is plausibly the echo frame for a keystroke
+                // we just sent — paint NOW instead of waiting up to a full rAF
+                // (native does the same; see term_shared::typing_hot).
+                let hot = self
+                    .input_hot_ms
+                    .borrow()
+                    .get(&pane)
+                    .is_some_and(|t| now_ms() - t < 250.0);
+                if hot {
+                    self.paint();
+                }
             }
             Applied::NeedRefresh { pane } => {
                 self.send(&GuiRequest::RefreshGrid { pane });
@@ -295,6 +310,9 @@ impl App {
 
     fn pty_input(&self, pane: &str, bytes: &[u8]) {
         self.probe.borrow_mut().record_input(pane);
+        self.input_hot_ms
+            .borrow_mut()
+            .insert(pane.to_string(), now_ms());
         self.blink_t0.set(now_ms());
         if let Some(c) = self.conn.borrow().as_ref() {
             c.input(pane, bytes);
