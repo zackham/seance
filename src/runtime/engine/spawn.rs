@@ -36,6 +36,14 @@ impl Engine {
             self.workspace_order.push(workspace.clone());
         }
         let cwd_raw = spec.cwd.unwrap_or_else(|| "~".into());
+        self.record_event(
+            &slug,
+            seance_core::replay::ReplayEvent::Spawned {
+                name: name.clone(),
+                workspace: workspace.clone(),
+                command: spec.command.clone().unwrap_or_default(),
+            },
+        );
         let scratch_path = self.store.path_for(&slug);
 
         // Insert after the last pane of this workspace so the sidebar/tiles

@@ -17,5 +17,6 @@ pub mod auth;
 pub mod control;
 pub mod input;
 pub mod protocol;
+pub mod replay;
 pub mod snapshot;
 pub mod util;

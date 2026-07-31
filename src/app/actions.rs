@@ -83,6 +83,11 @@ Confirm you're oriented and ready, then wait for the next instruction.";
 #[action(namespace = seance, no_json)]
 pub struct ActRenameWorkspace(pub String);
 
+/// Open the web replay editor for a workspace (sidebar context menu).
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActShareReplay(pub String);
+
 /// Bump workspace recency without selecting it (sidebar context menu).
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]

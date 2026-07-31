@@ -485,6 +485,10 @@ impl SeanceApp {
                                                 "fork workspace ⑂",
                                                 Box::new(ActForkWorkspace(ws_m.clone())),
                                             )
+                                            .menu(
+                                                "share replay…",
+                                                Box::new(ActShareReplay(ws_m.clone())),
+                                            )
                                             .separator()
                                             .menu(
                                                 "send to new window",

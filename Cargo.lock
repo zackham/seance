@@ -5764,6 +5764,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "base64",
+ "flate2",
  "futures",
  "gpui",
  "gpui-component",
@@ -5792,6 +5793,7 @@ name = "seance-web"
 version = "0.10.9"
 dependencies = [
  "base64",
+ "flate2",
  "js-sys",
  "seance-core",
  "serde",

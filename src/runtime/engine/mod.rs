@@ -103,6 +103,11 @@ pub struct Engine {
     /// Per-pane last full-grid push — TUIs with spinners wake the PTY dozens of
     /// times per second; unthrottled snapshots peg the GUI.
     last_grid_push: HashMap<String, Instant>,
+    /// Session-replay ring recorder (None in tests / until the daemon arms it).
+    pub(crate) recorder: Option<crate::runtime::recorder::RecorderHandle>,
+    /// Per-pane 33ms gate for recorder grid clones (cloning a full grid per
+    /// PTY wakeup would be wasteful; the recorder coalesces further).
+    pub(crate) last_record_grid: HashMap<String, Instant>,
     /// FlushGrid already scheduled for this slug (avoid timer storms).
     grid_flush_pending: HashSet<String>,
     /// Last cells we broadcast per pane — enables row-damage frames + skip
@@ -141,6 +146,8 @@ impl Engine {
             workspace_window: HashMap::new(),
             next_window_seq: 1,
             last_grid_push: HashMap::new(),
+            recorder: None,
+            last_record_grid: HashMap::new(),
             grid_flush_pending: HashSet::new(),
             last_grid_cells: HashMap::new(),
         };
@@ -199,6 +206,8 @@ impl Engine {
             workspace_window: HashMap::new(),
             next_window_seq: 1,
             last_grid_push: HashMap::new(),
+            recorder: None,
+            last_record_grid: HashMap::new(),
             grid_flush_pending: HashSet::new(),
             last_grid_cells: HashMap::new(),
         };
@@ -320,6 +329,8 @@ impl Engine {
             workspace_window: HashMap::new(),
             next_window_seq: 1,
             last_grid_push: HashMap::new(),
+            recorder: None,
+            last_record_grid: HashMap::new(),
             grid_flush_pending: HashSet::new(),
             last_grid_cells: HashMap::new(),
         };

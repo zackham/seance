@@ -815,7 +815,7 @@ mod tests {
     fn html_and_js_are_no_cache() {
         assert!(no_cache(Path::new("i.html")));
         assert!(no_cache(Path::new("a.js")));
-        assert!(!no_cache(Path::new("a.wasm")));
+        assert!(no_cache(Path::new("a.wasm"))); // stale wasm vs fresh js glue = silent ABI break
         assert!(!no_cache(Path::new("a.png")));
     }
 

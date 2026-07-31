@@ -28,6 +28,7 @@ mod term_font;
 mod term_shared;
 mod theme;
 mod tunnel;
+mod replayexport;
 mod webbridge;
 
 use gpui::*;
@@ -80,6 +81,17 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("[seance] ensure-daemon failed: {e:#}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // `seance replay` — export / list / edit session recordings.
+    if args.get(1).map(String::as_str) == Some("replay") {
+        match replayexport::run_cli(&args[2..]) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("[seance replay] {e:#}");
                 std::process::exit(1);
             }
         }

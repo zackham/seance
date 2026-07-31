@@ -13,6 +13,7 @@ seance-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Pin to the installed wasm-bindgen-cli (0.2.126) — CLI and crate must match.
 wasm-bindgen = "=0.2.126"
 js-sys = "0.3"

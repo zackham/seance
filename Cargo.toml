@@ -46,6 +46,8 @@ base64 = { workspace = true }
 # `seance web` bridge: websocket ↔ unix-socket proxy + static file server.
 tungstenite = "0.24"
 rand = "0.8"
+# Replay ring segments + bundles (pure-rust gzip; decodes in wasm too).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 # gpui-component declares its zed deps rev-less (tracks HEAD) and cargo ignores
 # transitive git lockfiles, so zed HEAD drift breaks the build. Cargo forbids

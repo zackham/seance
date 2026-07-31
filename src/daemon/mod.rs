@@ -51,6 +51,11 @@ fn run_daemon_inner(args: Vec<String>) -> Result<()> {
         Engine::new()?
     };
 
+    let mut engine = engine;
+    // Arm the session-replay ring recorder (48h DVR; `seance replay` reads it).
+    engine.set_recorder(crate::runtime::recorder::spawn(
+        crate::runtime::state_data_dir().join("replay"),
+    ));
     let engine = Arc::new(Mutex::new(engine));
 
     // Session event pump → broadcast grids.

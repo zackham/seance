@@ -2137,6 +2137,9 @@ impl Render for SeanceApp {
                     cx,
                 );
             }))
+            .on_action(cx.listener(|_this, act: &ActShareReplay, _, _cx| {
+                share_replay_open(&act.0);
+            }))
             .on_action(cx.listener(|this, act: &ActTouchWorkspace, _, cx| {
                 this.touch_workspace(&act.0);
                 cx.notify();
@@ -2302,4 +2305,34 @@ impl Render for SeanceApp {
                 }
             })
     }
+}
+
+/// "share replay…": make sure the web bridge is up, then open the editor in
+/// the default browser. Best-effort — every failure is a notify, never a crash.
+fn share_replay_open(workspace: &str) {
+    let token_path = crate::runtime::state_data_dir().join("web-token");
+    let token = std::fs::read_to_string(&token_path)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    // Ensure a bridge: if nothing answers on 9666, spawn one detached.
+    let up = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], 9666)),
+        std::time::Duration::from_millis(300),
+    )
+    .is_ok();
+    if !up {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe)
+                .arg("web")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            std::thread::sleep(std::time::Duration::from_millis(600));
+        }
+    }
+    let url = format!(
+        "http://127.0.0.1:9666/?token={token}#replay-edit?workspace={workspace}"
+    );
+    crate::sysopen::open_detached(&url);
 }

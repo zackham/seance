@@ -172,6 +172,14 @@ impl Engine {
                     );
                     // Dispatch envelope + working badge + pad baseline (before inject consumes text).
                     let task_id = self.begin_task(&slug, &text);
+                    self.record_event(
+                        &slug,
+                        seance_core::replay::ReplayEvent::Send {
+                            from: act.clone(),
+                            text: text.clone(),
+                            submit,
+                        },
+                    );
                     if let Some(session) = self.panes[idx].session.as_ref() {
                         session.set_input_origin(&act);
                         session.scroll_to_bottom();
@@ -246,6 +254,16 @@ impl Engine {
                             events::LogOpts {
                                 origin: Some("ctl_send_raw".into()),
                                 ..Default::default()
+                            },
+                        );
+                        self.record_event(
+                            &slug,
+                            seance_core::replay::ReplayEvent::Input {
+                                origin: act.clone(),
+                                bytes_b64: {
+                                    use base64::Engine as _;
+                                    base64::engine::general_purpose::STANDARD.encode(&bytes)
+                                },
                             },
                         );
                         if let Some(session) = self.panes[idx].session.as_ref() {
@@ -389,6 +407,13 @@ impl Engine {
                         if let Err(e) = assert_self_or_cross(&slug, &from, &act) {
                             return err(e);
                         }
+                        self.record_event(
+                            &slug,
+                            seance_core::replay::ReplayEvent::Status {
+                                state: state.clone(),
+                                note: note.clone(),
+                            },
+                        );
                         // Evidence gate: bare status-set done cannot lie without pad growth.
                         if state == "done" {
                             if let Err(e) = self.require_since_inject_evidence(&slug) {

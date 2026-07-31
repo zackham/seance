@@ -6,6 +6,7 @@
 pub mod engine;
 pub mod protocol;
 pub mod pty_session;
+pub mod recorder;
 pub mod snapshot;
 
 pub use engine::Engine;

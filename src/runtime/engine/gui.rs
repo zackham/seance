@@ -533,19 +533,60 @@ impl Engine {
         }
     }
 
+    /// Arm the replay recorder (daemon startup; tests leave it unarmed).
+    pub fn set_recorder(&mut self, handle: crate::runtime::recorder::RecorderHandle) {
+        self.recorder = Some(handle);
+    }
+
+    /// Recorder-side grid tap: ship a snapshot clone at most every 33ms per
+    /// pane. `force` bypasses the gate (human input / title / exit moments).
+    pub(crate) fn record_grid_tap(&mut self, slug: &str, force: bool) {
+        let Some(rec) = self.recorder.as_ref() else { return };
+        let now = Instant::now();
+        if !force {
+            if let Some(last) = self.last_record_grid.get(slug) {
+                if now.duration_since(*last).as_millis() < 33 {
+                    return;
+                }
+            }
+        }
+        if let Some(snap) = self.snapshot_pane(slug) {
+            let rec = rec.clone();
+            self.last_record_grid.insert(slug.to_string(), now);
+            rec.grid(snap);
+        }
+    }
+
+    /// Recorder event tap (no-op until armed).
+    pub(crate) fn record_event(&self, slug: &str, ev: seance_core::replay::ReplayEvent) {
+        if let Some(rec) = self.recorder.as_ref() {
+            rec.event(slug, ev);
+        }
+    }
+
     pub fn handle_session_event(&mut self, ev: SessionEvent) {
         match &ev {
             SessionEvent::Wakeup { slug } => {
+                let slug_r = slug.clone();
                 self.push_grid_throttled(slug);
+                self.record_grid_tap(&slug_r, false);
             }
             SessionEvent::FlushGrid { slug } => {
                 // Force-send the coalesced frame (timer already waited).
+                let slug_r = slug.clone();
                 self.push_grid_now(slug);
+                self.record_grid_tap(&slug_r, false);
             }
             SessionEvent::ForceFullGrid { slug } => {
                 self.push_grid_full(slug);
             }
             SessionEvent::Title { slug, title } => {
+                self.record_event(
+                    slug,
+                    seance_core::replay::ReplayEvent::Title {
+                        title: title.clone().unwrap_or_default(),
+                    },
+                );
                 // Title changes are rare — push immediately (also a grid).
                 if let Some(s) = self.session_mut(slug) {
                     s.bump_rev();
@@ -559,6 +600,11 @@ impl Engine {
                 }
             }
             SessionEvent::Exited { slug, code } => {
+                self.record_grid_tap(&slug.clone(), true);
+                self.record_event(slug, seance_core::replay::ReplayEvent::Exited { code: *code });
+                if let Some(rec) = self.recorder.as_ref() {
+                    rec.pane_closed(slug);
+                }
                 // Process died → auto-close. Dead shells/agents leave clutter;
                 // re-summon if needed. No tombstone chrome.
                 let code = *code;
@@ -875,6 +921,13 @@ impl Engine {
                 Some(state)
             }
             GuiRequest::Input { pane, bytes_b64 } => {
+                self.record_event(
+                    &pane,
+                    seance_core::replay::ReplayEvent::Input {
+                        origin: "human".into(),
+                        bytes_b64: bytes_b64.clone(),
+                    },
+                );
                 if let Ok(bytes) = base64_decode(&bytes_b64) {
                     let n = bytes.len();
                     let is_ctrl = bytes.first().is_some_and(|b| *b < 0x20);
@@ -912,6 +965,10 @@ impl Engine {
                 None
             }
             GuiRequest::Resize { pane, cols, rows } => {
+                self.record_event(
+                    &pane,
+                    seance_core::replay::ReplayEvent::Resized { cols, rows },
+                );
                 if let Some(s) = self.session_mut(&pane) {
                     s.resize(cols, rows);
                     s.bump_rev();
@@ -940,6 +997,14 @@ impl Engine {
                 self.snapshot_pane(&pane).map(|s| Self::grid_event(s, None))
             }
             GuiRequest::Inject { pane, text, submit } => {
+                self.record_event(
+                    &pane,
+                    seance_core::replay::ReplayEvent::Send {
+                        from: "human".into(),
+                        text: text.clone(),
+                        submit,
+                    },
+                );
                 let n = text.len();
                 self.human_steal_pane(&pane);
                 if let Some(s) = self.session_mut(&pane) {
@@ -971,6 +1036,14 @@ impl Engine {
                     .and_then(|s| s.ghost.lock().unwrap().take());
                 if let Some(g) = ghost {
                     let from = g.from.clone();
+                    self.record_event(
+                        &pane,
+                        seance_core::replay::ReplayEvent::Send {
+                            from: format!("propose:{from}"),
+                            text: g.text.clone(),
+                            submit: true,
+                        },
+                    );
                     if let Some(entry) = self.proposals.get_mut(&g.id) {
                         entry.1 = Some("accepted".into());
                     }
