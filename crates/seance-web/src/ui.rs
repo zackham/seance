@@ -301,13 +301,15 @@ impl Chrome {
 
         if workspaces.is_empty() {
             let empty = mk(&doc, "div", "empty")?;
-            empty.append_child(text_el(&doc, "div", "", "no workspaces")?.unchecked_ref())?;
-            let hint = mk(&doc, "div", "empty-hint")?;
-            hint.set_inner_html("");
-            hint.append_child(text_el(&doc, "span", "", "run ")?.unchecked_ref())?;
-            hint.append_child(text_el(&doc, "code", "", "seance ctl new")?.unchecked_ref())?;
-            empty.append_child(&hint)?;
+            empty.append_child(text_el(&doc, "div", "", "no workspaces here")?.unchecked_ref())?;
+            if state.foreign_workspaces.is_empty() {
+                let hint = mk(&doc, "div", "empty-hint")?;
+                hint.append_child(text_el(&doc, "span", "", "run ")?.unchecked_ref())?;
+                hint.append_child(text_el(&doc, "code", "", "seance ctl new")?.unchecked_ref())?;
+                empty.append_child(&hint)?;
+            }
             self.sidebar.append_child(&empty)?;
+            self.build_foreign(state)?;
             return Ok(());
         }
 
@@ -332,6 +334,8 @@ impl Chrome {
                 actions.select_workspace(&name)
             })?;
         }
+
+        self.build_foreign(state)?;
 
         let Some(ws) = selected else { return Ok(()) };
         self.sidebar.append_child(mk(&doc, "div", "side-sep")?.unchecked_ref())?;
@@ -365,6 +369,45 @@ impl Chrome {
                 .insert(pane.slug.clone(), RowRefs { row, dot, badge });
         }
         self.sidebar.append_child(&list)?;
+        Ok(())
+    }
+
+    /// Workspaces living on other windows (the native GUI, usually): list them
+    /// with a pull affordance — TransferWorkspace moves ownership here. This
+    /// is THE affordance for "seance from anywhere": attach from a browser,
+    /// pull the workspace you need, work, and the daemon keeps it durable.
+    fn build_foreign(&mut self, state: &ClientState) -> Result<(), JsValue> {
+        if state.foreign_workspaces.is_empty() {
+            return Ok(());
+        }
+        let doc = self.doc.clone();
+        self.sidebar.append_child(mk(&doc, "div", "side-sep")?.unchecked_ref())?;
+        self.sidebar
+            .append_child(text_el(&doc, "div", "side-head", "elsewhere")?.unchecked_ref())?;
+        let Some(my_window) = state.window_id.clone() else {
+            return Ok(());
+        };
+        for fw in &state.foreign_workspaces {
+            let row = mk(&doc, "div", "ws-row foreign")?;
+            row.append_child(text_el(&doc, "span", "row-name", &fw.workspace)?.unchecked_ref())?;
+            row.append_child(
+                text_el(&doc, "span", "row-count", &fw.window_label)?.unchecked_ref(),
+            )?;
+            let pull = text_el(&doc, "button", "pull-btn", "pull")?;
+            row.append_child(pull.unchecked_ref())?;
+            self.sidebar.append_child(&row)?;
+
+            let actions = self.actions.clone();
+            let ws = fw.workspace.clone();
+            let to_window = my_window.clone();
+            bind_click(&pull, &mut self.structural, move |ev| {
+                ev.stop_propagation();
+                actions.send(seance_core::protocol::GuiRequest::TransferWorkspace {
+                    workspace: ws.clone(),
+                    to_window: to_window.clone(),
+                });
+            })?;
+        }
         Ok(())
     }
 

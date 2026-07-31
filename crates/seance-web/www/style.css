@@ -367,7 +367,6 @@ input:focus {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  height: 100%;
   min-height: 96px;
   padding: 16px;
   color: var(--text-faint);
@@ -387,6 +386,7 @@ input:focus {
 #tiles .empty {
   grid-column: 1 / -1;
   grid-row: 1 / -1;
+  height: 100%;
 }
 
 /* ── pane tiles ─────────────────────────────────────────────────────── */
@@ -632,3 +632,13 @@ input:focus {
     transition: none !important;
   }
 }
+
+/* foreign (elsewhere) workspaces — pull-to-here */
+.ws-row.foreign { cursor: default; }
+.ws-row.foreign .row-name { color: var(--text-dim); }
+.pull-btn {
+  margin-left: auto; padding: 1px 8px; font: inherit; font-size: 11px;
+  color: var(--violet); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+}
+.pull-btn:hover { border-color: var(--violet-dim); color: var(--text); }

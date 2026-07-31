@@ -165,7 +165,10 @@ re-run it and read orch + worker pads before claiming done. Pure refactors
   commit: bump Cargo.toml/Cargo.lock/README status line, add the `## [0.9.N]`
   section at top, clear `[Unreleased]`. Product deltas, not commit dumps.
 - `docs/PLAYBOOK.md` (pins) · `docs/CONTROL.md` (protocol) ·
-  `docs/DAEMON.md` (upgrade) · `docs/THEME.md` (palette; `SeancePalette`).
+  `docs/DAEMON.md` (upgrade) · `docs/THEME.md` (palette; `SeancePalette`) ·
+  `docs/WEB.md` (web client + bridge; `crates/seance-core` is the sans-io
+  wire crate shared native/wasm — it must always compile for both targets;
+  rebuild `dist/` via `scripts/build-web.sh` on any version bump).
 
 ## Conventions
 
