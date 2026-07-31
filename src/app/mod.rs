@@ -522,6 +522,21 @@ impl SeanceApp {
         })
         .detach();
 
+        // gpui frame tracing → [seance lat] "gpui draw": true Window::draw
+        // cost (layout+prepaint+paint), the number element construction
+        // probes can't see. Cheap ring buffer; drained every 5s.
+        gpui::profiler::set_frame_trace_enabled(true);
+        let mut frame_collector = gpui::profiler::FrameTimingCollector::new();
+        cx.spawn(async move |_this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(5000))
+                .await;
+            for t in frame_collector.collect_unseen() {
+                crate::latency_probe::record("gpui draw", t.draw_duration().as_micros() as u64);
+            }
+        })
+        .detach();
+
         let _ = window;
         app
     }
@@ -2003,6 +2018,10 @@ impl Render for SeanceApp {
         // layout/paint happen outside this fn — but the RATE is exact.
         self.render_probe.tick();
         crate::latency_probe::complete("g_kick", "app", "gui kick→render");
+        // Stamp render entry; paint_grid records "gui render→paint" against it
+        // — locates frame cost between element construction and canvas paint
+        // (i.e. gpui layout) without patching gpui.
+        crate::remote_term_view::stamp_render_start();
         // Always-on inter-render gap ([seance lat] "gui render gap"): the
         // effective app frame cadence — the ceiling on notify→paint latency.
         {

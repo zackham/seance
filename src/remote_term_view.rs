@@ -1222,7 +1222,18 @@ fn shape_run_cached(
     shaped
 }
 
+/// Last SeanceApp::render entry — lets pane paints report how deep into the
+/// frame (post-construction layout etc.) they land ("gui render→paint").
+static RENDER_START: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+pub(crate) fn stamp_render_start() {
+    *RENDER_START.lock().unwrap() = Some(std::time::Instant::now());
+}
+
 fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
+    if let Some(t0) = *RENDER_START.lock().unwrap() {
+        crate::latency_probe::record("gui render→paint", t0.elapsed().as_micros() as u64);
+    }
     crate::latency_probe::complete("g_paint", &layout.slug, "gui key→paint");
     crate::latency_probe::complete("g_frame", &layout.slug, "gui apply→paint");
     let paint_t0 = std::time::Instant::now();

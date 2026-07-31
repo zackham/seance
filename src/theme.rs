@@ -138,6 +138,8 @@ pub fn init(cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);
 
     let p = palette();
+    let installed_fonts: std::collections::HashSet<String> =
+        cx.text_system().all_font_names().into_iter().collect();
     let theme = Theme::global_mut(cx);
 
     // 2. Overwrite ThemeColor fields with the candlelit palette. `theme` derefs
@@ -150,6 +152,44 @@ pub fn init(cx: &mut App) {
     //    without this step the overrides would be invisible to components.
     //    `ThemeTokens: From<&ThemeColor>` (theme_color.rs:364-368).
     theme.tokens = ThemeTokens::from(&theme.colors);
+
+    // 4. Font hygiene (typing-lag part 5). gpui-component's stock chrome font
+    //    is ".SystemUIFont" — a macOS pseudo-family that never resolves on
+    //    Linux — and its Linux mono default ("DejaVu Sans Mono") isn't
+    //    installed on this box either. gpui caches the failed lookup, but
+    //    RE-MATERIALIZES the error on every hit (`anyhow!("{err}")`), and
+    //    with RUST_BACKTRACE=1 (which the GUI sets for crash logs) each of
+    //    those captures a fresh backtrace — thousands of times per frame
+    //    inside taffy text measurement. Measured: ~60ms of every 66ms
+    //    Window::draw was font_id on missing families. Pick the first
+    //    actually-installed candidate so the hot path is a cached Ok.
+    if cfg!(not(target_os = "macos")) {
+        let installed: std::collections::HashSet<String> = installed_fonts;
+        let pick = |cands: &[&str]| {
+            cands
+                .iter()
+                .find(|c| installed.contains(**c))
+                .map(|c| gpui::SharedString::from(c.to_string()))
+        };
+        if let Some(f) = pick(&[
+            "Liberation Sans",
+            "Noto Sans",
+            "DejaVu Sans",
+            "Cantarell",
+            "Ubuntu",
+        ]) {
+            theme.font_family = f;
+        }
+        if let Some(f) = pick(&[
+            "JetBrainsMono Nerd Font",
+            "JetBrains Mono",
+            "Liberation Mono",
+            "DejaVu Sans Mono",
+            "Noto Sans Mono",
+        ]) {
+            theme.mono_font_family = f;
+        }
+    }
 }
 
 // ── internal wiring ─────────────────────────────────────────────────────────

@@ -19,6 +19,27 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.10.8] — 2026-07-30
+
+### Fixed
+
+- **Typing lag, part 5 (the big one): every frame cost 66ms because the
+  chrome fonts didn't exist.** gpui-component's stock theme requests
+  `.SystemUIFont` (a macOS pseudo-family that never resolves on Linux) and a
+  Linux mono default (`DejaVu Sans Mono`) that isn't installed here. gpui
+  caches the failed lookup but re-materializes the error object on every hit
+  — and with `RUST_BACKTRACE=1` (which the GUI sets for crash logs) each hit
+  captures a fresh backtrace, thousands of times per frame inside taffy text
+  measurement. Stack-sampling showed ~90% of `Window::draw` inside
+  `TextSystem::font_id`. Theme init now picks the first actually-installed
+  family (sans: Liberation Sans → Noto Sans → …; mono: JetBrainsMono Nerd
+  Font → …) via `all_font_names()`. **Window::draw p50 66.3ms → 3.7ms.**
+
+### Added
+
+- `[seance lat] gpui draw` gauge (gpui frame tracing drained every 5s) and
+  `gui render→paint` — the probes that located the frame cost.
+
 ## [0.10.7] — 2026-07-30
 
 ### Fixed
