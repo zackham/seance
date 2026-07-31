@@ -22,8 +22,8 @@
 //! - **Privacy is a standing banner, not a modal.** Everything on those
 //!   screens ships — keys, paths, half-typed secrets. A modal you dismiss once
 //!   is a modal you never read again; the strip stays up the whole session,
-//!   and *review pass* walks the human through every chapter in Chapters mode
-//!   so "I looked" is a thing they actually did.
+//!   and *review pass* parks the player on the first chapter (paused) so the
+//!   human can step prompt to prompt and "I looked" is a thing they did.
 //!
 //! **Untrusted text.** Chapter text is reconstructed terminal input. It is
 //! never interpolated into markup: every dynamic string in this file lands via
@@ -829,8 +829,9 @@ fn apply_chapters(editor: &Rc<RefCell<Editor>>) {
     }
 }
 
-/// Chapters mode, parked on the first included chapter, playing. The point is
-/// that the human sees every prompt and its response before publishing.
+/// Park the player on the first included chapter, paused, so the human can
+/// walk the prompts (⏭ in the player) before publishing. The player lost its
+/// modes in the 2nd design pass — "review pass" is now exactly seek + pause.
 fn review_pass(editor: &Rc<RefCell<Editor>>) {
     apply_chapters(editor);
     let (player, start) = {
@@ -842,9 +843,8 @@ fn review_pass(editor: &Rc<RefCell<Editor>>) {
     };
     let Some(p) = player else { return };
     let Ok(mut p) = p.try_borrow_mut() else { return };
-    p.set_mode(crate::replay::Mode::Chapters);
     p.seek_ms(start);
-    p.play();
+    p.pause();
 }
 
 /// Reopen the editor two hours further back — the one control that really is
@@ -1223,7 +1223,7 @@ const SKELETON: &str = r##"<div class="rpe-head">
 <div class="rpe-warn">
   <span class="rpe-warn-mark">⚠</span>
   <span class="rpe-warn-text">everything on these screens ships — scrub before you share</span>
-  <div id="rpe-review" class="rpe-btn rpe-btn-violet" title="step through every chapter in chapters mode">review pass</div>
+  <div id="rpe-review" class="rpe-btn rpe-btn-violet" title="park on the first prompt, then step with ⏭">review pass</div>
 </div>
 <div id="rpe-pub" class="rpe-pub"><div id="rpe-pub-body"></div></div>
 <div class="rpe-body">

@@ -13,8 +13,18 @@
 //!   snapshot) and paint through the live client's [`TermRenderer`], verbatim —
 //!   replay and live share one renderer so they cannot drift.
 //! - **event records** drive the human-attention affordances: the input flash on
-//!   a tile, the prompt caption bar at chapters, and the flame flash on the
-//!   receiving pane's tile.
+//!   a tile and the flame flash on the pane that receives a chapter.
+//!
+//! # Original resolution, always
+//!
+//! A recording has a fixed geometry (`cols × rows` per pane, as recorded). The
+//! player never refits that grid to the browser: each canvas is painted at its
+//! **recorded** size (`cols × cell_w`, `rows × cell_h` at [`FONT_PX`], DPR-aware)
+//! and the whole tile workspace — borders and headers included — is scaled by a
+//! single CSS `transform: scale(S)` to fit the viewport, letterboxed and
+//! centered. `S` never exceeds 1.0 (we letterbox, we never upscale). A mid-recording
+//! resize changes the snapshot's `cols`/`rows`, which re-derives the natural size
+//! on the next size probe.
 //!
 //! # Idle compression — the timeline is ACTIVITY, not wall time
 //!
@@ -27,22 +37,21 @@
 //! The virtual clock, the timeline coordinate system, chapter ticks, seeks,
 //! click-to-scrub and the elapsed/total readout all live in **compressed** ms.
 //! Record application still keys off wall `t_ms` — conversion happens at that
-//! boundary and nowhere else. Every mode advances the compressed clock, so
-//! "real time" means *as it happened, minus the dead air*.
+//! boundary and nowhere else. Playback, scrubbing and flyTo all advance the
+//! compressed clock, so "1×" means *as it happened, minus the dead air*.
 //!
 //! Seeking never replays from `t=0`: each pane keeps the record indices of its
 //! `KIND_FULL` keyframes, so a seek resets to the nearest keyframe at or before
 //! the target and applies forward from there (a forward seek that is already
 //! past that keyframe just continues from the current cursor — no reset at all).
 //!
-//! # Modes
+//! # Playback
 //!
-//! The default is [`Mode::FastForward`]: agent output runs ~20×, and the clock
-//! *stops* on every chapter with the prompt up in the caption bar. That is the
-//! whole thesis of the feature — a watcher should see the human's inputs at
-//! human size and the machine's output compressed. [`Mode::RealTime`] plays at
-//! 1× (cycle 2×/4×) without chapter stops; [`Mode::Chapters`] stays paused and
-//! steps prompt to prompt.
+//! There are no modes. Playback runs at an honest multiplier (1× / 1.5× / 2× /
+//! 5×) over compressed time and never auto-pauses. Prompts are *navigation*:
+//! ticks on the scrubber and the targets of the prev/next buttons, which
+//! **flyTo** — an eased ~500-700ms scrub through compressed time that paints as
+//! fast as decode allows and lands paused exactly on the chapter's submit stamp.
 //!
 //! # Time arguments
 //!
@@ -56,6 +65,14 @@
 //! [`Player::current_ms`] and [`Player::set_range`] speak the same recording
 //! clock the manifest and the chapters do. Compression is strictly internal;
 //! callers never see a compressed value.
+//!
+//! # Position in the URL (bundle mode only)
+//!
+//! A shared recording is a link, so the paused position is part of the link:
+//! whenever the player comes to rest in [`Source::Bundle`] mode it writes
+//! `#t=<absolute wall ms>` with `history.replaceState`, and on load it seeks
+//! there (paused). Playback never touches the URL, and neither does
+//! [`Source::Bridge`] — in the editor the hash belongs to the editor route.
 //!
 //! # DOM
 //!
@@ -96,12 +113,27 @@ use crate::renderer::{RenderOpts, TermRenderer};
 // than reaching into the live app module.
 const FONT_FAMILY: &str =
     "ui-monospace, 'Cascadia Mono', 'CaskaydiaMono Nerd Font Mono', 'JetBrains Mono', monospace";
-const FONT_PX: f32 = 13.0;
+/// The recording's own font size — the natural-resolution basis, so it is a
+/// constant of the *format*, not a display preference.
+const FONT_PX: f32 = 14.0;
 
-/// Agent-output compression factor in [`Mode::FastForward`].
-const FF_SPEED: f64 = 20.0;
-/// How long the prompt caption lingers once playback resumes.
-const CAPTION_MS: f64 = 4000.0;
+/// Selectable playback multipliers (over compressed time).
+const SPEEDS: [f64; 4] = [1.0, 1.5, 2.0, 5.0];
+
+/// flyTo duration floor / ceiling. A short hop still reads as a move; a
+/// half-hour jump still lands inside a beat.
+const FLY_MIN_MS: f64 = 500.0;
+const FLY_MAX_MS: f64 = 700.0;
+/// Compressed distance at which flyTo saturates at [`FLY_MAX_MS`].
+const FLY_FULL_DIST_MS: f64 = 60_000.0;
+
+/// Tile chrome outside the canvas: 1px border ×2 (both axes) plus the header
+/// strip. Baked in so the natural-size math is a pure function.
+const TILE_CHROME_W: f64 = 2.0;
+const TILE_CHROME_H: f64 = 26.0;
+/// Gap between tiles, and the stage padding around the scaled workspace.
+const TILE_GAP: f64 = 10.0;
+
 /// Input-flash decay on a tile after a human keystroke record.
 const FLASH_MS: f64 = 420.0;
 /// Flame flash on the tile that receives a chapter.
@@ -148,30 +180,9 @@ impl Source {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    RealTime,
-    /// Agent output ~20×, auto-PAUSE at each chapter.
-    FastForward,
-    /// Paused; step via chapter list.
-    Chapters,
-}
-
-impl Mode {
-    fn label(self) -> &'static str {
-        match self {
-            Mode::RealTime => "real time",
-            Mode::FastForward => "fast forward",
-            Mode::Chapters => "chapters",
-        }
-    }
-
-    fn next(self) -> Mode {
-        match self {
-            Mode::RealTime => Mode::FastForward,
-            Mode::FastForward => Mode::Chapters,
-            Mode::Chapters => Mode::RealTime,
-        }
+impl Source {
+    fn is_bundle(&self) -> bool {
+        matches!(self, Source::Bundle { .. })
     }
 }
 
@@ -204,6 +215,20 @@ fn fmt_idle(ms: u64) -> String {
     } else {
         format!("{}h {:02}m", s / 3_600, (s % 3_600) / 60)
     }
+}
+
+/// Collapse a prompt to one truncated line for the hover bubble.
+fn one_line(text: &str, max: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let head: String = flat.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", head.trim_end())
 }
 
 // --- wall ↔ compressed time ------------------------------------------------
@@ -404,19 +429,96 @@ fn first_after(times: &[u64], t: u64) -> Option<usize> {
     (start < times.len()).then_some(start)
 }
 
-/// The first chapter strictly inside `(t, target]` — the FastForward stop.
+/// The first chapter strictly inside `(t, target]` — what a playback frame
+/// stepped over, and therefore what flashes its pane.
 fn chapter_crossed(chapter_times: &[u64], t: u64, target: u64) -> Option<usize> {
     let i = first_after(chapter_times, t)?;
     (chapter_times[i] <= target).then_some(i)
 }
 
-/// Playback speed for the current mode/multiplier.
-fn speed_for(mode: Mode, realtime_mult: f64) -> f64 {
-    match mode {
-        Mode::RealTime => realtime_mult,
-        Mode::FastForward => FF_SPEED,
-        Mode::Chapters => 0.0,
+/// The chapter *before* `t` (strictly), for ⏮.
+fn chapter_before(chapter_times: &[u64], t: u64) -> Option<usize> {
+    let i = chapter_times.partition_point(|&c| c < t);
+    i.checked_sub(1)
+}
+
+// --- flyTo: an eased scrub, not a jump cut ---------------------------------
+
+/// How long a flyTo over `dist` compressed ms should take. Short hops sit at
+/// the floor, long ones ramp to — and stop at — the ceiling: distance buys
+/// *speed*, never more of the viewer's time.
+fn fly_duration_ms(dist_comp: u64) -> f64 {
+    let f = (dist_comp as f64 / FLY_FULL_DIST_MS).clamp(0.0, 1.0);
+    FLY_MIN_MS + (FLY_MAX_MS - FLY_MIN_MS) * f
+}
+
+/// Cubic ease-in-out over `p ∈ [0,1]`.
+fn ease_in_out(p: f64) -> f64 {
+    let p = p.clamp(0.0, 1.0);
+    if p < 0.5 {
+        4.0 * p * p * p
+    } else {
+        let q = -2.0 * p + 2.0;
+        1.0 - q * q * q / 2.0
     }
+}
+
+/// Eased compressed position `p` of the way from `a` to `b` (either direction).
+fn fly_position(a: u64, b: u64, p: f64) -> u64 {
+    let e = ease_in_out(p);
+    let (a, b) = (a as f64, b as f64);
+    (a + (b - a) * e).round().max(0.0) as u64
+}
+
+// --- `#t=` fragment --------------------------------------------------------
+
+/// Parse `#t=<absolute wall ms>`. Anything else — another route, a non-number,
+/// no hash at all — is `None`, which the caller reads as "start of range".
+fn parse_time_fragment(hash: &str) -> Option<u64> {
+    let body = hash.strip_prefix('#').unwrap_or(hash);
+    let v = body.strip_prefix("t=")?;
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    v.parse::<u64>().ok()
+}
+
+fn format_time_fragment(t_ms: u64) -> String {
+    format!("#t={t_ms}")
+}
+
+// --- original-resolution layout --------------------------------------------
+
+/// Natural (unscaled) size of the tile grid, given each pane's natural tile
+/// size in CSS px and the column count. Columns take their widest tile and
+/// rows their tallest, so the workspace framing survives ragged geometries.
+fn natural_layout(tiles: &[(f64, f64)], cols: usize) -> (f64, f64) {
+    if tiles.is_empty() || cols == 0 {
+        return (0.0, 0.0);
+    }
+    let rows = tiles.len().div_ceil(cols);
+    let mut col_w = vec![0f64; cols];
+    let mut row_h = vec![0f64; rows];
+    for (i, &(w, h)) in tiles.iter().enumerate() {
+        let (c, r) = (i % cols, i / cols);
+        col_w[c] = col_w[c].max(w);
+        row_h[r] = row_h[r].max(h);
+    }
+    let used_cols = col_w.iter().filter(|w| **w > 0.0).count().max(1);
+    (
+        col_w.iter().sum::<f64>() + TILE_GAP * (used_cols.saturating_sub(1)) as f64,
+        row_h.iter().sum::<f64>() + TILE_GAP * (rows.saturating_sub(1)) as f64,
+    )
+}
+
+/// Letterbox scale: shrink to fit, never upscale past the recorded pixels.
+fn fit_scale(natural: (f64, f64), avail: (f64, f64)) -> f64 {
+    let (nw, nh) = natural;
+    let (aw, ah) = avail;
+    if nw <= 0.0 || nh <= 0.0 || aw <= 0.0 || ah <= 0.0 {
+        return 1.0;
+    }
+    (aw / nw).min(ah / nh).min(1.0).max(0.02)
 }
 
 /// Accept an offset-from-start or an absolute stamp (see module docs).
@@ -627,24 +729,38 @@ impl PaneTrack {
 // ---------------------------------------------------------------------------
 
 struct Dom {
-    root: web_sys::Element,
     tiles: web_sys::Element,
-    sidebar: web_sys::Element,
-    chapter_list: web_sys::Element,
+    /// Wrapper that carries the `transform: scale(S)` — the tiles, their
+    /// borders and their headers all live inside it, so the framing scales
+    /// as one piece.
+    scale_wrap: web_sys::Element,
+    /// Centering box the wrapper is letterboxed inside.
+    fit: web_sys::Element,
     timeline: web_sys::Element,
     played: web_sys::Element,
     playhead: web_sys::Element,
     ticks: web_sys::Element,
     tooltip: web_sys::Element,
-    caption: web_sys::Element,
-    caption_text: web_sys::Element,
-    caption_resume: web_sys::Element,
+    reset_btn: web_sys::Element,
+    prev_btn: web_sys::Element,
     play_btn: web_sys::Element,
-    mode_btn: web_sys::Element,
-    speed_btn: web_sys::Element,
+    next_btn: web_sys::Element,
+    /// Speed group — hidden (not removed) while paused.
+    speeds: web_sys::Element,
+    speed_btns: Vec<web_sys::Element>,
     time_label: web_sys::Element,
     time_wall: web_sys::Element,
     status: web_sys::Element,
+}
+
+/// An in-flight flyTo. Positions are **compressed** ms; the landing is stored
+/// in wall ms so the touchdown is exact rather than interpolated.
+struct Fly {
+    from_comp: u64,
+    to_comp: u64,
+    land_wall: u64,
+    start: f64,
+    dur: f64,
 }
 
 pub struct Player {
@@ -664,21 +780,24 @@ pub struct Player {
     /// Wall ↔ compressed mapping over the loaded window. Built once, in
     /// [`Player::finish_load`]; trims re-use it (they only narrow `from`/`to`).
     map: TimeMap,
-    mode: Mode,
-    realtime_mult: f64,
+    /// Playback multiplier, one of [`SPEEDS`]. Survives pause/resume.
+    speed: f64,
     playing: bool,
     /// Wall clock (performance.now) at the previous stepper frame.
     last_wall: f64,
-    /// Wall time at which the prompt caption fades (0 = hidden/pinned).
-    caption_until: f64,
-    /// Caption pinned open until the viewer presses play (FastForward stop).
-    caption_pinned: bool,
+    /// In-flight prompt-to-prompt scrub (⏮ / ⏭).
+    fly: Option<Fly>,
     current_chapter: Option<usize>,
     pending_loads: usize,
     load_error: Option<String>,
     dragging: bool,
+    /// Latest drag position, applied once per rAF.
+    drag_x: Option<i32>,
     tiles_built: bool,
     last_css_probe: f64,
+    /// Natural (unscaled) workspace size in CSS px, and the scale last applied.
+    natural: (f64, f64),
+    scale: f64,
 }
 
 impl Player {
@@ -707,18 +826,19 @@ impl Player {
             from_ms: 0,
             to_ms: 0,
             map: TimeMap::default(),
-            mode: Mode::FastForward,
-            realtime_mult: 1.0,
+            speed: SPEEDS[0],
             playing: false,
             last_wall: now_ms(),
-            caption_until: 0.0,
-            caption_pinned: false,
+            fly: None,
             current_chapter: None,
             pending_loads: 0,
             load_error: None,
             dragging: false,
+            drag_x: None,
             tiles_built: false,
             last_css_probe: 0.0,
+            natural: (0.0, 0.0),
+            scale: 1.0,
         }));
 
         wire_controls(&player);
@@ -727,34 +847,23 @@ impl Player {
         player
     }
 
+    /// Resume at the **current** speed. A flyTo in flight is abandoned (the
+    /// viewer changed their mind), and a play from the end rewinds first.
     pub fn play(&mut self) {
-        if self.mode == Mode::Chapters {
-            // "Play" in chapter mode means: step to the next prompt.
-            if let Some(i) = first_after(&self.chapter_times, self.t) {
-                let t = self.chapter_times[i].min(self.to_ms);
-                self.seek_absolute(t);
-                self.show_caption(i, true);
-            }
-            return;
-        }
+        self.fly = None;
         if self.t >= self.to_ms {
             self.seek_absolute(self.from_ms);
         }
         self.playing = true;
-        // Resuming releases a pinned caption but does not yank it: it stays
-        // readable for a beat and fades on its own.
-        self.caption_pinned = false;
-        if self.caption_until > 0.0 {
-            self.caption_until = now_ms() + CAPTION_MS;
-        }
-        self.sync_caption();
         self.last_wall = now_ms();
         self.sync_controls();
     }
 
     pub fn pause(&mut self) {
+        self.fly = None;
         self.playing = false;
         self.sync_controls();
+        self.publish_position();
     }
 
     pub fn is_playing(&self) -> bool {
@@ -765,15 +874,8 @@ impl Player {
     /// module docs). Idle compression is internal — callers never convert.
     pub fn seek_ms(&mut self, t_ms: u64) {
         let t = absolutize(t_ms, self.from_ms);
+        self.fly = None;
         self.seek_absolute(t);
-    }
-
-    pub fn set_mode(&mut self, mode: Mode) {
-        self.mode = mode;
-        if mode == Mode::Chapters {
-            self.playing = false;
-        }
-        self.sync_controls();
     }
 
     /// Editor trim: playback + timeline clamp. Both bounds are **absolute
@@ -795,7 +897,6 @@ impl Player {
         self.chapter_times = chapters.iter().map(|c| c.t_ms).collect();
         self.chapters = chapters;
         self.current_chapter = last_at_or_before(&self.chapter_times, self.t);
-        self.rebuild_chapter_list();
         self.rebuild_ticks();
     }
 
@@ -817,65 +918,52 @@ impl Player {
         self.sync_controls();
     }
 
-    /// One rAF step: advance the clock, fold records, paint dirty panes.
+    /// One rAF step: advance the clock (or the flyTo), fold records, paint.
     fn frame(&mut self) {
         let wall = now_ms();
         let dt = (wall - self.last_wall).clamp(0.0, MAX_FRAME_DT_MS);
         self.last_wall = wall;
 
-        if self.playing && !self.panes.is_empty() {
-            let speed = speed_for(self.mode, self.realtime_mult);
-            // The clock advances in COMPRESSED ms; the wall target is whatever
-            // that lands on. Dead air therefore costs GAP_BEAT_MS of watching,
-            // in every mode.
-            let comp_now = self.map.wall_to_comp(self.t);
-            let comp_target = comp_now.saturating_add((dt * speed).round().max(0.0) as u64);
-            let mut target = self.map.comp_to_wall(comp_target).max(self.t);
-            let mut stop_at_chapter = None;
+        if let Some(x) = self.drag_x.take() {
+            self.seek_from_client_x(x);
+        }
 
-            // Any mode captions a crossed chapter; only FastForward stops on it.
+        if self.fly.is_some() {
+            self.step_fly(wall);
+        } else if self.playing && !self.panes.is_empty() {
+            // The clock advances in COMPRESSED ms; the wall target is whatever
+            // that lands on. Dead air therefore always costs GAP_BEAT_MS of
+            // watching, and everything live plays at the honest multiplier.
+            let comp_now = self.map.wall_to_comp(self.t);
+            let comp_target = comp_now.saturating_add((dt * self.speed).round().max(0.0) as u64);
+            let mut target = self.map.comp_to_wall(comp_target).max(self.t);
+
+            // Playback never stops at a prompt any more — it only flashes the
+            // pane that received it.
             let crossed = chapter_crossed(&self.chapter_times, self.t, target);
-            if let Some(i) = crossed {
-                if self.mode == Mode::FastForward {
-                    target = self.chapter_times[i];
-                    stop_at_chapter = Some(i);
-                }
-            }
+            let mut ended = false;
             if target >= self.to_ms {
                 target = self.to_ms;
-                stop_at_chapter = None;
-                self.playing = false;
-                self.sync_controls();
+                ended = true;
             }
             self.t = target;
             for p in self.panes.iter_mut() {
                 p.advance_to(target, wall);
             }
             self.current_chapter = last_at_or_before(&self.chapter_times, target);
-
-            match stop_at_chapter {
-                Some(i) => {
-                    self.playing = false;
-                    self.show_caption(i, true);
-                    self.sync_controls();
+            if let Some(i) = crossed {
+                if self.chapter_times[i] <= target {
+                    self.flash_chapter(i);
                 }
-                // Rolled past it without stopping: caption only, self-fading.
-                None => {
-                    if let Some(i) = crossed {
-                        if self.chapter_times[i] <= target {
-                            self.show_caption(i, false);
-                        }
-                    }
-                }
+            }
+            if ended {
+                self.playing = false;
+                self.sync_controls();
+                self.publish_position();
             }
             self.update_progress();
         }
 
-        // Caption fade + tile flash decay are wall-clock, not recording-clock.
-        if self.caption_until > 0.0 && !self.caption_pinned && wall > self.caption_until {
-            self.caption_until = 0.0;
-            self.sync_caption();
-        }
         for p in self.panes.iter_mut() {
             let on = p.flash_until > wall;
             if on != p.flashing {
@@ -899,28 +987,28 @@ impl Player {
         self.paint();
     }
 
-    /// Canvas backing stores follow their tiles. Measuring forces layout, so
-    /// it is throttled — tiles only change size on window resize.
+    /// **Original resolution.** Each canvas is sized from its snapshot's
+    /// recorded `cols × rows`, never from the browser box; the workspace is
+    /// then letterboxed by one CSS transform. A mid-recording resize simply
+    /// changes the snapshot geometry, so it re-derives here for free.
+    ///
+    /// Measuring forces layout, so it is throttled — natural sizes only change
+    /// on a recorded resize, and the scale only on a window resize.
     fn sync_sizes(&mut self, wall: f64) {
         if wall - self.last_css_probe < 250.0 {
             return;
         }
         self.last_css_probe = wall;
         let Some(doc) = document() else { return };
-        for p in self.panes.iter_mut() {
+        // One entry per pane, in pane order — a pane whose canvas is not in the
+        // document yet contributes a zero cell rather than shifting the grid.
+        let mut natural_tiles: Vec<(f64, f64)> = vec![(0.0, 0.0); self.panes.len()];
+        for (i, p) in self.panes.iter_mut().enumerate() {
             let Some(el) = doc.get_element_by_id(&p.canvas_id) else {
                 continue;
             };
-            let Some(parent) = el.parent_element() else {
-                continue;
-            };
-            let rect = parent.get_bounding_client_rect();
-            let (w, h) = (rect.width(), rect.height().max(0.0));
-            if w < 8.0 || h < 8.0 {
-                continue;
-            }
             if p.renderer.is_none() {
-                let canvas: web_sys::HtmlCanvasElement = match el.dyn_into() {
+                let canvas: web_sys::HtmlCanvasElement = match el.clone().dyn_into() {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
@@ -935,14 +1023,77 @@ impl Player {
                     }
                 }
             }
+            // Before the first keyframe lands there is no recorded geometry —
+            // a conventional 80×24 keeps the frame from collapsing to nothing.
+            let (cols, rows) = p
+                .snap
+                .as_ref()
+                .map(|s| (s.cols.max(1) as f64, s.rows.max(1) as f64))
+                .unwrap_or((80.0, 24.0));
+            let (w, h) = match p.renderer.as_ref() {
+                Some(r) => {
+                    let (cw, ch) = r.cell_size_css();
+                    (
+                        (cols * cw as f64).round().max(8.0),
+                        (rows * ch as f64).round().max(8.0),
+                    )
+                }
+                None => continue,
+            };
             if (w - p.css_size.0).abs() > 0.5 || (h - p.css_size.1).abs() > 0.5 {
                 if let Some(r) = p.renderer.as_mut() {
                     r.resize_to(w, h);
                 }
                 p.css_size = (w, h);
                 p.dirty = true;
+                // The tile body is the canvas's box: pin it so the grid cell
+                // takes the recorded size rather than stretching to the page.
+                if let Some(body) = el.parent_element() {
+                    set_style(&body, "width", &format!("{w}px"));
+                    set_style(&body, "height", &format!("{h}px"));
+                }
             }
+            natural_tiles[i] = (w + TILE_CHROME_W, h + TILE_CHROME_H);
         }
+        self.apply_fit(&natural_tiles);
+    }
+
+    /// Compute the natural workspace box, then letterbox it into the stage.
+    fn apply_fit(&mut self, natural_tiles: &[(f64, f64)]) {
+        if natural_tiles.is_empty() {
+            return;
+        }
+        let cols = grid_cols(natural_tiles.len());
+        let natural = natural_layout(natural_tiles, cols);
+        if natural.0 <= 0.0 || natural.1 <= 0.0 {
+            return;
+        }
+        let rect = self.dom.fit.get_bounding_client_rect();
+        let s = fit_scale(natural, (rect.width(), rect.height()));
+        let same_natural =
+            (natural.0 - self.natural.0).abs() < 0.5 && (natural.1 - self.natural.1).abs() < 0.5;
+        if same_natural && (s - self.scale).abs() < 0.0005 {
+            return; // nothing moved — don't touch style and force a relayout
+        }
+        if !same_natural {
+            set_style(&self.dom.tiles, "width", &format!("{}px", natural.0));
+            set_style(&self.dom.tiles, "height", &format!("{}px", natural.1));
+        }
+        self.natural = natural;
+        // The wrapper carries the *scaled* box so the flex parent can centre
+        // it; the tiles inside keep their recorded pixels and just transform.
+        self.scale = s;
+        set_style(
+            &self.dom.scale_wrap,
+            "width",
+            &format!("{:.2}px", natural.0 * s),
+        );
+        set_style(
+            &self.dom.scale_wrap,
+            "height",
+            &format!("{:.2}px", natural.1 * s),
+        );
+        set_style(&self.dom.tiles, "transform", &format!("scale({s:.5})"));
     }
 
     fn paint(&mut self) {
@@ -967,28 +1118,13 @@ impl Player {
         }
     }
 
-    /// Raise the prompt caption for `idx`, and flash the pane it landed on.
-    /// `pinned` holds it open until the viewer presses play (the FastForward
-    /// stop); otherwise it fades [`CAPTION_MS`] after now.
-    fn show_caption(&mut self, idx: usize, pinned: bool) {
-        // Copied out first: the rest of this method needs `&mut self`.
-        let Some((text, pane)) = self
-            .chapters
-            .get(idx)
-            .map(|ch| (ch.text.clone(), ch.pane.clone()))
-        else {
+    /// Flame-flash the pane a chapter landed on. The player has no prompt
+    /// chrome any more — this subtle cue is all that marks the crossing.
+    fn flash_chapter(&mut self, idx: usize) {
+        let Some(pane) = self.chapters.get(idx).map(|ch| ch.pane.clone()) else {
             return;
         };
-        self.dom.caption_text.set_text_content(Some(&text));
-        let _ = self.dom.caption.set_attribute("data-expand", "0");
-        // Pinning is about being *stopped* at the prompt, not about the mode:
-        // a FastForward auto-pause and a chapter jump both land paused.
-        self.caption_pinned = pinned && !self.playing;
-        self.caption_until = now_ms() + CAPTION_MS;
-        self.sync_caption();
         self.current_chapter = Some(idx);
-        self.highlight_chapter();
-
         let wall = now_ms();
         for p in self.panes.iter_mut() {
             if p.slug == pane {
@@ -997,29 +1133,108 @@ impl Player {
         }
     }
 
-    fn hide_caption(&mut self) {
-        self.caption_pinned = false;
-        self.caption_until = 0.0;
-        self.sync_caption();
+    // -- flyTo -------------------------------------------------------------
+
+    /// Start an eased scrub from the current position to `target` (absolute
+    /// wall ms), landing PAUSED. Distances are measured — and interpolated —
+    /// in compressed time, so dead air costs a beat here exactly as it does
+    /// during playback.
+    fn fly_to(&mut self, target: u64) {
+        let target = target.clamp(self.from_ms, self.to_ms);
+        self.playing = false;
+        let from_comp = self.map.wall_to_comp(self.t);
+        let to_comp = self.map.wall_to_comp(target);
+        if from_comp == to_comp {
+            self.fly = None;
+            self.seek_absolute(target);
+            self.publish_position();
+            return;
+        }
+        let dist = from_comp.abs_diff(to_comp);
+        self.fly = Some(Fly {
+            from_comp,
+            to_comp,
+            land_wall: target,
+            start: now_ms(),
+            dur: fly_duration_ms(dist),
+        });
+        self.sync_controls();
     }
 
-    /// Visibility + the pinned "▶ resume" affordance, from caption state.
-    fn sync_caption(&self) {
-        let show = self.caption_until > 0.0 || self.caption_pinned;
-        let _ = self
-            .dom
-            .caption
-            .set_attribute("data-show", if show { "1" } else { "0" });
-        let _ = self.dom.caption.set_attribute(
-            "data-pinned",
-            if self.caption_pinned { "1" } else { "0" },
-        );
-        // The resume affordance only exists while the caption is holding
-        // playback — otherwise it is a button that does nothing.
-        let _ = self
-            .dom
-            .caption_resume
-            .set_attribute("data-show", if self.caption_pinned { "1" } else { "0" });
+    /// One flyTo frame. Painting is whatever the decode can do inside this rAF
+    /// — the position comes from the *clock*, not from a frame counter, so a
+    /// slow decode drops intermediate states instead of stretching the flight.
+    fn step_fly(&mut self, wall: f64) {
+        // Copied out: the rest of this method needs `&mut self`.
+        let Some((from_comp, to_comp, land, start, dur)) = self
+            .fly
+            .as_ref()
+            .map(|f| (f.from_comp, f.to_comp, f.land_wall, f.start, f.dur))
+        else {
+            return;
+        };
+        let p = if dur > 0.0 {
+            ((wall - start) / dur).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        if p >= 1.0 {
+            self.fly = None;
+            self.seek_absolute(land);
+            self.publish_position();
+            return;
+        }
+        let comp = fly_position(from_comp, to_comp, p);
+        let t = self.map.comp_to_wall(comp);
+        self.seek_absolute(t);
+    }
+
+    /// ⏭ — the next chapter after the playhead, or the end of the range.
+    fn go_next_chapter(&mut self) {
+        let target = match first_after(&self.chapter_times, self.t) {
+            Some(i) => self.chapter_times[i],
+            None => self.to_ms,
+        };
+        self.fly_to(target);
+    }
+
+    /// ⏮ — the previous chapter, or the start of the recording when the
+    /// playhead sits before the first one.
+    fn go_prev_chapter(&mut self) {
+        let target = match chapter_before(&self.chapter_times, self.t) {
+            Some(i) => self.chapter_times[i],
+            None => self.from_ms,
+        };
+        self.fly_to(target);
+    }
+
+    fn set_speed(&mut self, speed: f64) {
+        self.speed = speed;
+        self.sync_controls();
+    }
+
+    // -- URL state (bundle only) -------------------------------------------
+
+    /// Write `#t=<wall ms>` for a position the player has come to REST at.
+    /// Never during playback, never in bridge mode — the editor owns the hash
+    /// there, and a hash that churned at 60fps would poison history and the
+    /// back button alike.
+    fn publish_position(&self) {
+        if !self.source.is_bundle() || self.playing || self.fly.is_some() {
+            return;
+        }
+        replace_fragment(Some(&format_time_fragment(self.t)));
+    }
+
+    /// ↺ — back to the start, paused, with the position dropped from the URL.
+    fn reset(&mut self) {
+        self.fly = None;
+        self.playing = false;
+        self.seek_absolute(self.from_ms);
+        if self.source.is_bundle() {
+            replace_fragment(None);
+        }
+        self.sync_controls();
     }
 
     /// Wall span of the trim window (what actually elapsed, idle included).
@@ -1061,69 +1276,24 @@ impl Player {
             } else {
                 String::new()
             }));
-        self.highlight_chapter();
-    }
-
-    fn highlight_chapter(&self) {
-        let Some(doc) = document() else { return };
-        for (i, _) in self.chapters.iter().enumerate() {
-            if let Some(row) = doc.get_element_by_id(&format!("rp-ch-{i}")) {
-                let on = self.current_chapter == Some(i);
-                let _ = row.set_attribute("data-on", if on { "1" } else { "0" });
-            }
-        }
     }
 
     fn sync_controls(&self) {
         self.dom
             .play_btn
-            .set_text_content(Some(if self.playing { "❚❚" } else { "▶" }));
-        self.dom.mode_btn.set_text_content(Some(self.mode.label()));
-        let speed = match self.mode {
-            Mode::RealTime => format!("{}×", self.realtime_mult as u32),
-            Mode::FastForward => format!("{}×", FF_SPEED as u32),
-            Mode::Chapters => "step".to_string(),
-        };
-        self.dom.speed_btn.set_text_content(Some(&speed));
-        let _ = self.dom.speed_btn.set_attribute(
-            "data-live",
-            if self.mode == Mode::RealTime { "1" } else { "0" },
-        );
+            .set_text_content(Some(if self.playing { "⏸" } else { "▶" }));
+        // Progressive disclosure: the speed group is meaningless while paused,
+        // so it hides — with `visibility`, which keeps its box and therefore
+        // keeps the bar from twitching every time playback stops.
+        let _ = self
+            .dom
+            .speeds
+            .set_attribute("data-show", if self.playing { "1" } else { "0" });
+        for (i, b) in self.dom.speed_btns.iter().enumerate() {
+            let on = SPEEDS.get(i).map(|s| *s == self.speed).unwrap_or(false);
+            let _ = b.set_attribute("data-on", if on { "1" } else { "0" });
+        }
         self.update_progress();
-    }
-
-    fn rebuild_chapter_list(&self) {
-        let Some(doc) = document() else { return };
-        self.dom.chapter_list.set_text_content(Some(""));
-        if self.chapters.is_empty() {
-            if let Ok(empty) = doc.create_element("div") {
-                empty.set_class_name("rp-ch-empty");
-                empty.set_text_content(Some("no prompts in this range"));
-                append(&self.dom.chapter_list, &empty);
-            }
-            return;
-        }
-        for (i, ch) in self.chapters.iter().enumerate() {
-            let Ok(row) = doc.create_element("div") else {
-                continue;
-            };
-            row.set_class_name("rp-ch");
-            row.set_id(&format!("rp-ch-{i}"));
-            let _ = row.set_attribute("data-idx", &i.to_string());
-            let _ = row.set_attribute("title", &ch.text);
-            if let Ok(t) = doc.create_element("div") {
-                t.set_class_name("rp-ch-t");
-                t.set_text_content(Some(&fmt_mmss(ch.t_ms.saturating_sub(self.from_ms))));
-                append(&row, &t);
-            }
-            if let Ok(x) = doc.create_element("div") {
-                x.set_class_name("rp-ch-x");
-                x.set_text_content(Some(&ch.text));
-                append(&row, &x);
-            }
-            append(&self.dom.chapter_list, &row);
-        }
-        self.highlight_chapter();
     }
 
     /// Fraction along the (compressed) timeline for an absolute wall stamp.
@@ -1169,31 +1339,36 @@ impl Player {
         if rect.width() <= 0.0 {
             return;
         }
+        self.fly = None;
         let frac = ((client_x as f64 - rect.x()) / rect.width()).clamp(0.0, 1.0);
         let comp = self.map.wall_to_comp(self.from_ms)
             + (frac * self.active_duration() as f64).round() as u64;
         let t = self.map.comp_to_wall(comp);
         self.seek_absolute(t);
-        self.hide_caption();
     }
 
-    /// Nearest chapter — or collapsed gap — within ~7px of the cursor → tooltip.
+    /// Hover bubble: the compressed elapsed under the cursor, plus the nearest
+    /// chapter (or collapsed gap) when one is within 8px. One line — the bar
+    /// is a scrubber, not a reading surface.
     fn hover_timeline(&self, client_x: i32) {
         let rect = self.dom.timeline.get_bounding_client_rect();
         if rect.width() <= 0.0 {
             return;
         }
+        let frac = ((client_x as f64 - rect.x()) / rect.width()).clamp(0.0, 1.0);
+        let at_comp = (frac * self.active_duration() as f64).round() as u64;
         let x_of = |t: u64| rect.x() + rect.width() * self.frac_of(t);
-        // (distance, label, wall position) — chapters win ties by being checked
-        // first with a strict `<`.
-        let mut best: Option<(f64, String, u64)> = None;
+
+        // (distance, label) — chapters win ties by being checked first with a
+        // strict `<`.
+        let mut best: Option<(f64, String)> = None;
         for ch in self.chapters.iter() {
             if ch.t_ms < self.from_ms || ch.t_ms > self.to_ms {
                 continue;
             }
             let d = (x_of(ch.t_ms) - client_x as f64).abs();
-            if d <= 7.0 && best.as_ref().map(|(bd, _, _)| d < *bd).unwrap_or(true) {
-                best = Some((d, ch.text.clone(), ch.t_ms));
+            if d <= 8.0 && best.as_ref().map(|(bd, _)| d < *bd).unwrap_or(true) {
+                best = Some((d, one_line(&ch.text, 60)));
             }
         }
         for (comp_mid, skipped) in self.map.collapsed_gaps() {
@@ -1202,24 +1377,21 @@ impl Player {
                 continue;
             }
             let d = (x_of(wall_mid) - client_x as f64).abs();
-            if d <= 7.0 && best.as_ref().map(|(bd, _, _)| d < *bd).unwrap_or(true) {
-                best = Some((d, format!("skipped {} idle", fmt_idle(skipped)), wall_mid));
+            if d <= 8.0 && best.as_ref().map(|(bd, _)| d < *bd).unwrap_or(true) {
+                best = Some((d, format!("skipped {} idle", fmt_idle(skipped))));
             }
         }
-        match best {
-            Some((_, text, at)) => {
-                self.dom.tooltip.set_text_content(Some(&text));
-                set_style(
-                    &self.dom.tooltip,
-                    "left",
-                    &format!("{:.4}%", self.frac_of(at) * 100.0),
-                );
-                let _ = self.dom.tooltip.set_attribute("data-show", "1");
-            }
-            None => {
-                let _ = self.dom.tooltip.set_attribute("data-show", "0");
-            }
-        }
+        let text = match best {
+            Some((_, label)) => format!("{}  ·  {}", fmt_mmss(at_comp), label),
+            None => fmt_mmss(at_comp),
+        };
+        self.dom.tooltip.set_text_content(Some(&text));
+        set_style(
+            &self.dom.tooltip,
+            "left",
+            &format!("{:.4}%", frac * 100.0),
+        );
+        let _ = self.dom.tooltip.set_attribute("data-show", "1");
     }
 
     fn set_status(&self, text: &str) {
@@ -1256,12 +1428,12 @@ impl Player {
                 _ => cb(Ok(m)),
             }
         }
-        // FastForward opens paused on the first prompt: the viewer sees the
-        // question before the answer scrolls.
-        if self.mode == Mode::FastForward && !self.chapters.is_empty() {
-            let first = self.chapter_times[0].clamp(self.from_ms, self.to_ms);
-            self.seek_absolute(first);
-            self.show_caption(0, true);
+        // Bundle mode restores the shared position; everything else opens
+        // paused on the first frame of the range.
+        if self.source.is_bundle() {
+            if let Some(t) = location_hash().as_deref().and_then(parse_time_fragment) {
+                self.seek_absolute(t);
+            }
         }
     }
 
@@ -1273,10 +1445,12 @@ impl Player {
         let Some(doc) = document() else { return };
         self.dom.tiles.set_text_content(Some(""));
         let cols = grid_cols(self.panes.len());
+        // `max-content`, not `1fr`: tiles are sized by the recording, and the
+        // whole grid is what gets scaled.
         set_style(
             &self.dom.tiles,
             "grid-template-columns",
-            &format!("repeat({cols}, minmax(0, 1fr))"),
+            &format!("repeat({cols}, max-content)"),
         );
         for p in self.panes.iter() {
             let Ok(tile) = doc.create_element("div") else {
@@ -1503,6 +1677,26 @@ fn now_ms() -> f64 {
         .unwrap_or(0.0)
 }
 
+fn location_hash() -> Option<String> {
+    web_sys::window()?.location().hash().ok()
+}
+
+/// Rewrite the fragment in place — no history entry, no scroll, no reload.
+/// `None` drops the fragment entirely (path + query only).
+///
+/// NEEDS web-sys feature: `History` (`History::replace_state_with_url`),
+/// `Location` (`pathname`, `search`). Both are already enabled.
+fn replace_fragment(frag: Option<&str>) {
+    let Some(win) = web_sys::window() else { return };
+    let loc = win.location();
+    let path = loc.pathname().unwrap_or_default();
+    let search = loc.search().unwrap_or_default();
+    let url = format!("{path}{search}{}", frag.unwrap_or(""));
+    if let Ok(h) = win.history() {
+        let _ = h.replace_state_with_url(&JsValue::NULL, "", Some(&url));
+    }
+}
+
 fn device_pixel_ratio() -> f64 {
     web_sys::window()
         .map(|w| w.device_pixel_ratio())
@@ -1543,77 +1737,72 @@ fn build_dom(mount: &web_sys::Element) -> Dom {
     let root = el(&doc, "div", "rp-root");
     let body = el(&doc, "div", "rp-body");
 
-    // Sidebar
-    let sidebar = el(&doc, "aside", "rp-side");
-    let side_head = el(&doc, "div", "rp-side-head");
-    let side_title = el(&doc, "span", "rp-side-title");
-    side_title.set_text_content(Some("prompts"));
-    let collapse = el(&doc, "button", "rp-collapse");
-    collapse.set_text_content(Some("‹"));
-    append(&side_head, &side_title);
-    append(&side_head, &collapse);
-    let chapter_list = el(&doc, "div", "rp-ch-list");
-    append(&sidebar, &side_head);
-    append(&sidebar, &chapter_list);
-
-    // Stage
+    // Stage: a centering box (`rp-fit`) holding the scaled workspace.
     let stage = el(&doc, "div", "rp-stage");
+    let fit = el(&doc, "div", "rp-fit");
+    let scale_wrap = el(&doc, "div", "rp-scale");
     let tiles = el(&doc, "div", "rp-tiles");
     let status = el(&doc, "div", "rp-status");
     let _ = status.set_attribute("data-show", "1");
     status.set_text_content(Some("loading recording…"));
-    append(&stage, &tiles);
+    append(&scale_wrap, &tiles);
+    append(&fit, &scale_wrap);
+    append(&stage, &fit);
     append(&stage, &status);
-
-    append(&body, &sidebar);
     append(&body, &stage);
-
-    // Prompt caption — docked above the control bar, covering nothing. The
-    // terminal stays fully visible while the prompt is up.
-    let caption = el(&doc, "div", "rp-cap");
-    let _ = caption.set_attribute("data-show", "0");
-    let _ = caption.set_attribute("data-pinned", "0");
-    let _ = caption.set_attribute("data-expand", "0");
-    let caption_main = el(&doc, "div", "rp-cap-main");
-    let caption_kicker = el(&doc, "div", "rp-cap-kicker");
-    caption_kicker.set_text_content(Some("prompt"));
-    let caption_text = el(&doc, "div", "rp-cap-text");
-    append(&caption_main, &caption_kicker);
-    append(&caption_main, &caption_text);
-    let caption_resume = el(&doc, "div", "rp-cap-resume");
-    caption_resume.set_text_content(Some("▶ resume"));
-    append(&caption, &caption_main);
-    append(&caption, &caption_resume);
 
     // Control bar
     let bar = el(&doc, "div", "rp-bar");
+    // The hit area is the whole 24px strip; the visible track lives inside it.
     let timeline = el(&doc, "div", "rp-timeline");
+    let track = el(&doc, "div", "rp-track");
     let played = el(&doc, "div", "rp-played");
     let ticks = el(&doc, "div", "rp-ticks");
     let playhead = el(&doc, "div", "rp-playhead");
     let tooltip = el(&doc, "div", "rp-tip");
     let _ = tooltip.set_attribute("data-show", "0");
+    append(&timeline, &track);
     append(&timeline, &played);
     append(&timeline, &ticks);
     append(&timeline, &playhead);
     append(&timeline, &tooltip);
 
     let controls = el(&doc, "div", "rp-controls");
+    let reset_btn = el(&doc, "button", "rp-btn rp-reset");
+    reset_btn.set_text_content(Some("↺"));
+    let _ = reset_btn.set_attribute("title", "back to the start");
+    let prev_btn = el(&doc, "button", "rp-btn rp-nav rp-prev");
+    prev_btn.set_text_content(Some("⏮"));
+    let _ = prev_btn.set_attribute("title", "previous prompt");
     let play_btn = el(&doc, "button", "rp-btn rp-play");
     play_btn.set_text_content(Some("▶"));
-    let mode_btn = el(&doc, "button", "rp-btn rp-mode");
-    mode_btn.set_text_content(Some(Mode::FastForward.label()));
-    let speed_btn = el(&doc, "button", "rp-btn rp-speed");
-    speed_btn.set_text_content(Some("20×"));
+    let next_btn = el(&doc, "button", "rp-btn rp-nav rp-next");
+    next_btn.set_text_content(Some("⏭"));
+    let _ = next_btn.set_attribute("title", "next prompt");
+
+    let speeds = el(&doc, "div", "rp-speeds");
+    let _ = speeds.set_attribute("data-show", "0");
+    let mut speed_btns = Vec::with_capacity(SPEEDS.len());
+    for (i, s) in SPEEDS.iter().enumerate() {
+        let b = el(&doc, "button", "rp-btn rp-speed");
+        b.set_text_content(Some(&fmt_speed(*s)));
+        let _ = b.set_attribute("data-speed", &i.to_string());
+        let _ = b.set_attribute("data-on", if i == 0 { "1" } else { "0" });
+        append(&speeds, &b);
+        speed_btns.push(b);
+    }
+
     let time_label = el(&doc, "div", "rp-time");
     time_label.set_text_content(Some("0:00 / 0:00"));
     let time_wall = el(&doc, "div", "rp-time-wall");
     let spacer = el(&doc, "div", "rp-spacer");
     let chip = el(&doc, "div", "rp-chip");
     chip.set_text_content(Some("recorded with seance ✦"));
+    append(&controls, &reset_btn);
+    append(&controls, &prev_btn);
     append(&controls, &play_btn);
-    append(&controls, &mode_btn);
-    append(&controls, &speed_btn);
+    append(&controls, &next_btn);
+    append(&controls, &speeds);
     append(&controls, &time_label);
     append(&controls, &time_wall);
     append(&controls, &spacer);
@@ -1623,46 +1812,55 @@ fn build_dom(mount: &web_sys::Element) -> Dom {
     append(&bar, &controls);
 
     append(&root, &body);
-    append(&root, &caption);
     append(&root, &bar);
     append(mount, &root);
 
     Dom {
-        root,
         tiles,
-        sidebar,
-        chapter_list,
+        scale_wrap,
+        fit,
         timeline,
         played,
         playhead,
         ticks,
         tooltip,
-        caption,
-        caption_text,
-        caption_resume,
+        reset_btn,
+        prev_btn,
         play_btn,
-        mode_btn,
-        speed_btn,
+        next_btn,
+        speeds,
+        speed_btns,
         time_label,
         time_wall,
         status,
     }
 }
 
+/// `1×` / `1.5×` — no trailing `.0`.
+fn fmt_speed(s: f64) -> String {
+    if (s - s.round()).abs() < 1e-9 {
+        format!("{}×", s.round() as u32)
+    } else {
+        format!("{s}×")
+    }
+}
+
 fn wire_controls(player: &Rc<RefCell<Player>>) {
-    let (play_btn, mode_btn, speed_btn, timeline, chapter_list, sidebar, root, caption) = {
+    let (reset_btn, prev_btn, play_btn, next_btn, speeds, timeline) = {
         let p = player.borrow();
         (
+            p.dom.reset_btn.clone(),
+            p.dom.prev_btn.clone(),
             p.dom.play_btn.clone(),
-            p.dom.mode_btn.clone(),
-            p.dom.speed_btn.clone(),
+            p.dom.next_btn.clone(),
+            p.dom.speeds.clone(),
             p.dom.timeline.clone(),
-            p.dom.chapter_list.clone(),
-            p.dom.sidebar.clone(),
-            p.dom.root.clone(),
-            p.dom.caption.clone(),
         )
     };
+
+    on_click(&reset_btn, player, |p, _ev| p.reset());
+    on_click(&prev_btn, player, |p, _ev| p.go_prev_chapter());
+    on_click(&next_btn, player, |p, _ev| p.go_next_chapter());
 
     // play / pause
     on_click(&play_btn, player, |p, _ev| {
@@ -1673,87 +1871,21 @@ fn wire_controls(player: &Rc<RefCell<Player>>) {
         }
     });
 
-    // mode cycle
-    on_click(&mode_btn, player, |p, _ev| {
-        let next = p.mode.next();
-        p.set_mode(next);
-    });
-
-    // speed: only meaningful in real time (1× → 2× → 4×)
-    on_click(&speed_btn, player, |p, _ev| {
-        if p.mode != Mode::RealTime {
-            p.set_mode(Mode::RealTime);
-        }
-        p.realtime_mult = match p.realtime_mult as u32 {
-            1 => 2.0,
-            2 => 4.0,
-            _ => 1.0,
-        };
-        p.sync_controls();
-    });
-
-    // Caption bar: the resume hint is its own element and resumes playback;
-    // anywhere else on the bar toggles full expansion of the prompt text.
-    on_click(&caption, player, |p, ev| {
-        let on_resume = ev
+    // speed group (delegated — one listener, four buttons)
+    on_click(&speeds, player, |p, ev| {
+        let Some(i) = ev
             .target()
             .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-            .and_then(|e| e.closest(".rp-cap-resume").ok().flatten())
-            .is_some();
-        if on_resume {
-            p.caption_pinned = false;
-            p.play();
+            .and_then(|e| e.closest(".rp-speed").ok().flatten())
+            .and_then(|b| b.get_attribute("data-speed"))
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
             return;
+        };
+        if let Some(s) = SPEEDS.get(i).copied() {
+            p.set_speed(s);
         }
-        let expanded = p.dom.caption.get_attribute("data-expand").as_deref() == Some("1");
-        let _ = p
-            .dom
-            .caption
-            .set_attribute("data-expand", if expanded { "0" } else { "1" });
     });
-
-    // sidebar collapse
-    if let Ok(Some(btn)) = root.query_selector(".rp-collapse") {
-        let side = sidebar.clone();
-        let cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |_ev: web_sys::MouseEvent| {
-            let collapsed = side.get_attribute("data-collapsed").as_deref() == Some("1");
-            let _ = side.set_attribute("data-collapsed", if collapsed { "0" } else { "1" });
-        });
-        let _ = btn.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
-        cb.forget();
-    }
-
-    // chapter rows (delegated: the list is rebuilt by set_chapters)
-    {
-        let pl = Rc::clone(player);
-        let cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
-            let Some(target) = ev.target() else { return };
-            let Ok(el) = target.dyn_into::<web_sys::Element>() else {
-                return;
-            };
-            let Ok(Some(row)) = el.closest(".rp-ch") else {
-                return;
-            };
-            let Some(idx) = row
-                .get_attribute("data-idx")
-                .and_then(|s| s.parse::<usize>().ok())
-            else {
-                return;
-            };
-            if let Ok(mut p) = pl.try_borrow_mut() {
-                let Some(t) = p.chapter_times.get(idx).copied() else {
-                    return;
-                };
-                p.pause();
-                p.seek_absolute(t);
-                // A chapter jump lands the caption pinned: the viewer chose to
-                // read this prompt, so it holds until they press play.
-                p.show_caption(idx, true);
-            }
-        });
-        let _ = chapter_list.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
-        cb.forget();
-    }
 
     // timeline: click / drag to seek, hover for the prompt tooltip
     {
@@ -1792,7 +1924,9 @@ fn wire_controls(player: &Rc<RefCell<Player>>) {
         let cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
             if let Ok(mut p) = pl.try_borrow_mut() {
                 if p.dragging {
-                    p.seek_from_client_x(ev.client_x());
+                    // Painted on the next rAF, not here: mousemove fires far
+                    // faster than a decode+render is worth.
+                    p.drag_x = Some(ev.client_x());
                 }
             }
         });
@@ -1800,9 +1934,16 @@ fn wire_controls(player: &Rc<RefCell<Player>>) {
         cb.forget();
 
         let pl = Rc::clone(player);
-        let cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |_ev: web_sys::MouseEvent| {
+        let cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
             if let Ok(mut p) = pl.try_borrow_mut() {
-                p.dragging = false;
+                if p.dragging {
+                    p.dragging = false;
+                    p.drag_x = None;
+                    p.seek_from_client_x(ev.client_x());
+                    // Release while paused is a resting position, so it is
+                    // shareable.
+                    p.publish_position();
+                }
             }
         });
         let _ = doc.add_event_listener_with_callback("mouseup", cb.as_ref().unchecked_ref());
@@ -1881,46 +2022,28 @@ fn ensure_style(doc: &web_sys::Document) {
 const REPLAY_CSS: &str = r#"
 .rp-root{--rp-bg:#131111;--rp-elev:#1C1718;--rp-surf:#211C1D;--rp-border:#352C2E;
 --rp-text:#EBE3DB;--rp-dim:#A69A91;--rp-faint:#69605D;--rp-flame:#E9A03A;
---rp-flame-dim:#A97328;--rp-violet:#A790D5;
+--rp-flame-dim:#A97328;
 position:absolute;inset:0;display:flex;flex-direction:column;background:var(--rp-bg);
 color:var(--rp-text);font:13px/1.45 ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;
 overflow:hidden;}
 .rp-body{flex:1;display:flex;min-height:0;}
 
-.rp-side{width:240px;flex:0 0 240px;display:flex;flex-direction:column;min-height:0;
-background:var(--rp-elev);border-right:1px solid var(--rp-border);
-transition:width .18s ease,flex-basis .18s ease;}
-.rp-side[data-collapsed="1"]{width:34px;flex-basis:34px;}
-.rp-side[data-collapsed="1"] .rp-ch-list,
-.rp-side[data-collapsed="1"] .rp-side-title{display:none;}
-.rp-side[data-collapsed="1"] .rp-collapse{transform:rotate(180deg);}
-.rp-side-head{display:flex;align-items:center;justify-content:space-between;
-padding:9px 10px;border-bottom:1px solid var(--rp-border);}
-.rp-side-title{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--rp-dim);}
-.rp-collapse{background:none;border:0;color:var(--rp-faint);cursor:pointer;font-size:14px;
-line-height:1;padding:2px 4px;}
-.rp-collapse:hover{color:var(--rp-flame);}
-.rp-ch-list{flex:1;overflow-y:auto;padding:6px;}
-.rp-ch-empty{color:var(--rp-faint);font-size:12px;padding:10px 8px;}
-.rp-ch{display:flex;gap:8px;padding:7px 8px;border-radius:5px;cursor:pointer;
-border-left:2px solid transparent;}
-.rp-ch:hover{background:var(--rp-surf);}
-.rp-ch[data-on="1"]{background:var(--rp-surf);border-left-color:var(--rp-flame);}
-.rp-ch[data-on="1"] .rp-ch-t{color:var(--rp-flame);}
-.rp-ch-t{flex:0 0 auto;font-variant-numeric:tabular-nums;font-size:11px;color:var(--rp-faint);
-padding-top:1px;}
-.rp-ch-x{font-size:12px;color:var(--rp-dim);display:-webkit-box;-webkit-line-clamp:3;
--webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap;word-break:break-word;}
-.rp-ch:hover .rp-ch-x{-webkit-line-clamp:unset;color:var(--rp-text);}
-
-.rp-stage{position:relative;flex:1;min-width:0;min-height:0;padding:10px;}
-.rp-tiles{display:grid;gap:10px;width:100%;height:100%;grid-auto-rows:1fr;}
-.rtile{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--rp-bg);
+.rp-stage{position:relative;flex:1;min-width:0;min-height:0;}
+/* Letterbox: the workspace keeps its recorded pixels and is centred inside. */
+.rp-fit{position:absolute;inset:10px;display:flex;align-items:center;
+justify-content:center;overflow:hidden;}
+.rp-scale{position:relative;flex:0 0 auto;}
+.rp-tiles{position:absolute;left:0;top:0;display:grid;gap:10px;
+transform-origin:0 0;will-change:transform;}
+.rtile{display:flex;flex-direction:column;background:var(--rp-bg);
 border:1px solid var(--rp-border);border-radius:7px;overflow:hidden;
 box-shadow:0 6px 22px rgba(0,0,0,.35);transition:border-color .18s ease,box-shadow .18s ease;}
 .rtile[data-flash="1"]{border-color:var(--rp-flame);
 box-shadow:0 0 0 1px rgba(233,160,58,.35),0 6px 26px rgba(233,160,58,.14);}
-.rtile-head{display:flex;align-items:center;gap:7px;padding:5px 9px;background:var(--rp-elev);
+/* Fixed 24px + the tile's 2 borders == TILE_CHROME_H, which is what the
+   natural-size math assumes. Change one, change the other. */
+.rtile-head{display:flex;align-items:center;gap:7px;padding:0 9px;height:24px;
+box-sizing:border-box;flex:0 0 auto;background:var(--rp-elev);
 border-bottom:1px solid var(--rp-border);font-size:11px;}
 .rtile-dot{width:6px;height:6px;border-radius:50%;background:var(--rp-faint);flex:0 0 auto;}
 .rtile[data-flash="1"] .rtile-dot{background:var(--rp-flame);}
@@ -1931,59 +2054,63 @@ from{border-color:var(--rp-flame);box-shadow:0 0 0 1px rgba(233,160,58,.45),
 to{border-color:var(--rp-border);box-shadow:0 6px 22px rgba(0,0,0,.35);}}
 .rtile-name{color:var(--rp-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .rtile-slug{color:var(--rp-faint);margin-left:auto;font-variant-numeric:tabular-nums;}
-.rtile-body{flex:1;min-height:0;position:relative;}
-.rtile-canvas{display:block;position:absolute;inset:0;}
+/* Sized in JS from the recording's cols×rows — never from the viewport. */
+.rtile-body{position:relative;flex:0 0 auto;}
+.rtile-canvas{display:block;}
 
 .rp-status{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
 color:var(--rp-dim);font-size:12px;letter-spacing:.03em;pointer-events:none;}
 .rp-status[data-show="0"]{display:none;}
 
-.rp-cap{flex:0 0 auto;display:flex;align-items:flex-start;gap:12px;
-padding:0 14px;max-height:0;opacity:0;overflow:hidden;cursor:pointer;
-border-left:3px solid var(--rp-flame);
-background:var(--rp-elev);
-background:color-mix(in srgb, var(--rp-elev) 96%, transparent);
-transition:opacity .3s ease,max-height .3s ease,padding .3s ease;}
-.rp-cap[data-show="1"]{opacity:1;max-height:180px;padding:9px 14px;}
-.rp-cap-main{flex:1;min-width:0;}
-.rp-cap-kicker{font-size:10px;letter-spacing:.16em;text-transform:uppercase;
-color:var(--rp-flame);margin-bottom:4px;}
-.rp-cap-text{font-size:13px;line-height:1.45;color:var(--rp-text);white-space:pre-wrap;
-word-break:break-word;font-family:ui-monospace,'JetBrains Mono',monospace;
-display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
-overflow:hidden;text-overflow:ellipsis;}
-.rp-cap[data-expand="1"] .rp-cap-text{-webkit-line-clamp:unset;max-height:150px;
-overflow-y:auto;}
-.rp-cap-resume{flex:0 0 auto;align-self:center;font-size:11px;color:var(--rp-faint);
-border:1px solid var(--rp-border);border-radius:5px;padding:3px 9px;white-space:nowrap;}
-.rp-cap-resume:hover{color:var(--rp-flame);border-color:var(--rp-flame-dim);}
-.rp-cap-resume[data-show="0"]{display:none;}
-
 .rp-bar{flex:0 0 auto;background:var(--rp-elev);border-top:1px solid var(--rp-border);}
-.rp-timeline{position:relative;height:16px;cursor:pointer;}
-.rp-timeline::after{content:"";position:absolute;left:0;right:0;top:7px;height:3px;
-background:var(--rp-surf);border-radius:2px;}
-.rp-played{position:absolute;left:0;top:7px;height:3px;width:0;border-radius:2px;
-background:var(--rp-flame-dim);z-index:1;}
+
+/* Scrubber: 24px of hit area, 6px of ink. --rp-mid is the track centre. */
+.rp-timeline{position:relative;height:24px;--rp-mid:12px;cursor:pointer;
+padding:0 0;}
+.rp-track{position:absolute;left:0;right:0;top:calc(var(--rp-mid) - 3px);height:6px;
+border-radius:3px;background:var(--rp-surf);
+box-shadow:inset 0 1px 2px rgba(0,0,0,.55);}
+.rp-played{position:absolute;left:0;top:calc(var(--rp-mid) - 3px);height:6px;width:0;
+border-radius:3px;z-index:1;
+background:linear-gradient(90deg,var(--rp-flame-dim),var(--rp-flame));}
 .rp-ticks{position:absolute;inset:0;z-index:2;pointer-events:none;}
-.rp-tick{position:absolute;top:3px;width:2px;height:11px;margin-left:-1px;border-radius:1px;
-background:var(--rp-flame);box-shadow:0 0 6px rgba(233,160,58,.55);}
-.rp-gap{position:absolute;top:2px;width:2px;height:13px;margin-left:-1px;
-background:var(--rp-faint);opacity:.75;}
-.rp-playhead{position:absolute;top:2px;width:2px;height:13px;margin-left:-1px;z-index:3;
-background:var(--rp-text);border-radius:1px;}
-.rp-tip{position:absolute;bottom:20px;transform:translateX(-50%);max-width:320px;
+/* Chapter ticks rise ABOVE the track; idle hashes sit faintly below it. */
+.rp-tick{position:absolute;top:calc(var(--rp-mid) - 9px);width:3px;height:7px;
+margin-left:-1.5px;border-radius:1.5px;background:var(--rp-flame);
+box-shadow:0 0 6px rgba(233,160,58,.5);}
+.rp-gap{position:absolute;top:calc(var(--rp-mid) + 4px);width:2px;height:5px;
+margin-left:-1px;background:var(--rp-faint);opacity:.5;}
+.rp-playhead{position:absolute;top:calc(var(--rp-mid) - 7px);width:14px;height:14px;
+margin-left:-7px;z-index:3;border-radius:50%;background:var(--rp-flame);
+box-shadow:0 0 0 2px var(--rp-elev),0 2px 6px rgba(0,0,0,.5);
+transition:transform .12s ease;}
+.rp-timeline:hover .rp-playhead,.rp-timeline:active .rp-playhead{transform:scale(1.15);}
+.rp-tip{position:absolute;bottom:26px;transform:translateX(-50%);max-width:360px;
 background:var(--rp-surf);border:1px solid var(--rp-border);border-radius:6px;
-padding:6px 9px;font-size:11px;color:var(--rp-text);white-space:pre-wrap;z-index:4;
-pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.5);}
+padding:5px 9px;font-size:11px;color:var(--rp-text);white-space:nowrap;overflow:hidden;
+text-overflow:ellipsis;z-index:4;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.5);}
 .rp-tip[data-show="0"]{display:none;}
 
-.rp-controls{display:flex;align-items:center;gap:8px;padding:7px 10px 9px;}
+.rp-controls{display:flex;align-items:center;gap:8px;padding:6px 10px 9px;}
 .rp-btn{background:var(--rp-surf);border:1px solid var(--rp-border);color:var(--rp-dim);
 border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer;line-height:1.3;}
 .rp-btn:hover{color:var(--rp-text);border-color:var(--rp-flame-dim);}
-.rp-play{color:var(--rp-flame);min-width:38px;}
-.rp-speed[data-live="1"]{color:var(--rp-violet);}
+/* Utility, not a primary: dim and small. */
+.rp-reset{color:var(--rp-faint);padding:4px 8px;}
+.rp-reset:hover{color:var(--rp-flame);}
+.rp-play{color:var(--rp-flame);min-width:40px;font-size:13px;}
+/* prev/next are THE primary controls — bigger targets, flame accent. */
+.rp-nav{color:var(--rp-flame);font-size:15px;line-height:1;padding:6px 14px;min-width:46px;
+border-color:var(--rp-flame-dim);}
+.rp-nav:hover{background:rgba(233,160,58,.12);border-color:var(--rp-flame);
+color:var(--rp-flame);}
+/* Progressive disclosure: visible only while playing, and hidden with
+   `visibility` so the bar never reflows on pause. */
+.rp-speeds{display:flex;gap:4px;margin-left:4px;}
+.rp-speeds[data-show="0"]{visibility:hidden;pointer-events:none;}
+.rp-speed{padding:3px 7px;font-size:11px;min-width:32px;}
+.rp-speed[data-on="1"]{color:var(--rp-flame);border-color:var(--rp-flame-dim);
+background:rgba(233,160,58,.12);}
 .rp-time{font-variant-numeric:tabular-nums;color:var(--rp-dim);font-size:12px;margin-left:4px;}
 .rp-time-wall{font-variant-numeric:tabular-nums;color:var(--rp-faint);font-size:12px;}
 .rp-spacer{flex:1;}
@@ -2182,11 +2309,137 @@ mod tests {
     }
 
     #[test]
-    fn speeds_follow_the_mode() {
-        assert_eq!(speed_for(Mode::RealTime, 1.0), 1.0);
-        assert_eq!(speed_for(Mode::RealTime, 4.0), 4.0);
-        assert_eq!(speed_for(Mode::FastForward, 1.0), FF_SPEED);
-        assert_eq!(speed_for(Mode::Chapters, 4.0), 0.0);
+    // Modes are gone (2nd design pass): playback is one honest multiplier and
+    // never auto-pauses, so what is asserted now is the *offered* speeds.
+    fn speeds_are_the_four_offered_multipliers() {
+        assert_eq!(SPEEDS, [1.0, 1.5, 2.0, 5.0]);
+        assert_eq!(fmt_speed(1.0), "1×");
+        assert_eq!(fmt_speed(1.5), "1.5×");
+        assert_eq!(fmt_speed(5.0), "5×");
+    }
+
+    // --- flyTo -------------------------------------------------------------
+
+    #[test]
+    fn fly_duration_scales_with_distance_and_caps() {
+        assert_eq!(fly_duration_ms(0), FLY_MIN_MS);
+        let short = fly_duration_ms(5_000);
+        assert!(short > FLY_MIN_MS && short < FLY_MAX_MS, "{short}");
+        // Long jumps do not cost proportionally more time — they go faster.
+        assert_eq!(fly_duration_ms(FLY_FULL_DIST_MS as u64), FLY_MAX_MS);
+        assert_eq!(fly_duration_ms(60 * 60 * 1_000), FLY_MAX_MS);
+        // Monotonic in distance.
+        let mut prev = 0.0;
+        for d in (0..120_000).step_by(3_331) {
+            let v = fly_duration_ms(d);
+            assert!(v >= prev, "non-monotonic at {d}");
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn easing_is_symmetric_and_pinned_at_the_ends() {
+        assert_eq!(ease_in_out(0.0), 0.0);
+        assert_eq!(ease_in_out(1.0), 1.0);
+        assert!((ease_in_out(0.5) - 0.5).abs() < 1e-9);
+        // s-curve: slow at the edges, fast in the middle.
+        assert!(ease_in_out(0.25) < 0.25);
+        assert!(ease_in_out(0.75) > 0.75);
+        // …and symmetric about the midpoint.
+        for p in [0.1, 0.3, 0.42] {
+            assert!((ease_in_out(p) + ease_in_out(1.0 - p) - 1.0).abs() < 1e-9);
+        }
+        // Out-of-range progress clamps rather than overshooting.
+        assert_eq!(ease_in_out(-1.0), 0.0);
+        assert_eq!(ease_in_out(9.0), 1.0);
+    }
+
+    #[test]
+    fn fly_position_interpolates_both_directions() {
+        assert_eq!(fly_position(1_000, 5_000, 0.0), 1_000);
+        assert_eq!(fly_position(1_000, 5_000, 1.0), 5_000);
+        assert_eq!(fly_position(1_000, 5_000, 0.5), 3_000);
+        // Rewind: the same curve, run backwards, never below zero.
+        assert_eq!(fly_position(5_000, 1_000, 0.5), 3_000);
+        assert_eq!(fly_position(5_000, 0, 1.0), 0);
+        let a = fly_position(0, 10_000, 0.25);
+        assert!(a < 2_500, "ease-in should lag a linear scrub: {a}");
+    }
+
+    // --- `#t=` fragment ----------------------------------------------------
+
+    #[test]
+    fn time_fragment_roundtrips_and_rejects_junk() {
+        assert_eq!(format_time_fragment(1_700_000_000_123), "#t=1700000000123");
+        assert_eq!(
+            parse_time_fragment(&format_time_fragment(1_700_000_000_123)),
+            Some(1_700_000_000_123)
+        );
+        assert_eq!(parse_time_fragment("t=42"), Some(42));
+        assert_eq!(parse_time_fragment("#t=0"), Some(0));
+        // Anything that is not our fragment is "no position", not an error.
+        assert_eq!(parse_time_fragment(""), None);
+        assert_eq!(parse_time_fragment("#"), None);
+        assert_eq!(parse_time_fragment("#t="), None);
+        assert_eq!(parse_time_fragment("#t=abc"), None);
+        assert_eq!(parse_time_fragment("#t=-5"), None);
+        assert_eq!(parse_time_fragment("#t=1.5"), None);
+        assert_eq!(parse_time_fragment("#replay-edit?workspace=w"), None);
+    }
+
+    // --- original-resolution layout ---------------------------------------
+
+    #[test]
+    fn natural_layout_sums_column_and_row_extents() {
+        // 2×2 of identical tiles: two gaps' worth of chrome, no more.
+        let t = [(100.0, 50.0); 4];
+        assert_eq!(
+            natural_layout(&t, 2),
+            (200.0 + TILE_GAP, 100.0 + TILE_GAP)
+        );
+        // Ragged geometry: each column takes its widest, each row its tallest.
+        let t = [(100.0, 50.0), (300.0, 20.0), (80.0, 90.0)];
+        assert_eq!(
+            natural_layout(&t, 2),
+            (400.0 + TILE_GAP, 140.0 + TILE_GAP)
+        );
+        // Single tile: exactly the recording, no gap.
+        assert_eq!(natural_layout(&[(640.0, 384.0)], 1), (640.0, 384.0));
+        assert_eq!(natural_layout(&[], 2), (0.0, 0.0));
+    }
+
+    #[test]
+    fn fit_scale_shrinks_to_fit_but_never_upscales() {
+        // Roomy viewport: original resolution, full stop.
+        assert_eq!(fit_scale((800.0, 600.0), (1600.0, 1200.0)), 1.0);
+        assert_eq!(fit_scale((800.0, 600.0), (800.0, 600.0)), 1.0);
+        // Width-bound and height-bound both pick the tighter axis.
+        assert_eq!(fit_scale((800.0, 600.0), (400.0, 1200.0)), 0.5);
+        assert_eq!(fit_scale((800.0, 600.0), (1600.0, 300.0)), 0.5);
+        // Degenerate inputs answer instead of dividing by zero.
+        assert_eq!(fit_scale((0.0, 600.0), (100.0, 100.0)), 1.0);
+        assert_eq!(fit_scale((800.0, 600.0), (0.0, 0.0)), 1.0);
+        // Absurdly small viewports still leave something on screen.
+        assert!(fit_scale((8_000.0, 6_000.0), (1.0, 1.0)) >= 0.02);
+    }
+
+    #[test]
+    fn chapter_before_is_the_previous_prompt() {
+        let ch = [100u64, 200, 300];
+        assert_eq!(chapter_before(&ch, 0), None);
+        assert_eq!(chapter_before(&ch, 100), None); // sitting ON one → go back past it
+        assert_eq!(chapter_before(&ch, 101), Some(0));
+        assert_eq!(chapter_before(&ch, 300), Some(1));
+        assert_eq!(chapter_before(&ch, 9_999), Some(2));
+        assert_eq!(chapter_before(&[], 5), None);
+    }
+
+    #[test]
+    fn hover_labels_are_one_truncated_line() {
+        assert_eq!(one_line("hello world", 40), "hello world");
+        assert_eq!(one_line("  a\n\tb   c  ", 40), "a b c");
+        assert_eq!(one_line("abcdefghij", 5), "abcd…");
+        assert_eq!(one_line("abcd efghij", 6), "abcd…");
     }
 
     #[test]

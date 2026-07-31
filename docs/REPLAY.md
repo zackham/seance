@@ -22,11 +22,15 @@ to the bridge, which exports a bundle and runs your configured publisher.
 
 ## the player
 
-Chapters = your prompts (reconstructed from keystrokes; injected tasks come
-through verbatim). Default mode fast-forwards agent output ~20× and pauses at
-each prompt with the text on an overlay card; real-time and chapter-step modes
-too. Timeline has a flame tick per prompt; seeks are keyframe-cheap. Not a
-video — a session you can *read*.
+Panes render at their RECORDED resolution, scaled to fit (never reflowed —
+the terminal you share is the terminal you had). Chapters = your prompts
+(reconstructed from keystrokes; injected tasks verbatim). Controls: prev/next
+prompt fly-to (animated ~0.6s scrub, lands paused with the prompt typed),
+play/pause, speeds 1×/1.5×/2×/5× shown only while playing. The timeline is
+ACTIVITY time — idle gaps >3s collapse to a 1.5s beat (dim hash marks; hover
+for "skipped 14m idle") while typing plays at its real cadence. Paused
+positions land in the URL (`#t=…`) so a link shares the exact moment; ↺
+resets to a clean link. Not a video — a session you can *read*.
 
 ## publisher seam (arms-length by design)
 
