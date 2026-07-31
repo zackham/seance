@@ -29,7 +29,7 @@ web-sys = { version = "0.3", features = [
   "Performance", "Storage", "Location", "History",
   "ResizeObserver", "ResizeObserverEntry", "MediaQueryList",
   "Navigator", "VisibilityState", "AddEventListenerOptions", "console",
-  "Request", "RequestInit", "Headers", "Response",
+  "Request", "RequestInit", "Headers", "Response", "HtmlCollection",
 ] }
 
 [profile.release]

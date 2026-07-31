@@ -74,6 +74,21 @@
 //! there (paused). Playback never touches the URL, and neither does
 //! [`Source::Bridge`] — in the editor the hash belongs to the editor route.
 //!
+//! # Prompts sidebar
+//!
+//! The left rail is the **only** prompt surface (there is no caption bar): one
+//! row per chapter — its compressed ("active") stamp plus the prompt text,
+//! clamped to three lines with the full text on the native `title` tooltip.
+//! Clicking a row runs the exact same [`Player::fly_to`] the ⏮/⏭ buttons do, so
+//! it lands paused on the chapter and publishes `#t`. The row matching the
+//! playhead is highlighted flame, re-derived from `current_chapter` on every
+//! progress update, so it tracks live playback. [`Player::set_chapters`]
+//! rebuilds the list, which is what makes editor renames/drops show up.
+//!
+//! The rail is a flex sibling of the stage, so the letterbox fit measures the
+//! stage box *after* the sidebar has taken its width — collapsing the rail just
+//! grows the stage and the next size probe re-fits.
+//!
 //! # DOM
 //!
 //! Everything the player creates lives inside the caller's `mount`, and its CSS
@@ -729,6 +744,10 @@ impl PaneTrack {
 // ---------------------------------------------------------------------------
 
 struct Dom {
+    /// Left prompt rail (carries `data-collapsed`).
+    sidebar: web_sys::Element,
+    /// Scroll container the chapter rows are rebuilt into.
+    chapter_list: web_sys::Element,
     tiles: web_sys::Element,
     /// Wrapper that carries the `transform: scale(S)` — the tiles, their
     /// borders and their headers all live inside it, so the framing scales
@@ -788,6 +807,10 @@ pub struct Player {
     /// In-flight prompt-to-prompt scrub (⏮ / ⏭).
     fly: Option<Fly>,
     current_chapter: Option<usize>,
+    /// Which sidebar row currently carries the flame. A `Cell` because the
+    /// highlight is refreshed from `&self` (inside `update_progress`) on every
+    /// frame, and we only want to touch the DOM when it actually moves.
+    highlighted: std::cell::Cell<Option<usize>>,
     pending_loads: usize,
     load_error: Option<String>,
     dragging: bool,
@@ -831,6 +854,7 @@ impl Player {
             last_wall: now_ms(),
             fly: None,
             current_chapter: None,
+            highlighted: std::cell::Cell::new(None),
             pending_loads: 0,
             load_error: None,
             dragging: false,
@@ -887,6 +911,8 @@ impl Player {
         let clamped = self.t.clamp(self.from_ms, self.to_ms);
         self.seek_absolute(clamped);
         self.rebuild_ticks();
+        // Stamps are offsets into the trim window, so a trim restamps the rail.
+        self.rebuild_chapter_list();
         self.sync_controls();
     }
 
@@ -898,6 +924,7 @@ impl Player {
         self.chapters = chapters;
         self.current_chapter = last_at_or_before(&self.chapter_times, self.t);
         self.rebuild_ticks();
+        self.rebuild_chapter_list();
     }
 
     /// The virtual clock as an **absolute wall** ms (what the editor persists).
@@ -1276,12 +1303,13 @@ impl Player {
             } else {
                 String::new()
             }));
+        self.highlight_chapter();
     }
 
     fn sync_controls(&self) {
         self.dom
             .play_btn
-            .set_text_content(Some(if self.playing { "⏸" } else { "▶" }));
+            .set_text_content(Some(play_label(self.playing)));
         // Progressive disclosure: the speed group is meaningless while paused,
         // so it hides — with `visibility`, which keeps its box and therefore
         // keeps the bar from twitching every time playback stops.
@@ -1294,6 +1322,89 @@ impl Player {
             let _ = b.set_attribute("data-on", if on { "1" } else { "0" });
         }
         self.update_progress();
+    }
+
+    // -- prompts sidebar ---------------------------------------------------
+
+    /// Rebuild the prompt rail from `self.chapters`.
+    ///
+    /// One row per chapter, in chapter order — **including** chapters outside
+    /// the trim window, which are rendered dimmed rather than dropped. Keeping
+    /// index parity between `chapters[i]` and `chapter_list.children()[i]` is
+    /// what lets the per-frame highlight be an O(1) child lookup instead of a
+    /// query; the editor still sees exactly what its trim excluded.
+    fn rebuild_chapter_list(&self) {
+        let Some(doc) = document() else { return };
+        self.dom.chapter_list.set_text_content(Some(""));
+        self.highlighted.set(None);
+        if self.chapters.is_empty() {
+            if let Ok(empty) = doc.create_element("div") {
+                empty.set_class_name("rp-ch-empty");
+                empty.set_text_content(Some("no prompts in this recording"));
+                append(&self.dom.chapter_list, &empty);
+            }
+            return;
+        }
+        for (i, ch) in self.chapters.iter().enumerate() {
+            let Ok(row) = doc.create_element("div") else {
+                continue;
+            };
+            row.set_class_name("rp-ch");
+            let _ = row.set_attribute("data-idx", &i.to_string());
+            let _ = row.set_attribute("data-on", "0");
+            let out = ch.t_ms < self.from_ms || ch.t_ms > self.to_ms;
+            let _ = row.set_attribute("data-out", if out { "1" } else { "0" });
+            // The clamp is visual only — hover (and this) give the whole prompt.
+            let _ = row.set_attribute("title", &ch.text);
+            if let Ok(t) = doc.create_element("div") {
+                t.set_class_name("rp-ch-t");
+                // ACTIVE (compressed) time — the same clock the readout, the
+                // scrubber and the ticks all speak.
+                t.set_text_content(Some(&fmt_mmss(self.active_elapsed(ch.t_ms))));
+                append(&row, &t);
+            }
+            if let Ok(x) = doc.create_element("div") {
+                x.set_class_name("rp-ch-x");
+                x.set_text_content(Some(&ch.text));
+                append(&row, &x);
+            }
+            append(&self.dom.chapter_list, &row);
+        }
+        self.highlight_chapter();
+    }
+
+    /// Move the flame to the row the playhead is inside. Called every frame, so
+    /// it exits without touching the DOM unless the current chapter changed.
+    fn highlight_chapter(&self) {
+        let now = self.current_chapter;
+        if self.highlighted.get() == now {
+            return;
+        }
+        let kids = self.dom.chapter_list.children();
+        let set = |i: usize, on: bool| {
+            if let Some(row) = kids.item(i as u32) {
+                let _ = row.set_attribute("data-on", if on { "1" } else { "0" });
+                if on {
+                    scroll_row_into_view(&self.dom.chapter_list, &row);
+                }
+            }
+        };
+        if let Some(prev) = self.highlighted.get() {
+            set(prev, false);
+        }
+        if let Some(i) = now {
+            set(i, true);
+        }
+        self.highlighted.set(now);
+    }
+
+    /// Sidebar row click — deliberately the *same* motion as ⏭/⏮: an eased
+    /// flyTo that lands paused on the chapter and publishes `#t`.
+    fn jump_to_chapter(&mut self, idx: usize) {
+        let Some(t) = self.chapter_times.get(idx).copied() else {
+            return;
+        };
+        self.fly_to(t);
     }
 
     /// Fraction along the (compressed) timeline for an absolute wall stamp.
@@ -1716,6 +1827,28 @@ fn set_style(el: &web_sys::Element, prop: &str, value: &str) {
     }
 }
 
+/// Keep the highlighted prompt visible without yanking the rail around: only
+/// scroll when the row has actually left the box, and only far enough.
+///
+/// Uses `HtmlElement::offset_top`/`offset_height` and `Element::scroll_top` —
+/// both in already-enabled web-sys features, so no `// NEEDS` note is due.
+/// (`Element::scroll_into_view` would need its options type and would also
+/// scroll the *page*, which is not ours to move.)
+fn scroll_row_into_view(list: &web_sys::Element, row: &web_sys::Element) {
+    let Some(r) = row.dyn_ref::<web_sys::HtmlElement>() else {
+        return;
+    };
+    let top = r.offset_top();
+    let bottom = top + r.offset_height();
+    let view_top = list.scroll_top();
+    let view_bottom = view_top + list.client_height();
+    if top < view_top {
+        list.set_scroll_top(top - 6);
+    } else if bottom > view_bottom {
+        list.set_scroll_top(bottom - list.client_height() + 6);
+    }
+}
+
 fn tile_of(canvas_id: &str) -> Option<web_sys::Element> {
     document()
         .and_then(|d| d.get_element_by_id(canvas_id))
@@ -1736,6 +1869,23 @@ fn build_dom(mount: &web_sys::Element) -> Dom {
 
     let root = el(&doc, "div", "rp-root");
     let body = el(&doc, "div", "rp-body");
+
+    // Prompts rail — the only prompt surface. Rows are filled in by
+    // `rebuild_chapter_list` (and refilled on every `set_chapters`).
+    let sidebar = el(&doc, "aside", "rp-side");
+    let _ = sidebar.set_attribute("data-collapsed", "0");
+    let side_head = el(&doc, "div", "rp-side-head");
+    let side_title = el(&doc, "span", "rp-side-title");
+    side_title.set_text_content(Some("prompts"));
+    let collapse = el(&doc, "button", "rp-collapse");
+    collapse.set_text_content(Some("‹"));
+    let _ = collapse.set_attribute("title", "hide the prompt list");
+    append(&side_head, &side_title);
+    append(&side_head, &collapse);
+    let chapter_list = el(&doc, "div", "rp-ch-list");
+    append(&sidebar, &side_head);
+    append(&sidebar, &chapter_list);
+    append(&body, &sidebar);
 
     // Stage: a centering box (`rp-fit`) holding the scaled workspace.
     let stage = el(&doc, "div", "rp-stage");
@@ -1767,18 +1917,29 @@ fn build_dom(mount: &web_sys::Element) -> Dom {
     append(&timeline, &playhead);
     append(&timeline, &tooltip);
 
+    // Controls, left to right: [Reset] · "Jump to:" [Previous][Next] ·
+    // [▶ Play] · speeds … spacer … chip. The time readout is *not* in this
+    // flow — it is absolutely centred over the row (`.rp-center`).
     let controls = el(&doc, "div", "rp-controls");
     let reset_btn = el(&doc, "button", "rp-btn rp-reset");
-    reset_btn.set_text_content(Some("↺"));
+    reset_btn.set_text_content(Some("Reset"));
     let _ = reset_btn.set_attribute("title", "back to the start");
+
+    let jump = el(&doc, "div", "rp-jump");
+    let jump_label = el(&doc, "span", "rp-jump-label");
+    jump_label.set_text_content(Some("Jump to:"));
     let prev_btn = el(&doc, "button", "rp-btn rp-nav rp-prev");
-    prev_btn.set_text_content(Some("⏮"));
+    prev_btn.set_text_content(Some("Previous"));
     let _ = prev_btn.set_attribute("title", "previous prompt");
-    let play_btn = el(&doc, "button", "rp-btn rp-play");
-    play_btn.set_text_content(Some("▶"));
     let next_btn = el(&doc, "button", "rp-btn rp-nav rp-next");
-    next_btn.set_text_content(Some("⏭"));
+    next_btn.set_text_content(Some("Next"));
     let _ = next_btn.set_attribute("title", "next prompt");
+    append(&jump, &jump_label);
+    append(&jump, &prev_btn);
+    append(&jump, &next_btn);
+
+    let play_btn = el(&doc, "button", "rp-btn rp-play");
+    play_btn.set_text_content(Some(play_label(false)));
 
     let speeds = el(&doc, "div", "rp-speeds");
     let _ = speeds.set_attribute("data-show", "0");
@@ -1792,19 +1953,23 @@ fn build_dom(mount: &web_sys::Element) -> Dom {
         speed_btns.push(b);
     }
 
+    let center = el(&doc, "div", "rp-center");
     let time_label = el(&doc, "div", "rp-time");
     time_label.set_text_content(Some("0:00 / 0:00"));
     let time_wall = el(&doc, "div", "rp-time-wall");
+    append(&center, &time_label);
+    append(&center, &time_wall);
+
     let spacer = el(&doc, "div", "rp-spacer");
     let chip = el(&doc, "div", "rp-chip");
     chip.set_text_content(Some("recorded with seance ✦"));
     append(&controls, &reset_btn);
-    append(&controls, &prev_btn);
+    append(&controls, &jump);
     append(&controls, &play_btn);
-    append(&controls, &next_btn);
     append(&controls, &speeds);
-    append(&controls, &time_label);
-    append(&controls, &time_wall);
+    // `.rp-center` is absolutely centred over the row, so its DOM slot is only
+    // the *narrow-bar* fallback position (where the CSS returns it to flow).
+    append(&controls, &center);
     append(&controls, &spacer);
     append(&controls, &chip);
 
@@ -1816,6 +1981,8 @@ fn build_dom(mount: &web_sys::Element) -> Dom {
     append(mount, &root);
 
     Dom {
+        sidebar,
+        chapter_list,
         tiles,
         scale_wrap,
         fit,
@@ -1836,6 +2003,16 @@ fn build_dom(mount: &web_sys::Element) -> Dom {
     }
 }
 
+/// The play/pause toggle's label: glyph, then the word. One button, two
+/// states — the word is what makes it obvious, the glyph is what makes it fast.
+fn play_label(playing: bool) -> &'static str {
+    if playing {
+        "⏸ Pause"
+    } else {
+        "▶ Play"
+    }
+}
+
 /// `1×` / `1.5×` — no trailing `.0`.
 fn fmt_speed(s: f64) -> String {
     if (s - s.round()).abs() < 1e-9 {
@@ -1846,7 +2023,7 @@ fn fmt_speed(s: f64) -> String {
 }
 
 fn wire_controls(player: &Rc<RefCell<Player>>) {
-    let (reset_btn, prev_btn, play_btn, next_btn, speeds, timeline) = {
+    let (reset_btn, prev_btn, play_btn, next_btn, speeds, timeline, sidebar, chapter_list) = {
         let p = player.borrow();
         (
             p.dom.reset_btn.clone(),
@@ -1855,6 +2032,8 @@ fn wire_controls(player: &Rc<RefCell<Player>>) {
             p.dom.next_btn.clone(),
             p.dom.speeds.clone(),
             p.dom.timeline.clone(),
+            p.dom.sidebar.clone(),
+            p.dom.chapter_list.clone(),
         )
     };
 
@@ -1869,6 +2048,32 @@ fn wire_controls(player: &Rc<RefCell<Player>>) {
         } else {
             p.play();
         }
+    });
+
+    // sidebar collapse (‹ / ›). The stage is a flex sibling, so collapsing
+    // widens it — force a re-measure so the letterbox re-fits into the space.
+    if let Ok(Some(btn)) = sidebar.query_selector(".rp-collapse") {
+        let side = sidebar.clone();
+        on_click(&btn, player, move |p, _ev| {
+            let now = side.get_attribute("data-collapsed").as_deref() == Some("1");
+            let _ = side.set_attribute("data-collapsed", if now { "0" } else { "1" });
+            p.last_css_probe = 0.0;
+        });
+    }
+
+    // chapter rows (delegated — the list is rebuilt on every set_chapters, so a
+    // per-row listener would leak one closure per rebuild)
+    on_click(&chapter_list, player, |p, ev| {
+        let Some(idx) = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .and_then(|e| e.closest(".rp-ch").ok().flatten())
+            .and_then(|r| r.get_attribute("data-idx"))
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            return;
+        };
+        p.jump_to_chapter(idx);
     });
 
     // speed group (delegated — one listener, four buttons)
@@ -2028,6 +2233,38 @@ color:var(--rp-text);font:13px/1.45 ui-sans-serif,system-ui,-apple-system,'Segoe
 overflow:hidden;}
 .rp-body{flex:1;display:flex;min-height:0;}
 
+/* Prompts rail. It takes its width out of the flex row BEFORE the stage, so
+   `.rp-fit` (and therefore the letterbox scale) measures the space that is
+   actually left over — with any pane count. */
+.rp-side{width:240px;flex:0 0 240px;display:flex;flex-direction:column;min-height:0;
+background:var(--rp-elev);border-right:1px solid var(--rp-border);
+transition:width .18s ease,flex-basis .18s ease;}
+.rp-side[data-collapsed="1"]{width:34px;flex-basis:34px;}
+.rp-side[data-collapsed="1"] .rp-ch-list,
+.rp-side[data-collapsed="1"] .rp-side-title{display:none;}
+.rp-side[data-collapsed="1"] .rp-collapse{transform:rotate(180deg);}
+.rp-side-head{display:flex;align-items:center;justify-content:space-between;
+padding:9px 10px;border-bottom:1px solid var(--rp-border);flex:0 0 auto;}
+.rp-side-title{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--rp-dim);}
+.rp-collapse{background:none;border:0;color:var(--rp-faint);cursor:pointer;font-size:14px;
+line-height:1;padding:2px 4px;}
+.rp-collapse:hover{color:var(--rp-flame);}
+.rp-ch-list{flex:1;overflow-y:auto;padding:6px;}
+.rp-ch-empty{color:var(--rp-faint);font-size:12px;padding:10px 8px;}
+.rp-ch{display:flex;gap:8px;padding:7px 8px;border-radius:5px;cursor:pointer;
+border-left:2px solid transparent;}
+.rp-ch:hover{background:var(--rp-surf);}
+/* Trimmed-away prompts stay listed (the editor should see what it cut) but
+   read as out of play. */
+.rp-ch[data-out="1"]{opacity:.42;}
+.rp-ch[data-on="1"]{background:var(--rp-surf);border-left-color:var(--rp-flame);}
+.rp-ch[data-on="1"] .rp-ch-t{color:var(--rp-flame);}
+.rp-ch-t{flex:0 0 auto;font-variant-numeric:tabular-nums;font-size:11px;color:var(--rp-faint);
+padding-top:1px;}
+.rp-ch-x{font-size:12px;color:var(--rp-dim);display:-webkit-box;-webkit-line-clamp:3;
+-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap;word-break:break-word;}
+.rp-ch:hover .rp-ch-x{color:var(--rp-text);}
+
 .rp-stage{position:relative;flex:1;min-width:0;min-height:0;}
 /* Letterbox: the workspace keeps its recorded pixels and is centred inside. */
 .rp-fit{position:absolute;inset:10px;display:flex;align-items:center;
@@ -2091,28 +2328,43 @@ padding:5px 9px;font-size:11px;color:var(--rp-text);white-space:nowrap;overflow:
 text-overflow:ellipsis;z-index:4;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.5);}
 .rp-tip[data-show="0"]{display:none;}
 
-.rp-controls{display:flex;align-items:center;gap:8px;padding:6px 10px 9px;}
+/* ~48px of bar: there is room, and the controls are the product's hands.
+   `position:relative` is the anchor for the absolutely-centred readout. */
+.rp-controls{position:relative;display:flex;align-items:center;gap:10px;
+padding:7px 12px 9px;min-height:48px;box-sizing:border-box;}
 .rp-btn{background:var(--rp-surf);border:1px solid var(--rp-border);color:var(--rp-dim);
-border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer;line-height:1.3;}
+border-radius:6px;padding:5px 11px;font-size:12px;cursor:pointer;line-height:1.3;
+font-family:inherit;}
 .rp-btn:hover{color:var(--rp-text);border-color:var(--rp-flame-dim);}
-/* Utility, not a primary: dim and small. */
-.rp-reset{color:var(--rp-faint);padding:4px 8px;}
+/* Utility, not a primary: dim and modest. */
+.rp-reset{color:var(--rp-faint);padding:5px 10px;font-size:12px;}
 .rp-reset:hover{color:var(--rp-flame);}
-.rp-play{color:var(--rp-flame);min-width:40px;font-size:13px;}
-/* prev/next are THE primary controls — bigger targets, flame accent. */
-.rp-nav{color:var(--rp-flame);font-size:15px;line-height:1;padding:6px 14px;min-width:46px;
-border-color:var(--rp-flame-dim);}
-.rp-nav:hover{background:rgba(233,160,58,.12);border-color:var(--rp-flame);
+/* "Jump to:" is a label, not a control — it must never look clickable. */
+.rp-jump{display:flex;align-items:center;gap:8px;}
+.rp-jump-label{color:var(--rp-faint);font-size:12px;white-space:nowrap;user-select:none;}
+/* Previous / Next / Play carry the same weight: these are THE controls. */
+.rp-nav,.rp-play{min-height:34px;font-size:13px;font-weight:500;padding:0 18px;
+color:var(--rp-flame);border-color:var(--rp-flame-dim);letter-spacing:.01em;}
+.rp-nav:hover,.rp-play:hover{background:rgba(233,160,58,.12);border-color:var(--rp-flame);
 color:var(--rp-flame);}
+.rp-play{min-width:104px;}
 /* Progressive disclosure: visible only while playing, and hidden with
    `visibility` so the bar never reflows on pause. */
-.rp-speeds{display:flex;gap:4px;margin-left:4px;}
+.rp-speeds{display:flex;gap:4px;margin-left:2px;}
 .rp-speeds[data-show="0"]{visibility:hidden;pointer-events:none;}
-.rp-speed{padding:3px 7px;font-size:11px;min-width:32px;}
+.rp-speed{padding:4px 8px;font-size:11px;min-width:34px;}
 .rp-speed[data-on="1"]{color:var(--rp-flame);border-color:var(--rp-flame-dim);
 background:rgba(233,160,58,.12);}
-.rp-time{font-variant-numeric:tabular-nums;color:var(--rp-dim);font-size:12px;margin-left:4px;}
+/* Centred on the BAR, not on whatever happens to be left of it. Click-through
+   so it can never eat a press meant for a control underneath. */
+.rp-center{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:1;
+display:flex;align-items:baseline;gap:2px;pointer-events:none;white-space:nowrap;}
+.rp-time{font-variant-numeric:tabular-nums;color:var(--rp-dim);font-size:13px;}
 .rp-time-wall{font-variant-numeric:tabular-nums;color:var(--rp-faint);font-size:12px;}
+/* Narrow bars have no centre to spare: fall back into the flow, before the
+   chip, rather than colliding with the buttons. */
+@media (max-width:880px){
+.rp-center{position:static;transform:none;margin-left:6px;}}
 .rp-spacer{flex:1;}
 .rp-chip{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--rp-faint);
 border:1px solid var(--rp-border);border-radius:999px;padding:3px 9px;user-select:none;}
@@ -2318,6 +2570,16 @@ mod tests {
         assert_eq!(fmt_speed(5.0), "5×");
     }
 
+    #[test]
+    // 3rd design pass: the bar is words, not glyphs. The toggle still leads
+    // with the glyph (fast to spot) but the word is what makes it obvious.
+    fn play_toggle_is_labelled_in_both_states() {
+        assert_eq!(play_label(false), "▶ Play");
+        assert_eq!(play_label(true), "⏸ Pause");
+        assert!(play_label(false).ends_with("Play"));
+        assert!(play_label(true).ends_with("Pause"));
+    }
+
     // --- flyTo -------------------------------------------------------------
 
     #[test]
@@ -2421,6 +2683,38 @@ mod tests {
         assert_eq!(fit_scale((800.0, 600.0), (0.0, 0.0)), 1.0);
         // Absurdly small viewports still leave something on screen.
         assert!(fit_scale((8_000.0, 6_000.0), (1.0, 1.0)) >= 0.02);
+    }
+
+    #[test]
+    // The sidebar takes its width out of the flex row before the stage, so the
+    // available box `apply_fit` measures is already viewport-minus-sidebar.
+    // What this pins is the consequence: a narrower stage only ever *shrinks*
+    // the scale, and every pane count keeps its near-square grid at natural
+    // resolution.
+    fn multi_pane_fit_shrinks_when_the_sidebar_takes_its_width() {
+        let tile = (660.0, 410.0);
+        for n in 1..=9usize {
+            let tiles = vec![tile; n];
+            let cols = grid_cols(n);
+            let natural = natural_layout(&tiles, cols);
+            let rows = n.div_ceil(cols);
+            // Near-square grid at natural resolution: no tile is ever refitted.
+            assert_eq!(
+                natural,
+                (
+                    tile.0 * cols as f64 + TILE_GAP * (cols - 1) as f64,
+                    tile.1 * rows as f64 + TILE_GAP * (rows - 1) as f64,
+                ),
+                "n={n}"
+            );
+            let full = fit_scale(natural, (1600.0, 900.0));
+            let with_side = fit_scale(natural, (1600.0 - 240.0, 900.0));
+            assert!(with_side <= full, "n={n}: sidebar must not grow the fit");
+            assert!(with_side > 0.0);
+            // Collapsing the rail (240 → 34) gives the space back.
+            let collapsed = fit_scale(natural, (1600.0 - 34.0, 900.0));
+            assert!(collapsed >= with_side, "n={n}");
+        }
     }
 
     #[test]
