@@ -41,6 +41,10 @@
 // NEEDS web-sys feature: Response
 //   (`Response::ok`, `Response::status`, `Response::text`.)
 //
+// `Window::set_timeout_with_callback_and_timeout_and_arguments_0` (the
+// deferred trim push) needs only `Window` — verified at web-sys-0.3.103
+// src/features/gen_Window.rs:3468.
+//
 // Already enabled in crates/seance-web/Cargo.toml and used here: Window,
 // Document, Element, HtmlElement, HtmlInputElement, Node, CssStyleDeclaration,
 // DomRect, MouseEvent, KeyboardEvent, FocusEvent, Location, Navigator,
@@ -177,6 +181,28 @@ fn first_effective_ms(rows: &[ChapterRow], from_ms: u64, to_ms: u64) -> Option<u
         .min()
 }
 
+/// Breathing room either side of the first/last chapter when the initial trim
+/// is derived from activity rather than given by the route.
+const ACTIVITY_PAD_MS: u64 = 15_000;
+
+/// The **active extent** of a recording: the window that actually contains
+/// human prompts, padded, and never wider than the loaded bounds.
+///
+/// Chapters are the only activity marker the editor has (the player owns the
+/// record streams), which is enough: the player's own idle compression handles
+/// the dead air *inside* the range, so all this has to do is stop the trim from
+/// opening on an hour of nothing at either end. No chapters → the full range,
+/// because a recording with no prompts has no better hypothesis than "all of it".
+fn active_extent(chapter_times: &[u64], from_ms: u64, to_ms: u64) -> (u64, u64) {
+    let (Some(&first), Some(&last)) = (chapter_times.iter().min(), chapter_times.iter().max())
+    else {
+        return (from_ms, to_ms);
+    };
+    let lo = from_ms.max(first.saturating_sub(ACTIVITY_PAD_MS));
+    let hi = to_ms.min(last.saturating_add(ACTIVITY_PAD_MS)).max(lo);
+    clamp_range(lo as i64, hi as i64, from_ms, to_ms)
+}
+
 /// Default window when the route carries no explicit range.
 fn default_window(now_ms: u64, from: Option<u64>, to: Option<u64>) -> (u64, u64) {
     let to_ms = to.unwrap_or(now_ms);
@@ -215,6 +241,9 @@ struct Editor {
     /// Current trim.
     from_ms: u64,
     to_ms: u64,
+    /// The route named a window, so the manifest must not second-guess it with
+    /// the active extent.
+    explicit_range: bool,
     rows: Vec<ChapterRow>,
     player: Option<Rc<RefCell<crate::replay::Player>>>,
     ready: bool,
@@ -286,6 +315,7 @@ pub fn open(
     }
 
     let now_ms = js_sys::Date::now().max(0.0) as u64;
+    let explicit_range = initial_from_ms.is_some() || initial_to_ms.is_some();
     let (lo_ms, hi_ms) = default_window(now_ms, initial_from_ms, initial_to_ms);
 
     let Some(dom) = build_dom(&doc, &workspace) else {
@@ -303,6 +333,7 @@ pub fn open(
         hi_ms,
         from_ms: lo_ms,
         to_ms: hi_ms,
+        explicit_range,
         rows: Vec::new(),
         player: None,
         ready: false,
@@ -397,6 +428,16 @@ fn on_manifest(editor: &Rc<RefCell<Editor>>, res: Result<Manifest, String>) {
                         included: true,
                     })
                     .collect();
+                // Open on the ACTIVE extent, not the loaded one: a two-hour
+                // fetch that holds four minutes of work should say "4m
+                // selected", not "2h". The outer bounds stay wide, so the
+                // handles can always be dragged back out.
+                if !ed.explicit_range {
+                    let times: Vec<u64> = ed.rows.iter().map(|r| r.t_ms).collect();
+                    let (f, t) = active_extent(&times, ed.lo_ms, ed.hi_ms);
+                    ed.from_ms = f;
+                    ed.to_ms = t;
+                }
                 if let Some(t) = manifest.title.as_deref() {
                     if !t.is_empty() {
                         ed.dom.title.set_value(t);
@@ -405,7 +446,10 @@ fn on_manifest(editor: &Rc<RefCell<Editor>>, res: Result<Manifest, String>) {
                 render_trim(&ed);
             }
             render_chapters(editor);
-            apply_chapters(editor);
+            // This callback runs *inside* the player's own `&mut self` load
+            // step, so a `try_borrow_mut` on it would fail here. Hand the trim
+            // and the chapters over once that stack has unwound.
+            defer_apply(editor);
         }
         Err(err) => {
             let ed = editor.borrow();
@@ -754,6 +798,22 @@ fn push_range(editor: &Rc<RefCell<Editor>>) {
     if let Some(p) = player {
         if let Ok(mut pb) = p.try_borrow_mut() { pb.set_range(from, to); }
     }
+}
+
+/// Push the trim + chapters to the player on the next macrotask.
+///
+/// The load path reaches us from inside the player's own borrow; deferring is
+/// how the editor keeps its "never touch the player's `RefCell` re-entrantly"
+/// rule without dropping the update on the floor.
+fn defer_apply(editor: &Rc<RefCell<Editor>>) {
+    let Some(win) = web_sys::window() else { return };
+    let ed = editor.clone();
+    let cb = Closure::<dyn FnMut()>::new(move || {
+        push_range(&ed);
+        apply_chapters(&ed);
+    });
+    let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), 0);
+    editor.borrow_mut()._keep.push(KeepAlive::Tick(cb));
 }
 
 fn apply_chapters(editor: &Rc<RefCell<Editor>>) {
@@ -1429,6 +1489,38 @@ mod tests {
         assert!(t - f >= MIN_SPAN_MS);
         // No `to` → anchored at now.
         assert_eq!(default_window(now, Some(now - 60_000), None).1, now);
+    }
+
+    #[test]
+    fn active_extent_pads_the_chapters_and_stays_inside_the_bounds() {
+        let (lo, hi) = (1_000_000u64, 1_000_000 + 2 * TWO_HOURS_MS);
+        // Interior chapters: both edges pad by 15s.
+        let ts = [lo + 600_000, lo + 900_000];
+        assert_eq!(
+            active_extent(&ts, lo, hi),
+            (lo + 600_000 - ACTIVITY_PAD_MS, lo + 900_000 + ACTIVITY_PAD_MS)
+        );
+        // Padding never escapes the loaded window.
+        let ts = [lo + 1_000, hi - 1_000];
+        assert_eq!(active_extent(&ts, lo, hi), (lo, hi));
+        // Unsorted input is fine — min/max, not first/last.
+        let ts = [lo + 900_000, lo + 600_000];
+        assert_eq!(active_extent(&ts, lo, hi).0, lo + 600_000 - ACTIVITY_PAD_MS);
+        // No chapters → the whole window, unchanged.
+        assert_eq!(active_extent(&[], lo, hi), (lo, hi));
+        // One chapter still yields a usable span, not a zero-width trim.
+        let (f, t) = active_extent(&[lo + 500_000], lo, hi);
+        assert_eq!((f, t), (lo + 500_000 - ACTIVITY_PAD_MS, lo + 500_000 + ACTIVITY_PAD_MS));
+        assert!(t - f >= MIN_SPAN_MS);
+    }
+
+    #[test]
+    fn active_extent_survives_a_degenerate_window() {
+        // A chapter outside the bounds cannot produce an inverted range.
+        let (f, t) = active_extent(&[10], 1_000, 5_000);
+        assert!(f >= 1_000 && t <= 5_000 && t > f);
+        let (f, t) = active_extent(&[99_999], 1_000, 5_000);
+        assert!(f >= 1_000 && t <= 5_000 && t > f);
     }
 
     #[test]

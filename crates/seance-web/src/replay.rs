@@ -5,14 +5,30 @@
 //! those streams:
 //!
 //! - a **virtual clock** `t` in recording time (unix ms, the daemon clock the
-//!   records carry). A rAF stepper advances it by `wall_dt × speed` and applies
-//!   every record with `t_ms <= t`, in order, per pane.
+//!   records carry). A rAF stepper advances it by `wall_dt × speed` — *in
+//!   compressed time* (see below) — and applies every record with
+//!   `t_ms <= t`, in order, per pane.
 //! - **grid records** fold into that pane's [`GridSnapshot`] via
 //!   [`decode_grid_bin_onto`] (FULL decodes cold, DAMAGE needs the previous
 //!   snapshot) and paint through the live client's [`TermRenderer`], verbatim —
 //!   replay and live share one renderer so they cannot drift.
 //! - **event records** drive the human-attention affordances: the input flash on
-//!   a tile, and the prompt overlay at chapters.
+//!   a tile, the prompt caption bar at chapters, and the flame flash on the
+//!   receiving pane's tile.
+//!
+//! # Idle compression — the timeline is ACTIVITY, not wall time
+//!
+//! Recordings are lossless; the *player* is what compresses dead air. At load
+//! time the merged, time-sorted record stream (all panes) is folded into a
+//! monotonic piecewise-linear [`TimeMap`]: every wall gap longer than
+//! [`GAP_MAX_MS`] contributes exactly [`GAP_BEAT_MS`] of compressed time,
+//! everything else contributes its real duration.
+//!
+//! The virtual clock, the timeline coordinate system, chapter ticks, seeks,
+//! click-to-scrub and the elapsed/total readout all live in **compressed** ms.
+//! Record application still keys off wall `t_ms` — conversion happens at that
+//! boundary and nowhere else. Every mode advances the compressed clock, so
+//! "real time" means *as it happened, minus the dead air*.
 //!
 //! Seeking never replays from `t=0`: each pane keeps the record indices of its
 //! `KIND_FULL` keyframes, so a seek resets to the nearest keyframe at or before
@@ -22,7 +38,7 @@
 //! # Modes
 //!
 //! The default is [`Mode::FastForward`]: agent output runs ~20×, and the clock
-//! *stops* on every chapter with the prompt blown up on screen. That is the
+//! *stops* on every chapter with the prompt up in the caption bar. That is the
 //! whole thesis of the feature — a watcher should see the human's inputs at
 //! human size and the machine's output compressed. [`Mode::RealTime`] plays at
 //! 1× (cycle 2×/4×) without chapter stops; [`Mode::Chapters`] stays paused and
@@ -35,6 +51,11 @@
 //! accepts **either**: a value below `from_ms` is read as an offset from
 //! `from_ms`, anything else as absolute. [`Player::current_ms`] returns the
 //! absolute clock (what the editor wants to persist).
+//!
+//! Public time is always **absolute wall ms** — [`Player::seek_ms`],
+//! [`Player::current_ms`] and [`Player::set_range`] speak the same recording
+//! clock the manifest and the chapters do. Compression is strictly internal;
+//! callers never see a compressed value.
 //!
 //! # DOM
 //!
@@ -79,12 +100,19 @@ const FONT_PX: f32 = 13.0;
 
 /// Agent-output compression factor in [`Mode::FastForward`].
 const FF_SPEED: f64 = 20.0;
-/// How long the prompt card stays up after an automatic chapter stop.
-const OVERLAY_MS: f64 = 1800.0;
+/// How long the prompt caption lingers once playback resumes.
+const CAPTION_MS: f64 = 4000.0;
 /// Input-flash decay on a tile after a human keystroke record.
 const FLASH_MS: f64 = 420.0;
+/// Flame flash on the tile that receives a chapter.
+const CHAPTER_FLASH_MS: f64 = 1200.0;
 /// A tab that was backgrounded must not "fast-forward" the wall gap.
 const MAX_FRAME_DT_MS: f64 = 250.0;
+
+/// A wall gap longer than this is dead air and gets collapsed.
+const GAP_MAX_MS: u64 = 3_000;
+/// …to exactly this much compressed time — a beat, not a jump cut.
+const GAP_BEAT_MS: u64 = 1_500;
 
 // ---------------------------------------------------------------------------
 // public API
@@ -163,6 +191,174 @@ pub struct OwnedRecord {
 fn fmt_mmss(ms: u64) -> String {
     let secs = ms / 1000;
     format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+/// A coarse idle duration for the collapsed-gap tooltip: `"8s"` / `"14m"` /
+/// `"1h 07m"`. Deliberately rounded — this labels dead air, not a benchmark.
+fn fmt_idle(ms: u64) -> String {
+    let s = ms / 1_000;
+    if s < 90 {
+        format!("{s}s")
+    } else if s < 3_600 {
+        format!("{}m", (s + 30) / 60)
+    } else {
+        format!("{}h {:02}m", s / 3_600, (s % 3_600) / 60)
+    }
+}
+
+// --- wall ↔ compressed time ------------------------------------------------
+
+/// One run of the piecewise-linear map. `collapsed` runs are the dead air:
+/// their wall span exceeds [`GAP_MAX_MS`] and their compressed span is exactly
+/// [`GAP_BEAT_MS`]. Every other run is 1:1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TimeSeg {
+    wall_start: u64,
+    wall_end: u64,
+    comp_start: u64,
+    comp_end: u64,
+    collapsed: bool,
+}
+
+impl TimeSeg {
+    fn wall_span(&self) -> u64 {
+        self.wall_end - self.wall_start
+    }
+    fn comp_span(&self) -> u64 {
+        self.comp_end - self.comp_start
+    }
+}
+
+/// Monotonic wall ↔ compressed mapping for one recording.
+///
+/// Compressed time is measured from `0` at the map's wall origin, so only
+/// *differences* are meaningful across the two clocks — which is all the UI
+/// ever asks for. An empty map is the identity (the pre-load state): both
+/// conversions pass their argument through, so every difference still holds.
+#[derive(Clone, Debug, Default)]
+struct TimeMap {
+    segs: Vec<TimeSeg>,
+}
+
+/// Fold a merged, ascending record-time stream into a [`TimeMap`] spanning
+/// `[lo, hi]`. `lo`/`hi` are part of the walk, so idle at the *edges* of the
+/// window compresses exactly like idle in the middle.
+fn build_time_map(sorted_times: &[u64], lo: u64, hi: u64) -> TimeMap {
+    let hi = hi.max(lo);
+    let mut pts: Vec<u64> = Vec::with_capacity(sorted_times.len() + 2);
+    pts.push(lo);
+    // The stream may run wider than the window (the bridge is generous); only
+    // the interior matters, and it already arrives ascending.
+    pts.extend(sorted_times.iter().copied().filter(|&t| t > lo && t < hi));
+    pts.push(hi);
+    pts.dedup();
+
+    let mut segs: Vec<TimeSeg> = Vec::new();
+    let mut comp = 0u64;
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let span = b - a;
+        let collapsed = span > GAP_MAX_MS;
+        let cspan = if collapsed { GAP_BEAT_MS } else { span };
+        // Consecutive live runs are one segment — the map stays O(gaps), not
+        // O(records), which is what makes the binary search cheap.
+        if !collapsed {
+            if let Some(last) = segs.last_mut() {
+                if !last.collapsed {
+                    last.wall_end = b;
+                    last.comp_end += cspan;
+                    comp = last.comp_end;
+                    continue;
+                }
+            }
+        }
+        segs.push(TimeSeg {
+            wall_start: a,
+            wall_end: b,
+            comp_start: comp,
+            comp_end: comp + cspan,
+            collapsed,
+        });
+        comp += cspan;
+    }
+    if segs.is_empty() {
+        // Empty / single-record stream: a degenerate but well-formed map, so
+        // callers never have to special-case it.
+        segs.push(TimeSeg {
+            wall_start: lo,
+            wall_end: hi,
+            comp_start: 0,
+            comp_end: hi - lo,
+            collapsed: false,
+        });
+    }
+    TimeMap { segs }
+}
+
+impl TimeMap {
+    /// Total compressed duration — the "active" length of the whole recording.
+    /// The UI asks for the *trim-scoped* version ([`Player::active_duration`]);
+    /// this is the map's own invariant, exercised by the tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn comp_total(&self) -> u64 {
+        self.segs.last().map(|s| s.comp_end).unwrap_or(0)
+    }
+
+    /// Absolute wall ms → compressed ms. Saturates at both ends.
+    fn wall_to_comp(&self, w: u64) -> u64 {
+        let (Some(first), Some(last)) = (self.segs.first(), self.segs.last()) else {
+            return w; // identity map (not loaded yet)
+        };
+        if w <= first.wall_start {
+            return first.comp_start;
+        }
+        if w >= last.wall_end {
+            return last.comp_end;
+        }
+        let i = self.segs.partition_point(|s| s.wall_start <= w) - 1;
+        let s = &self.segs[i];
+        if s.wall_span() == 0 {
+            return s.comp_start;
+        }
+        s.comp_start + scale(w - s.wall_start, s.comp_span(), s.wall_span())
+    }
+
+    /// Compressed ms → absolute wall ms. Saturates at both ends.
+    fn comp_to_wall(&self, c: u64) -> u64 {
+        let (Some(first), Some(last)) = (self.segs.first(), self.segs.last()) else {
+            return c; // identity map (not loaded yet)
+        };
+        if c <= first.comp_start {
+            return first.wall_start;
+        }
+        if c >= last.comp_end {
+            return last.wall_end;
+        }
+        let i = self.segs.partition_point(|s| s.comp_start <= c) - 1;
+        let s = &self.segs[i];
+        if s.comp_span() == 0 {
+            return s.wall_start;
+        }
+        s.wall_start + scale(c - s.comp_start, s.wall_span(), s.comp_span())
+    }
+
+    /// Collapsed runs as `(compressed position, skipped wall ms)` — what the
+    /// timeline draws its hash markers from.
+    fn collapsed_gaps(&self) -> Vec<(u64, u64)> {
+        self.segs
+            .iter()
+            .filter(|s| s.collapsed)
+            .map(|s| (s.comp_start + s.comp_span() / 2, s.wall_span()))
+            .collect()
+    }
+}
+
+/// `v * num / den` in u128, so a multi-hour span cannot overflow.
+fn scale(v: u64, num: u64, den: u64) -> u64 {
+    if den == 0 {
+        return 0;
+    }
+    ((v as u128 * num as u128) / den as u128) as u64
 }
 
 /// Resolve a bundle-relative file against the manifest URL.
@@ -293,6 +489,9 @@ struct PaneTrack {
     /// Wall-clock ms after which the input flash is over (0 = not flashing).
     flash_until: f64,
     flashing: bool,
+    /// Wall-clock ms after which the chapter-arrival flame flash is over.
+    chapter_flash_until: f64,
+    chapter_flashing: bool,
 }
 
 impl PaneTrack {
@@ -320,6 +519,8 @@ impl PaneTrack {
             css_size: (0.0, 0.0),
             flash_until: 0.0,
             flashing: false,
+            chapter_flash_until: 0.0,
+            chapter_flashing: false,
         }
     }
 
@@ -372,7 +573,7 @@ impl PaneTrack {
     }
 
     /// Reset to the nearest keyframe `<= target` and fold forward. Silent: no
-    /// flashes, no overlay — a seek is not playback.
+    /// flashes, no caption — a seek is not playback.
     fn seek(&mut self, target: u64) {
         let current_t = self
             .cursor
@@ -408,6 +609,7 @@ impl PaneTrack {
             self.apply(idx, 0.0);
         }
         self.flash_until = 0.0;
+        self.chapter_flash_until = 0.0;
         self.dirty = true;
     }
 
@@ -434,12 +636,14 @@ struct Dom {
     playhead: web_sys::Element,
     ticks: web_sys::Element,
     tooltip: web_sys::Element,
-    overlay: web_sys::Element,
-    overlay_text: web_sys::Element,
+    caption: web_sys::Element,
+    caption_text: web_sys::Element,
+    caption_resume: web_sys::Element,
     play_btn: web_sys::Element,
     mode_btn: web_sys::Element,
     speed_btn: web_sys::Element,
     time_label: web_sys::Element,
+    time_wall: web_sys::Element,
     status: web_sys::Element,
 }
 
@@ -451,19 +655,24 @@ pub struct Player {
     panes: Vec<PaneTrack>,
     chapters: Vec<Chapter>,
     chapter_times: Vec<u64>,
-    /// Virtual clock, absolute recording ms.
+    /// Virtual clock, absolute **wall** recording ms. The clock *advances* in
+    /// compressed time (`map`), but it is stored in wall ms because that is
+    /// what record application, chapters and the public API all key off.
     t: u64,
     from_ms: u64,
     to_ms: u64,
+    /// Wall ↔ compressed mapping over the loaded window. Built once, in
+    /// [`Player::finish_load`]; trims re-use it (they only narrow `from`/`to`).
+    map: TimeMap,
     mode: Mode,
     realtime_mult: f64,
     playing: bool,
     /// Wall clock (performance.now) at the previous stepper frame.
     last_wall: f64,
-    /// Wall time at which the prompt card fades (0 = hidden).
-    overlay_until: f64,
-    /// Overlay pinned open until the viewer presses play (FastForward stop).
-    overlay_pinned: bool,
+    /// Wall time at which the prompt caption fades (0 = hidden/pinned).
+    caption_until: f64,
+    /// Caption pinned open until the viewer presses play (FastForward stop).
+    caption_pinned: bool,
     current_chapter: Option<usize>,
     pending_loads: usize,
     load_error: Option<String>,
@@ -497,12 +706,13 @@ impl Player {
             t: 0,
             from_ms: 0,
             to_ms: 0,
+            map: TimeMap::default(),
             mode: Mode::FastForward,
             realtime_mult: 1.0,
             playing: false,
             last_wall: now_ms(),
-            overlay_until: 0.0,
-            overlay_pinned: false,
+            caption_until: 0.0,
+            caption_pinned: false,
             current_chapter: None,
             pending_loads: 0,
             load_error: None,
@@ -523,7 +733,7 @@ impl Player {
             if let Some(i) = first_after(&self.chapter_times, self.t) {
                 let t = self.chapter_times[i].min(self.to_ms);
                 self.seek_absolute(t);
-                self.show_chapter_overlay(i, true);
+                self.show_caption(i, true);
             }
             return;
         }
@@ -531,8 +741,13 @@ impl Player {
             self.seek_absolute(self.from_ms);
         }
         self.playing = true;
-        self.overlay_pinned = false;
-        self.overlay_until = 0.0;
+        // Resuming releases a pinned caption but does not yank it: it stays
+        // readable for a beat and fades on its own.
+        self.caption_pinned = false;
+        if self.caption_until > 0.0 {
+            self.caption_until = now_ms() + CAPTION_MS;
+        }
+        self.sync_caption();
         self.last_wall = now_ms();
         self.sync_controls();
     }
@@ -546,6 +761,8 @@ impl Player {
         self.playing
     }
 
+    /// Seek to an **absolute wall** ms (or an offset from `from_ms`, see the
+    /// module docs). Idle compression is internal — callers never convert.
     pub fn seek_ms(&mut self, t_ms: u64) {
         let t = absolutize(t_ms, self.from_ms);
         self.seek_absolute(t);
@@ -559,7 +776,8 @@ impl Player {
         self.sync_controls();
     }
 
-    /// Editor trim: playback + timeline clamp.
+    /// Editor trim: playback + timeline clamp. Both bounds are **absolute
+    /// wall** ms; the compressed timeline is re-derived from them.
     pub fn set_range(&mut self, from_ms: u64, to_ms: u64) {
         let (a, b) = (from_ms.min(to_ms), from_ms.max(to_ms));
         self.from_ms = a;
@@ -581,6 +799,7 @@ impl Player {
         self.rebuild_ticks();
     }
 
+    /// The virtual clock as an **absolute wall** ms (what the editor persists).
     pub fn current_ms(&self) -> u64 {
         self.t
     }
@@ -606,11 +825,18 @@ impl Player {
 
         if self.playing && !self.panes.is_empty() {
             let speed = speed_for(self.mode, self.realtime_mult);
-            let mut target = self.t.saturating_add((dt * speed).round().max(0.0) as u64);
+            // The clock advances in COMPRESSED ms; the wall target is whatever
+            // that lands on. Dead air therefore costs GAP_BEAT_MS of watching,
+            // in every mode.
+            let comp_now = self.map.wall_to_comp(self.t);
+            let comp_target = comp_now.saturating_add((dt * speed).round().max(0.0) as u64);
+            let mut target = self.map.comp_to_wall(comp_target).max(self.t);
             let mut stop_at_chapter = None;
 
-            if self.mode == Mode::FastForward {
-                if let Some(i) = chapter_crossed(&self.chapter_times, self.t, target) {
+            // Any mode captions a crossed chapter; only FastForward stops on it.
+            let crossed = chapter_crossed(&self.chapter_times, self.t, target);
+            if let Some(i) = crossed {
+                if self.mode == Mode::FastForward {
                     target = self.chapter_times[i];
                     stop_at_chapter = Some(i);
                 }
@@ -627,18 +853,28 @@ impl Player {
             }
             self.current_chapter = last_at_or_before(&self.chapter_times, target);
 
-            if let Some(i) = stop_at_chapter {
-                self.playing = false;
-                self.show_chapter_overlay(i, true);
-                self.sync_controls();
+            match stop_at_chapter {
+                Some(i) => {
+                    self.playing = false;
+                    self.show_caption(i, true);
+                    self.sync_controls();
+                }
+                // Rolled past it without stopping: caption only, self-fading.
+                None => {
+                    if let Some(i) = crossed {
+                        if self.chapter_times[i] <= target {
+                            self.show_caption(i, false);
+                        }
+                    }
+                }
             }
             self.update_progress();
         }
 
-        // Overlay fade + tile flash decay are wall-clock, not recording-clock.
-        if self.overlay_until > 0.0 && !self.overlay_pinned && wall > self.overlay_until {
-            self.overlay_until = 0.0;
-            let _ = self.dom.overlay.set_attribute("data-show", "0");
+        // Caption fade + tile flash decay are wall-clock, not recording-clock.
+        if self.caption_until > 0.0 && !self.caption_pinned && wall > self.caption_until {
+            self.caption_until = 0.0;
+            self.sync_caption();
         }
         for p in self.panes.iter_mut() {
             let on = p.flash_until > wall;
@@ -646,6 +882,15 @@ impl Player {
                 p.flashing = on;
                 if let Some(tile) = tile_of(&p.canvas_id) {
                     let _ = tile.set_attribute("data-flash", if on { "1" } else { "0" });
+                }
+            }
+            // The chapter flash fades via a CSS animation; clearing the flag at
+            // the deadline is only what re-arms it for the next chapter.
+            let ch_on = p.chapter_flash_until > wall;
+            if ch_on != p.chapter_flashing {
+                p.chapter_flashing = ch_on;
+                if let Some(tile) = tile_of(&p.canvas_id) {
+                    let _ = tile.set_attribute("data-chflash", if ch_on { "1" } else { "0" });
                 }
             }
         }
@@ -722,32 +967,100 @@ impl Player {
         }
     }
 
-    fn show_chapter_overlay(&mut self, idx: usize, pinned: bool) {
-        let Some(ch) = self.chapters.get(idx) else {
+    /// Raise the prompt caption for `idx`, and flash the pane it landed on.
+    /// `pinned` holds it open until the viewer presses play (the FastForward
+    /// stop); otherwise it fades [`CAPTION_MS`] after now.
+    fn show_caption(&mut self, idx: usize, pinned: bool) {
+        // Copied out first: the rest of this method needs `&mut self`.
+        let Some((text, pane)) = self
+            .chapters
+            .get(idx)
+            .map(|ch| (ch.text.clone(), ch.pane.clone()))
+        else {
             return;
         };
-        self.dom.overlay_text.set_text_content(Some(&ch.text));
-        let _ = self.dom.overlay.set_attribute("data-show", "1");
-        self.overlay_pinned = pinned && self.mode == Mode::FastForward;
-        self.overlay_until = now_ms() + OVERLAY_MS;
+        self.dom.caption_text.set_text_content(Some(&text));
+        let _ = self.dom.caption.set_attribute("data-expand", "0");
+        // Pinning is about being *stopped* at the prompt, not about the mode:
+        // a FastForward auto-pause and a chapter jump both land paused.
+        self.caption_pinned = pinned && !self.playing;
+        self.caption_until = now_ms() + CAPTION_MS;
+        self.sync_caption();
         self.current_chapter = Some(idx);
         self.highlight_chapter();
+
+        let wall = now_ms();
+        for p in self.panes.iter_mut() {
+            if p.slug == pane {
+                p.chapter_flash_until = wall + CHAPTER_FLASH_MS;
+            }
+        }
     }
 
+    fn hide_caption(&mut self) {
+        self.caption_pinned = false;
+        self.caption_until = 0.0;
+        self.sync_caption();
+    }
+
+    /// Visibility + the pinned "▶ resume" affordance, from caption state.
+    fn sync_caption(&self) {
+        let show = self.caption_until > 0.0 || self.caption_pinned;
+        let _ = self
+            .dom
+            .caption
+            .set_attribute("data-show", if show { "1" } else { "0" });
+        let _ = self.dom.caption.set_attribute(
+            "data-pinned",
+            if self.caption_pinned { "1" } else { "0" },
+        );
+        // The resume affordance only exists while the caption is holding
+        // playback — otherwise it is a button that does nothing.
+        let _ = self
+            .dom
+            .caption_resume
+            .set_attribute("data-show", if self.caption_pinned { "1" } else { "0" });
+    }
+
+    /// Wall span of the trim window (what actually elapsed, idle included).
     fn duration(&self) -> u64 {
         self.to_ms.saturating_sub(self.from_ms).max(1)
     }
 
+    /// Compressed span of the trim window — the length of the timeline.
+    fn active_duration(&self) -> u64 {
+        self.map
+            .wall_to_comp(self.to_ms)
+            .saturating_sub(self.map.wall_to_comp(self.from_ms))
+            .max(1)
+    }
+
+    /// Compressed offset of `t` inside the trim window.
+    fn active_elapsed(&self, t: u64) -> u64 {
+        self.map
+            .wall_to_comp(t)
+            .saturating_sub(self.map.wall_to_comp(self.from_ms))
+    }
+
     fn update_progress(&self) {
-        let elapsed = self.t.saturating_sub(self.from_ms);
-        let frac = (elapsed as f64 / self.duration() as f64).clamp(0.0, 1.0);
+        let elapsed = self.active_elapsed(self.t);
+        let total = self.active_duration();
+        let frac = (elapsed as f64 / total as f64).clamp(0.0, 1.0);
         set_style(&self.dom.played, "width", &format!("{:.4}%", frac * 100.0));
         set_style(&self.dom.playhead, "left", &format!("{:.4}%", frac * 100.0));
-        self.dom.time_label.set_text_content(Some(&format!(
-            "{} / {}",
-            fmt_mmss(elapsed),
-            fmt_mmss(self.duration())
-        )));
+        self.dom
+            .time_label
+            .set_text_content(Some(&format!("{} / {}", fmt_mmss(elapsed), fmt_mmss(total))));
+        // The wall suffix only earns its pixels when the recording is mostly
+        // dead air; at parity it would be noise.
+        let wall_total = self.duration();
+        self.dom
+            .time_wall
+            .set_text_content(Some(&if wall_total > total.saturating_mul(2) {
+                format!(" · {} wall", fmt_mmss(wall_total))
+            } else {
+                String::new()
+            }));
         self.highlight_chapter();
     }
 
@@ -813,10 +1126,29 @@ impl Player {
         self.highlight_chapter();
     }
 
+    /// Fraction along the (compressed) timeline for an absolute wall stamp.
+    fn frac_of(&self, t_ms: u64) -> f64 {
+        (self.active_elapsed(t_ms) as f64 / self.active_duration() as f64).clamp(0.0, 1.0)
+    }
+
+    /// Chapter ticks *and* collapsed-idle hash markers — both positioned in
+    /// compressed time, which is the only coordinate the bar knows.
     fn rebuild_ticks(&self) {
         let Some(doc) = document() else { return };
         self.dom.ticks.set_text_content(Some(""));
-        let dur = self.duration() as f64;
+        for (comp_mid, skipped) in self.map.collapsed_gaps() {
+            let wall_mid = self.map.comp_to_wall(comp_mid);
+            if wall_mid < self.from_ms || wall_mid > self.to_ms {
+                continue;
+            }
+            let Ok(gap) = doc.create_element("div") else {
+                continue;
+            };
+            gap.set_class_name("rp-gap");
+            set_style(&gap, "left", &format!("{:.4}%", self.frac_of(wall_mid) * 100.0));
+            let _ = gap.set_attribute("data-skipped", &skipped.to_string());
+            append(&self.dom.ticks, &gap);
+        }
         for (i, ch) in self.chapters.iter().enumerate() {
             if ch.t_ms < self.from_ms || ch.t_ms > self.to_ms {
                 continue;
@@ -825,50 +1157,63 @@ impl Player {
                 continue;
             };
             tick.set_class_name("rp-tick");
-            let frac = (ch.t_ms - self.from_ms) as f64 / dur;
-            set_style(&tick, "left", &format!("{:.4}%", frac * 100.0));
+            set_style(&tick, "left", &format!("{:.4}%", self.frac_of(ch.t_ms) * 100.0));
             let _ = tick.set_attribute("data-idx", &i.to_string());
             append(&self.dom.ticks, &tick);
         }
     }
 
-    /// Timeline geometry → recording time.
+    /// Timeline geometry → compressed time → recording time.
     fn seek_from_client_x(&mut self, client_x: i32) {
         let rect = self.dom.timeline.get_bounding_client_rect();
         if rect.width() <= 0.0 {
             return;
         }
         let frac = ((client_x as f64 - rect.x()) / rect.width()).clamp(0.0, 1.0);
-        let t = self.from_ms + (frac * self.duration() as f64).round() as u64;
+        let comp = self.map.wall_to_comp(self.from_ms)
+            + (frac * self.active_duration() as f64).round() as u64;
+        let t = self.map.comp_to_wall(comp);
         self.seek_absolute(t);
-        let _ = self.dom.overlay.set_attribute("data-show", "0");
-        self.overlay_pinned = false;
+        self.hide_caption();
     }
 
-    /// Nearest chapter within ~7px of the cursor → tooltip.
+    /// Nearest chapter — or collapsed gap — within ~7px of the cursor → tooltip.
     fn hover_timeline(&self, client_x: i32) {
         let rect = self.dom.timeline.get_bounding_client_rect();
         if rect.width() <= 0.0 {
             return;
         }
-        let dur = self.duration() as f64;
-        let mut best: Option<(f64, usize)> = None;
-        for (i, ch) in self.chapters.iter().enumerate() {
+        let x_of = |t: u64| rect.x() + rect.width() * self.frac_of(t);
+        // (distance, label, wall position) — chapters win ties by being checked
+        // first with a strict `<`.
+        let mut best: Option<(f64, String, u64)> = None;
+        for ch in self.chapters.iter() {
             if ch.t_ms < self.from_ms || ch.t_ms > self.to_ms {
                 continue;
             }
-            let x = rect.x() + rect.width() * ((ch.t_ms - self.from_ms) as f64 / dur);
-            let d = (x - client_x as f64).abs();
-            if d <= 7.0 && best.map(|(bd, _)| d < bd).unwrap_or(true) {
-                best = Some((d, i));
+            let d = (x_of(ch.t_ms) - client_x as f64).abs();
+            if d <= 7.0 && best.as_ref().map(|(bd, _, _)| d < *bd).unwrap_or(true) {
+                best = Some((d, ch.text.clone(), ch.t_ms));
+            }
+        }
+        for (comp_mid, skipped) in self.map.collapsed_gaps() {
+            let wall_mid = self.map.comp_to_wall(comp_mid);
+            if wall_mid < self.from_ms || wall_mid > self.to_ms {
+                continue;
+            }
+            let d = (x_of(wall_mid) - client_x as f64).abs();
+            if d <= 7.0 && best.as_ref().map(|(bd, _, _)| d < *bd).unwrap_or(true) {
+                best = Some((d, format!("skipped {} idle", fmt_idle(skipped)), wall_mid));
             }
         }
         match best {
-            Some((_, i)) => {
-                let ch = &self.chapters[i];
-                self.dom.tooltip.set_text_content(Some(&ch.text));
-                let frac = (ch.t_ms - self.from_ms) as f64 / dur;
-                set_style(&self.dom.tooltip, "left", &format!("{:.4}%", frac * 100.0));
+            Some((_, text, at)) => {
+                self.dom.tooltip.set_text_content(Some(&text));
+                set_style(
+                    &self.dom.tooltip,
+                    "left",
+                    &format!("{:.4}%", self.frac_of(at) * 100.0),
+                );
                 let _ = self.dom.tooltip.set_attribute("data-show", "1");
             }
             None => {
@@ -895,6 +1240,11 @@ impl Player {
         // record we actually hold.
         let last = self.panes.iter().map(|p| p.last_t()).max().unwrap_or(0);
         self.to_ms = m.to_ms.max(self.from_ms + 1).max(last);
+        // Idle compression is a property of the *recording*, so the map spans
+        // the whole loaded window and survives every later trim.
+        let mut merged: Vec<u64> = self.panes.iter().flat_map(|p| p.times.iter().copied()).collect();
+        merged.sort_unstable();
+        self.map = build_time_map(&merged, self.from_ms, self.to_ms);
         self.build_tiles();
         self.set_chapters(m.chapters.clone());
         self.seek_absolute(self.from_ms);
@@ -911,7 +1261,7 @@ impl Player {
         if self.mode == Mode::FastForward && !self.chapters.is_empty() {
             let first = self.chapter_times[0].clamp(self.from_ms, self.to_ms);
             self.seek_absolute(first);
-            self.show_chapter_overlay(0, true);
+            self.show_caption(0, true);
         }
     }
 
@@ -1209,24 +1559,31 @@ fn build_dom(mount: &web_sys::Element) -> Dom {
     // Stage
     let stage = el(&doc, "div", "rp-stage");
     let tiles = el(&doc, "div", "rp-tiles");
-    let overlay = el(&doc, "div", "rp-overlay");
-    let _ = overlay.set_attribute("data-show", "0");
-    let overlay_card = el(&doc, "div", "rp-overlay-card");
-    let overlay_kicker = el(&doc, "div", "rp-overlay-kicker");
-    overlay_kicker.set_text_content(Some("prompt"));
-    let overlay_text = el(&doc, "div", "rp-overlay-text");
-    append(&overlay_card, &overlay_kicker);
-    append(&overlay_card, &overlay_text);
-    append(&overlay, &overlay_card);
     let status = el(&doc, "div", "rp-status");
     let _ = status.set_attribute("data-show", "1");
     status.set_text_content(Some("loading recording…"));
     append(&stage, &tiles);
-    append(&stage, &overlay);
     append(&stage, &status);
 
     append(&body, &sidebar);
     append(&body, &stage);
+
+    // Prompt caption — docked above the control bar, covering nothing. The
+    // terminal stays fully visible while the prompt is up.
+    let caption = el(&doc, "div", "rp-cap");
+    let _ = caption.set_attribute("data-show", "0");
+    let _ = caption.set_attribute("data-pinned", "0");
+    let _ = caption.set_attribute("data-expand", "0");
+    let caption_main = el(&doc, "div", "rp-cap-main");
+    let caption_kicker = el(&doc, "div", "rp-cap-kicker");
+    caption_kicker.set_text_content(Some("prompt"));
+    let caption_text = el(&doc, "div", "rp-cap-text");
+    append(&caption_main, &caption_kicker);
+    append(&caption_main, &caption_text);
+    let caption_resume = el(&doc, "div", "rp-cap-resume");
+    caption_resume.set_text_content(Some("▶ resume"));
+    append(&caption, &caption_main);
+    append(&caption, &caption_resume);
 
     // Control bar
     let bar = el(&doc, "div", "rp-bar");
@@ -1250,6 +1607,7 @@ fn build_dom(mount: &web_sys::Element) -> Dom {
     speed_btn.set_text_content(Some("20×"));
     let time_label = el(&doc, "div", "rp-time");
     time_label.set_text_content(Some("0:00 / 0:00"));
+    let time_wall = el(&doc, "div", "rp-time-wall");
     let spacer = el(&doc, "div", "rp-spacer");
     let chip = el(&doc, "div", "rp-chip");
     chip.set_text_content(Some("recorded with seance ✦"));
@@ -1257,6 +1615,7 @@ fn build_dom(mount: &web_sys::Element) -> Dom {
     append(&controls, &mode_btn);
     append(&controls, &speed_btn);
     append(&controls, &time_label);
+    append(&controls, &time_wall);
     append(&controls, &spacer);
     append(&controls, &chip);
 
@@ -1264,6 +1623,7 @@ fn build_dom(mount: &web_sys::Element) -> Dom {
     append(&bar, &controls);
 
     append(&root, &body);
+    append(&root, &caption);
     append(&root, &bar);
     append(mount, &root);
 
@@ -1277,18 +1637,20 @@ fn build_dom(mount: &web_sys::Element) -> Dom {
         playhead,
         ticks,
         tooltip,
-        overlay,
-        overlay_text,
+        caption,
+        caption_text,
+        caption_resume,
         play_btn,
         mode_btn,
         speed_btn,
         time_label,
+        time_wall,
         status,
     }
 }
 
 fn wire_controls(player: &Rc<RefCell<Player>>) {
-    let (play_btn, mode_btn, speed_btn, timeline, chapter_list, sidebar, root, overlay) = {
+    let (play_btn, mode_btn, speed_btn, timeline, chapter_list, sidebar, root, caption) = {
         let p = player.borrow();
         (
             p.dom.play_btn.clone(),
@@ -1298,7 +1660,7 @@ fn wire_controls(player: &Rc<RefCell<Player>>) {
             p.dom.chapter_list.clone(),
             p.dom.sidebar.clone(),
             p.dom.root.clone(),
-            p.dom.overlay.clone(),
+            p.dom.caption.clone(),
         )
     };
 
@@ -1330,10 +1692,24 @@ fn wire_controls(player: &Rc<RefCell<Player>>) {
         p.sync_controls();
     });
 
-    // resuming from an overlay stop
-    on_click(&overlay, player, |p, _ev| {
-        p.overlay_pinned = false;
-        p.play();
+    // Caption bar: the resume hint is its own element and resumes playback;
+    // anywhere else on the bar toggles full expansion of the prompt text.
+    on_click(&caption, player, |p, ev| {
+        let on_resume = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .and_then(|e| e.closest(".rp-cap-resume").ok().flatten())
+            .is_some();
+        if on_resume {
+            p.caption_pinned = false;
+            p.play();
+            return;
+        }
+        let expanded = p.dom.caption.get_attribute("data-expand").as_deref() == Some("1");
+        let _ = p
+            .dom
+            .caption
+            .set_attribute("data-expand", if expanded { "0" } else { "1" });
     });
 
     // sidebar collapse
@@ -1370,7 +1746,9 @@ fn wire_controls(player: &Rc<RefCell<Player>>) {
                 };
                 p.pause();
                 p.seek_absolute(t);
-                p.show_chapter_overlay(idx, false);
+                // A chapter jump lands the caption pinned: the viewer chose to
+                // read this prompt, so it holds until they press play.
+                p.show_caption(idx, true);
             }
         });
         let _ = chapter_list.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
@@ -1546,6 +1924,11 @@ box-shadow:0 0 0 1px rgba(233,160,58,.35),0 6px 26px rgba(233,160,58,.14);}
 border-bottom:1px solid var(--rp-border);font-size:11px;}
 .rtile-dot{width:6px;height:6px;border-radius:50%;background:var(--rp-faint);flex:0 0 auto;}
 .rtile[data-flash="1"] .rtile-dot{background:var(--rp-flame);}
+.rtile[data-chflash="1"]{animation:rp-chflash 1.2s ease-out 1;}
+@keyframes rp-chflash{
+from{border-color:var(--rp-flame);box-shadow:0 0 0 1px rgba(233,160,58,.45),
+0 6px 28px rgba(233,160,58,.22);}
+to{border-color:var(--rp-border);box-shadow:0 6px 22px rgba(0,0,0,.35);}}
 .rtile-name{color:var(--rp-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .rtile-slug{color:var(--rp-faint);margin-left:auto;font-variant-numeric:tabular-nums;}
 .rtile-body{flex:1;min-height:0;position:relative;}
@@ -1555,17 +1938,26 @@ border-bottom:1px solid var(--rp-border);font-size:11px;}
 color:var(--rp-dim);font-size:12px;letter-spacing:.03em;pointer-events:none;}
 .rp-status[data-show="0"]{display:none;}
 
-.rp-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-padding:6% 8%;background:rgba(19,17,17,.55);backdrop-filter:blur(1.5px);
-opacity:0;pointer-events:none;transition:opacity .28s ease;}
-.rp-overlay[data-show="1"]{opacity:1;pointer-events:auto;cursor:pointer;}
-.rp-overlay-card{max-width:820px;max-height:70%;overflow:auto;background:var(--rp-elev);
-border:1px solid var(--rp-flame);border-radius:10px;padding:20px 24px;
-box-shadow:0 18px 60px rgba(0,0,0,.6),0 0 0 1px rgba(233,160,58,.18);}
-.rp-overlay-kicker{font-size:10px;letter-spacing:.16em;text-transform:uppercase;
-color:var(--rp-flame);margin-bottom:9px;}
-.rp-overlay-text{font-size:20px;line-height:1.4;color:var(--rp-text);white-space:pre-wrap;
-word-break:break-word;font-family:ui-monospace,'JetBrains Mono',monospace;}
+.rp-cap{flex:0 0 auto;display:flex;align-items:flex-start;gap:12px;
+padding:0 14px;max-height:0;opacity:0;overflow:hidden;cursor:pointer;
+border-left:3px solid var(--rp-flame);
+background:var(--rp-elev);
+background:color-mix(in srgb, var(--rp-elev) 96%, transparent);
+transition:opacity .3s ease,max-height .3s ease,padding .3s ease;}
+.rp-cap[data-show="1"]{opacity:1;max-height:180px;padding:9px 14px;}
+.rp-cap-main{flex:1;min-width:0;}
+.rp-cap-kicker{font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+color:var(--rp-flame);margin-bottom:4px;}
+.rp-cap-text{font-size:13px;line-height:1.45;color:var(--rp-text);white-space:pre-wrap;
+word-break:break-word;font-family:ui-monospace,'JetBrains Mono',monospace;
+display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
+overflow:hidden;text-overflow:ellipsis;}
+.rp-cap[data-expand="1"] .rp-cap-text{-webkit-line-clamp:unset;max-height:150px;
+overflow-y:auto;}
+.rp-cap-resume{flex:0 0 auto;align-self:center;font-size:11px;color:var(--rp-faint);
+border:1px solid var(--rp-border);border-radius:5px;padding:3px 9px;white-space:nowrap;}
+.rp-cap-resume:hover{color:var(--rp-flame);border-color:var(--rp-flame-dim);}
+.rp-cap-resume[data-show="0"]{display:none;}
 
 .rp-bar{flex:0 0 auto;background:var(--rp-elev);border-top:1px solid var(--rp-border);}
 .rp-timeline{position:relative;height:16px;cursor:pointer;}
@@ -1576,6 +1968,8 @@ background:var(--rp-flame-dim);z-index:1;}
 .rp-ticks{position:absolute;inset:0;z-index:2;pointer-events:none;}
 .rp-tick{position:absolute;top:3px;width:2px;height:11px;margin-left:-1px;border-radius:1px;
 background:var(--rp-flame);box-shadow:0 0 6px rgba(233,160,58,.55);}
+.rp-gap{position:absolute;top:2px;width:2px;height:13px;margin-left:-1px;
+background:var(--rp-faint);opacity:.75;}
 .rp-playhead{position:absolute;top:2px;width:2px;height:13px;margin-left:-1px;z-index:3;
 background:var(--rp-text);border-radius:1px;}
 .rp-tip{position:absolute;bottom:20px;transform:translateX(-50%);max-width:320px;
@@ -1591,6 +1985,7 @@ border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer;line-height:1.3
 .rp-play{color:var(--rp-flame);min-width:38px;}
 .rp-speed[data-live="1"]{color:var(--rp-violet);}
 .rp-time{font-variant-numeric:tabular-nums;color:var(--rp-dim);font-size:12px;margin-left:4px;}
+.rp-time-wall{font-variant-numeric:tabular-nums;color:var(--rp-faint);font-size:12px;}
 .rp-spacer{flex:1;}
 .rp-chip{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--rp-faint);
 border:1px solid var(--rp-border);border-radius:999px;padding:3px 9px;user-select:none;}
@@ -1611,6 +2006,121 @@ mod tests {
         assert_eq!(fmt_mmss(9_000), "0:09");
         assert_eq!(fmt_mmss(69_000), "1:09");
         assert_eq!(fmt_mmss(3_725_000), "62:05");
+    }
+
+    #[test]
+    fn idle_labels_are_coarse_and_readable() {
+        assert_eq!(fmt_idle(8_400), "8s");
+        assert_eq!(fmt_idle(89_000), "89s");
+        assert_eq!(fmt_idle(840_000), "14m");
+        assert_eq!(fmt_idle(3_599_000), "60m");
+        assert_eq!(fmt_idle(4_020_000), "1h 07m");
+    }
+
+    // --- wall ↔ compressed -------------------------------------------------
+
+    #[test]
+    fn small_gaps_pass_through_untouched() {
+        // Every step is under GAP_MAX, so the map is one 1:1 segment.
+        let map = build_time_map(&[1_000, 2_000, 4_000], 1_000, 4_000);
+        assert_eq!(map.segs.len(), 1);
+        assert!(!map.segs[0].collapsed);
+        assert_eq!(map.comp_total(), 3_000);
+        assert_eq!(map.wall_to_comp(2_500), 1_500);
+        assert_eq!(map.comp_to_wall(1_500), 2_500);
+        assert!(map.collapsed_gaps().is_empty());
+    }
+
+    #[test]
+    fn a_long_gap_costs_exactly_one_beat() {
+        // 0..1s live, then 10 minutes of nothing, then 1s live.
+        let map = build_time_map(&[0, 1_000, 601_000, 602_000], 0, 602_000);
+        assert_eq!(map.comp_total(), 1_000 + GAP_BEAT_MS + 1_000);
+        assert_eq!(map.segs.len(), 3);
+        assert!(map.segs[1].collapsed);
+        // The far side of the gap is one beat past the near side.
+        assert_eq!(map.wall_to_comp(1_000), 1_000);
+        assert_eq!(map.wall_to_comp(601_000), 1_000 + GAP_BEAT_MS);
+        // Mid-gap interpolates rather than jumping — the playhead keeps moving.
+        let mid = map.wall_to_comp(301_000);
+        assert!(mid > 1_000 && mid < 1_000 + GAP_BEAT_MS);
+        assert_eq!(
+            map.collapsed_gaps(),
+            vec![(1_000 + GAP_BEAT_MS / 2, 600_000)]
+        );
+    }
+
+    #[test]
+    fn wall_compressed_roundtrips_on_record_boundaries() {
+        let times = [0u64, 500, 900, 60_900, 61_400, 61_500, 400_000, 400_100];
+        let map = build_time_map(&times, 0, 400_100);
+        for &t in times.iter() {
+            assert_eq!(map.comp_to_wall(map.wall_to_comp(t)), t, "roundtrip at {t}");
+        }
+        // …and the compressed clock is monotonic across the whole window.
+        let mut prev = 0;
+        for w in (0..400_100).step_by(997) {
+            let c = map.wall_to_comp(w);
+            assert!(c >= prev, "non-monotonic at {w}");
+            prev = c;
+        }
+    }
+
+    #[test]
+    fn gaps_at_the_stream_edges_compress_too() {
+        // One record in the middle of a wide window: idle on both sides.
+        let map = build_time_map(&[500_000], 0, 1_000_000);
+        assert_eq!(map.segs.len(), 2);
+        assert!(map.segs.iter().all(|s| s.collapsed));
+        assert_eq!(map.comp_total(), 2 * GAP_BEAT_MS);
+        assert_eq!(map.wall_to_comp(500_000), GAP_BEAT_MS);
+        assert_eq!(map.wall_to_comp(0), 0);
+        assert_eq!(map.wall_to_comp(1_000_000), 2 * GAP_BEAT_MS);
+    }
+
+    #[test]
+    fn empty_and_single_record_streams_still_map() {
+        // Empty stream over a live-length window: 1:1.
+        let m = build_time_map(&[], 1_000, 3_000);
+        assert_eq!(m.comp_total(), 2_000);
+        assert_eq!(m.wall_to_comp(2_000), 1_000);
+
+        // Empty stream over a wide window: one collapsed beat.
+        let m = build_time_map(&[], 0, 600_000);
+        assert_eq!(m.comp_total(), GAP_BEAT_MS);
+        assert_eq!(m.comp_to_wall(GAP_BEAT_MS), 600_000);
+
+        // Degenerate zero-width window: conversions still answer, never panic.
+        let m = build_time_map(&[7], 7, 7);
+        assert_eq!(m.comp_total(), 0);
+        assert_eq!(m.wall_to_comp(7), 0);
+        assert_eq!(m.comp_to_wall(0), 7);
+
+        // A single record equal to the bounds behaves the same way.
+        let m = build_time_map(&[5_000], 5_000, 5_000);
+        assert_eq!(m.wall_to_comp(9_999), 0);
+
+        // Not-yet-loaded map is the identity, so differences still hold.
+        let m = TimeMap::default();
+        assert_eq!(m.wall_to_comp(1_234), 1_234);
+        assert_eq!(m.comp_to_wall(1_234), 1_234);
+    }
+
+    #[test]
+    fn out_of_range_stamps_saturate_at_the_edges() {
+        let map = build_time_map(&[1_000, 1_500], 1_000, 1_500);
+        assert_eq!(map.wall_to_comp(0), 0);
+        assert_eq!(map.wall_to_comp(9_000_000), 500);
+        assert_eq!(map.comp_to_wall(0), 1_000);
+        assert_eq!(map.comp_to_wall(9_000_000), 1_500);
+    }
+
+    #[test]
+    fn records_outside_the_window_do_not_split_the_map() {
+        // The bridge may ship wider than the window; only the interior counts.
+        let map = build_time_map(&[0, 100, 2_000, 2_500, 90_000], 1_000, 3_000);
+        assert_eq!(map.segs.len(), 1);
+        assert_eq!(map.comp_total(), 2_000);
     }
 
     #[test]

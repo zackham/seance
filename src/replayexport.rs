@@ -341,11 +341,24 @@ pub fn resolve_panes(
     allow_all: bool,
 ) -> Result<Vec<String>> {
     let recorded = panes_with_records(root, from_ms, to_ms)?;
-    match workspace_panes(workspace) {
-        Ok(list) => {
-            let ws: Vec<String> = list.into_iter().map(|(slug, _)| slug).collect();
-            Ok(recorded.into_iter().filter(|s| ws.contains(s)).collect())
+    // Live panes from the daemon, PLUS dead panes attributed from the ring's
+    // own Spawned events — sharing a session AFTER its panes exited is the
+    // normal case, and the daemon has already forgotten those panes.
+    let mut members: Vec<String> = Vec::new();
+    let daemon = workspace_panes(workspace);
+    if let Ok(list) = &daemon {
+        members.extend(list.iter().map(|(slug, _)| slug.clone()));
+    }
+    for slug in &recorded {
+        if !members.contains(slug) && ring_pane_workspace(root, slug, to_ms) == Some(workspace.to_string()) {
+            members.push(slug.clone());
         }
+    }
+    if !members.is_empty() {
+        return Ok(recorded.into_iter().filter(|s| members.contains(s)).collect());
+    }
+    match daemon {
+        Ok(_) => Ok(Vec::new()),
         Err(e) if allow_all => {
             eprintln!("seance replay: {e} — falling back to every recorded pane in range");
             Ok(recorded)
@@ -354,6 +367,21 @@ pub fn resolve_panes(
             "cannot map workspace {workspace} to panes ({e}); pass --panes explicitly"
         )),
     }
+}
+
+/// Workspace a recorded pane belonged to, from the LAST `Spawned` event at or
+/// before `at_ms` in its ring — recordings outlive the daemon's memory.
+fn ring_pane_workspace(root: &Path, slug: &str, at_ms: u64) -> Option<String> {
+    let events = pane_events(root, slug, 0, at_ms).ok()?;
+    events
+        .iter()
+        .rev()
+        .find_map(|(_, ev)| match ev {
+            seance_core::replay::ReplayEvent::Spawned { workspace, .. } => {
+                Some(workspace.clone())
+            }
+            _ => None,
+        })
 }
 
 // ---------------------------------------------------------------------------
