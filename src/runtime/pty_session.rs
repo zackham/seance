@@ -896,11 +896,34 @@ fn io_loop(
 }
 
 /// Non-blocking self-pipe for waking the io thread's `poll(2)`.
+///
+/// Linux gets atomic `pipe2`; macOS has no pipe2, so flags are set with
+/// fcntl after creation (the fork race this opens is harmless here — pane
+/// children exec immediately, and a leaked write end only keeps the pipe
+/// pollable).
 fn make_wake_pipe() -> Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0 as libc::c_int; 2];
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
-    if rc != 0 {
-        bail!("pipe2 failed: {}", std::io::Error::last_os_error());
+    #[cfg(target_os = "linux")]
+    {
+        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
+        if rc != 0 {
+            bail!("pipe2 failed: {}", std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        if rc != 0 {
+            bail!("pipe failed: {}", std::io::Error::last_os_error());
+        }
+        for fd in fds {
+            unsafe {
+                let fl = libc::fcntl(fd, libc::F_GETFL);
+                libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
+                let fdfl = libc::fcntl(fd, libc::F_GETFD);
+                libc::fcntl(fd, libc::F_SETFD, fdfl | libc::FD_CLOEXEC);
+            }
+        }
     }
     unsafe { Ok((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))) }
 }
