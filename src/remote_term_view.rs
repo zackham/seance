@@ -1136,6 +1136,92 @@ fn term_default_bg() -> Hsla {
     .into()
 }
 
+/// SEANCE_DEBUG_RENDER=1 paint accounting: (replays, reshapes, reshape ns).
+static PAINT_STATS: std::sync::Mutex<(u64, u64, u64, Option<std::time::Instant>)> =
+    std::sync::Mutex::new((0, 0, 0, None));
+
+fn paint_stat(replay: bool, reshape_ns: u64) {
+    if std::env::var_os("SEANCE_DEBUG_RENDER").is_none() {
+        return;
+    }
+    let mut g = PAINT_STATS.lock().unwrap();
+    if replay {
+        g.0 += 1;
+    } else {
+        g.1 += 1;
+        g.2 += reshape_ns;
+    }
+    let now = std::time::Instant::now();
+    let start = *g.3.get_or_insert(now);
+    if now.duration_since(start) >= std::time::Duration::from_secs(5) {
+        let secs = now.duration_since(start).as_secs_f64();
+        eprintln!(
+            "[seance paint-probe] {:.1} replays/s · {:.1} reshapes/s · reshape avg {:.1}ms",
+            g.0 as f64 / secs,
+            g.1 as f64 / secs,
+            if g.1 > 0 {
+                g.2 as f64 / g.1 as f64 / 1e6
+            } else {
+                0.0
+            },
+        );
+        *g = (0, 0, 0, Some(now));
+    }
+}
+
+/// Durable shaped-run cache: (text, fg, bold, cell_w, font_size) → ShapedLine.
+/// ShapedLine clones are cheap (Arc'd layout). Capped; cleared wholesale on
+/// overflow — one warm-up frame is cheaper than LRU bookkeeping.
+static SHAPE_CACHE: OnceLock<Mutex<HashMap<u64, ShapedLine>>> = OnceLock::new();
+const SHAPE_CACHE_CAP: usize = 16384;
+
+fn shape_run_cached(
+    b: &TextBatch,
+    font_size: Pixels,
+    cell_w: Pixels,
+    window: &mut Window,
+) -> ShapedLine {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    b.text.hash(&mut h);
+    b.style.bold.hash(&mut h);
+    // Hsla isn't Hash; bit-hash the components.
+    let c = b.style.fg;
+    for f in [c.h, c.s, c.l, c.a, f32::from(cell_w), f32::from(font_size)] {
+        f.to_bits().hash(&mut h);
+    }
+    let key = h.finish();
+
+    let cache = SHAPE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().unwrap().get(&key).cloned() {
+        return hit;
+    }
+    let font = if b.style.bold {
+        term_font_bold()
+    } else {
+        term_font()
+    };
+    let shaped: ShapedLine = window.text_system().shape_line(
+        SharedString::from(b.text.clone()),
+        font_size,
+        &[TextRun {
+            len: b.text.len(),
+            font,
+            color: b.style.fg,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        Some(cell_w),
+    );
+    let mut g = cache.lock().unwrap();
+    if g.len() >= SHAPE_CACHE_CAP {
+        g.clear();
+    }
+    g.insert(key, shaped.clone());
+    shaped
+}
+
 fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
     // Replay path: same grid + bounds as last paint → skip reshape (sidebar DnD).
     if let Ok(guard) = shaped_paint_caches().lock() {
@@ -1147,10 +1233,12 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
                 if layout.origin_gutter {
                     paint_origin_gutter(layout, window);
                 }
+                paint_stat(true, 0);
                 return;
             }
         }
     }
+    let reshape_t0 = std::time::Instant::now();
 
     let origin = layout.bounds.origin;
     let bg = term_default_bg();
@@ -1283,27 +1371,18 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
 
     // Shape + paint text runs. force_width = cell width snaps glyphs to the
     // grid (box-drawing / logo stay column-aligned without per-cell shaping).
+    //
+    // Shaping goes through a durable content-addressed cache: gpui's own line
+    // cache only spans two consecutive frames, and grid reshapes are spaced
+    // (replay path serves the frames between), so every reshape was a full
+    // cold re-shape of all visible runs (~14ms/pane). Terminal content
+    // repeats overwhelmingly across frames AND panes (prompts, borders,
+    // static rows; a spinner tick changes one run) — cache hit rate is high
+    // and a reshape costs only the genuinely-new runs.
     let font_size = layout.font_size;
     let mut cache_texts: Vec<(f32, f32, ShapedLine)> = Vec::with_capacity(batches.len());
     for b in &batches {
-        let font = if b.style.bold {
-            term_font_bold()
-        } else {
-            term_font()
-        };
-        let shaped: ShapedLine = window.text_system().shape_line(
-            SharedString::from(b.text.clone()),
-            font_size,
-            &[TextRun {
-                len: b.text.len(),
-                font,
-                color: b.style.fg,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            Some(layout.cell_w),
-        );
+        let shaped = shape_run_cached(b, font_size, layout.cell_w, window);
         let pos = point(
             origin.x + layout.cell_w * b.start_col as f32,
             origin.y + layout.line_h * b.row as f32,
@@ -1376,6 +1455,7 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
         );
     }
     paint_origin_gutter(layout, window);
+    paint_stat(false, reshape_t0.elapsed().as_nanos() as u64);
 }
 
 /// 2px left gutter tinted by who last wrote stdin — causal attribution made

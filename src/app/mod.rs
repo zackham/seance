@@ -213,11 +213,35 @@ enum SashDrag {
 struct RenderProbe {
     count: u64,
     window_start: Option<std::time::Instant>,
+    /// name → (total, max, samples) since last report.
+    sections:
+        std::collections::HashMap<&'static str, (std::time::Duration, std::time::Duration, u64)>,
+    enabled: Option<bool>,
 }
 
 impl RenderProbe {
+    fn enabled(&mut self) -> bool {
+        *self
+            .enabled
+            .get_or_insert_with(|| std::env::var_os("SEANCE_DEBUG_RENDER").is_some())
+    }
+
+    fn add(&mut self, name: &'static str, dt: std::time::Duration) {
+        if !self.enabled() {
+            return;
+        }
+        let e = self.sections.entry(name).or_insert((
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+            0,
+        ));
+        e.0 += dt;
+        e.1 = e.1.max(dt);
+        e.2 += 1;
+    }
+
     fn tick(&mut self) {
-        if std::env::var_os("SEANCE_DEBUG_RENDER").is_none() {
+        if !self.enabled() {
             return;
         }
         let now = std::time::Instant::now();
@@ -225,12 +249,26 @@ impl RenderProbe {
         self.count += 1;
         let elapsed = now.duration_since(start);
         if elapsed >= std::time::Duration::from_secs(5) {
+            let mut parts: Vec<String> = self
+                .sections
+                .iter()
+                .map(|(k, (tot, max, n))| {
+                    format!(
+                        "{k} avg {:.1}ms max {:.1}ms",
+                        tot.as_secs_f64() * 1000.0 / (*n).max(1) as f64,
+                        max.as_secs_f64() * 1000.0
+                    )
+                })
+                .collect();
+            parts.sort();
             eprintln!(
-                "[seance render-probe] {:.1} renders/s over {:.1}s",
+                "[seance render-probe] {:.1} renders/s over {:.1}s · {}",
                 self.count as f64 / elapsed.as_secs_f64(),
-                elapsed.as_secs_f64()
+                elapsed.as_secs_f64(),
+                parts.join(" · ")
             );
             self.count = 0;
+            self.sections.clear();
             self.window_start = Some(now);
         }
     }
@@ -1902,6 +1940,26 @@ impl Render for SeanceApp {
             self.ensure_keyboard_focus(window, cx);
         }
 
+        // Timed section construction (SEANCE_DEBUG_RENDER=1 reports per-section
+        // avg/max ms — pinpoints which surface makes frames expensive).
+        let active = window.is_window_active();
+        let t0 = std::time::Instant::now();
+        let sidebar_el = self.render_sidebar(active, cx).into_any_element();
+        let t1 = std::time::Instant::now();
+        let asks_el: Vec<gpui::AnyElement> = self
+            .render_asks(cx)
+            .into_iter()
+            .map(|e| e.into_any_element())
+            .collect();
+        let shelf_el = self.render_minimize_shelf(active, cx).into_any_element();
+        let stage_el = self.render_stage_strip(active, cx).into_any_element();
+        let t2 = std::time::Instant::now();
+        let tiles_el = self.render_tiles(active, cx).into_any_element();
+        let t3 = std::time::Instant::now();
+        self.render_probe.add("sidebar", t1 - t0);
+        self.render_probe.add("strips", t2 - t1);
+        self.render_probe.add("tiles", t3 - t2);
+
         div()
             .id("seance-root")
             .size_full()
@@ -2054,7 +2112,7 @@ impl Render for SeanceApp {
                     }
                 }),
             )
-            .child(self.render_sidebar(window.is_window_active(), cx))
+            .child(sidebar_el)
             .child(
                 // min_w_0 is load-bearing: without it the main column's
                 // min-content width (sum of tile mins) blocks window shrink
@@ -2067,10 +2125,10 @@ impl Render for SeanceApp {
                     .overflow_hidden()
                     .flex()
                     .flex_col()
-                    .children(self.render_asks(cx))
-                    .child(self.render_minimize_shelf(window.is_window_active(), cx))
-                    .child(self.render_stage_strip(window.is_window_active(), cx))
-                    .child(self.render_tiles(window.is_window_active(), cx)),
+                    .children(asks_el)
+                    .child(shelf_el)
+                    .child(stage_el)
+                    .child(tiles_el),
             )
             .children(
                 self.overview

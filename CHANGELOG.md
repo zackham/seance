@@ -19,6 +19,19 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.10.5] — 2026-07-30
+
+### Fixed
+
+- **Typing lag, part 2: 9× cheaper grid reshapes.** gpui's line cache only
+  spans two consecutive frames, and grid repaints are spaced by the replay
+  path — so every live-pane repaint cold-shaped all visible text (~14ms per
+  pane; several busy claude panes saturated the UI thread). Shaped runs now
+  live in a durable content-addressed cache (text+style+metrics → ShapedLine,
+  shared across panes): a spinner tick re-shapes only the changed run
+  (reshape avg 14.4ms → 1.6ms). Paint accounting added to
+  `SEANCE_DEBUG_RENDER=1` (`paint-probe`: replays/reshapes/avg).
+
 ## [0.10.4] — 2026-07-30
 
 ### Fixed
