@@ -19,6 +19,17 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.10.4] — 2026-07-30
+
+### Fixed
+
+- **Typing lag on many-workspace sessions** — the sidebar working-spinner
+  animated at 80ms, and each animation tick re-renders the entire window
+  (~55ms/frame at 24 circles), saturating the UI thread so keystroke frames
+  queued behind it. Spinner now ticks at 240ms (~85% → ~20-50% CPU). New
+  `SEANCE_DEBUG_RENDER=1` prints a renders/s probe to the gui log. The
+  underlying frame cost at high workspace counts is tracked separately.
+
 ## [0.10.3] — 2026-07-30
 
 ### Added

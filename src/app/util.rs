@@ -130,8 +130,11 @@ pub(super) fn title_looks_busy(title: &str) -> bool {
 /// advances the frame (terminal paint / status / pad tick).
 pub(super) fn working_spinner_glyph() -> &'static str {
     // Classic CLI spinner frames (same family as Claude/ink titles).
+    // 240ms cadence: the animation notify forces a FULL window re-render —
+    // at 80ms that saturated the main thread on many-workspace sessions
+    // (~55ms frames × 12.5/s = pegged CPU, laggy typing).
     const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let i = ((now_ms() / 80) as usize) % FRAMES.len();
+    let i = ((now_ms() / 240) as usize) % FRAMES.len();
     FRAMES[i]
 }
 

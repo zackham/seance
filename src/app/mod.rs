@@ -181,6 +181,7 @@ pub struct SeanceApp {
     /// Render-safe cache of daemon-side files (pad sidecars, phone binds,
     /// prompt library) — refreshed by a ~2s background loop.
     remote_cache: Arc<crate::remote_cache::RemoteCache>,
+    render_probe: RenderProbe,
 }
 
 /// Active sash drag state.
@@ -204,6 +205,35 @@ enum SashDrag {
         above_w: f32,
         below_w: f32,
     },
+}
+
+/// Env-gated (`SEANCE_DEBUG_RENDER=1`) frame-rate probe: counts render()
+/// entries and reports every ~5s so a notify storm is visible in the gui log.
+#[derive(Default)]
+struct RenderProbe {
+    count: u64,
+    window_start: Option<std::time::Instant>,
+}
+
+impl RenderProbe {
+    fn tick(&mut self) {
+        if std::env::var_os("SEANCE_DEBUG_RENDER").is_none() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let start = *self.window_start.get_or_insert(now);
+        self.count += 1;
+        let elapsed = now.duration_since(start);
+        if elapsed >= std::time::Duration::from_secs(5) {
+            eprintln!(
+                "[seance render-probe] {:.1} renders/s over {:.1}s",
+                self.count as f64 / elapsed.as_secs_f64(),
+                elapsed.as_secs_f64()
+            );
+            self.count = 0;
+            self.window_start = Some(now);
+        }
+    }
 }
 
 impl SeanceApp {
@@ -269,6 +299,7 @@ impl SeanceApp {
             quicklaunch_checked: None,
             quicklaunch_editor: None,
             remote_cache,
+            render_probe: RenderProbe::default(),
         };
         // Seed the prompt-library user file on the DAEMON machine (write-if-
         // missing) and pre-warm the cache so the palette has user prompts by
@@ -364,10 +395,11 @@ impl SeanceApp {
         .detach();
 
         // Sidebar working-spinner animation while any circle is live-busy.
-        // Cheap: only notifies when workspace_was_working is non-empty.
+        // NOT cheap: each notify re-renders the whole window (~55ms at 24
+        // circles) — 240ms keeps the glyph alive without eating the thread.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
-                .timer(Duration::from_millis(80))
+                .timer(Duration::from_millis(240))
                 .await;
             let Some(this) = this.upgrade() else { break };
             this.update(cx, |app: &mut SeanceApp, cx| {
@@ -1845,6 +1877,11 @@ impl Render for SeanceApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_bg = cx.theme().background;
         let _ = theme_bg;
+
+        // SEANCE_DEBUG_RENDER=1: 5s render-rate + construction-cost report to
+        // stderr (gui.stderr.log). Measures element construction only — gpui
+        // layout/paint happen outside this fn — but the RATE is exact.
+        self.render_probe.tick();
 
         // Quicklaunch config hot-reload (background bridge stat, ~2s throttle).
         self.reload_quicklaunch_if_stale(cx);
