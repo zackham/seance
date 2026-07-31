@@ -13,7 +13,19 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 2. **Add a section at the top of this file** (same commit)
 3. Update any version-pinned contracts in `CLAUDE.md` if behavior changed
 
-Unreleased work can sit under `## [Unreleased]` until the version bump.
+Unreleased work can sit under `## [Unreleased]
+
+## [0.10.9] — 2026-07-30
+
+### Fixed
+
+- **Pagers work in panes again** (`git log` paged instead of dumping). The
+  daemon inherits the environment of whoever (re)started it — an agent
+  session running `seance upgrade` leaked its non-interactive overrides
+  (`PAGER=cat`, `GIT_TERMINAL_PROMPT=0`, …) into every spawned pane. Pane
+  PTYs now scrub agent-ish env (PAGER/GIT_PAGER/SYSTEMD_PAGER/
+  GIT_TERMINAL_PROMPT/CI/DEBIAN_FRONTEND/NO_COLOR) at spawn — panes are
+  human terminals by definition.` until the version bump.
 
 ---
 

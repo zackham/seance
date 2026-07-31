@@ -234,6 +234,22 @@ impl PtySession {
             .env("COLORTERM", "truecolor")
             // Force 24-bit color in chalk/supports-color/ink (claude uses these).
             .env("FORCE_COLOR", "3");
+        // Panes are HUMAN terminals. The daemon may have been (re)started by
+        // an agent session (`seance upgrade` from a claude shell) whose
+        // environment disables interactivity for its own subprocesses —
+        // scrub those so `git log` pages and prompts behave normally. A pane
+        // whose user genuinely wants these sets them in their own shell rc.
+        for var in [
+            "PAGER",
+            "GIT_PAGER",
+            "SYSTEMD_PAGER",
+            "GIT_TERMINAL_PROMPT",
+            "CI",
+            "DEBIAN_FRONTEND",
+            "NO_COLOR",
+        ] {
+            cmd.env_remove(var);
+        }
         for (k, v) in &config.env {
             cmd.env(k, v);
         }
