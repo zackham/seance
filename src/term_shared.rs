@@ -8,6 +8,28 @@
 
 use alacritty_terminal::term::TermMode;
 
+/// "Typing hot" window: stamped on every human key/paste into a terminal;
+/// the GUI event loop paints applied grids immediately while hot (echo
+/// latency) and throttles to ~30fps otherwise (stream smoothness).
+static TYPING_HOT_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Stamp typing activity (hot for ~250ms — covers echo round-trip + repeat).
+pub fn touch_typing_hot() {
+    TYPING_HOT_UNTIL.store(now_ms() + 250, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether a human keystroke is plausibly awaiting its echo frame.
+pub fn typing_hot() -> bool {
+    now_ms() < TYPING_HOT_UNTIL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Events a terminal entity emits to the session manager / views.
 ///
 /// The live remote-terminal path only ever emits `Wakeup` (repaint on new

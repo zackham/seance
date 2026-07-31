@@ -19,6 +19,34 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.10.7] — 2026-07-30
+
+### Fixed
+
+- **Typing lag, part 4 (the GUI half): grid frames now actually schedule a
+  window frame.** In this gpui build a pane-entity `notify` never produced a
+  frame — the window only repainted on the 240ms sidebar-spinner tick, so a
+  keystroke's echo (or any grid update) sat applied-but-unpainted until the
+  next tick. Measured: `apply→paint` p50 ~68ms / p95 ~80ms, `render gap`
+  pinned at 233–250ms, real-typing `key→paint` p50 90ms / p95 271ms. (The
+  0.10.4 spinner slowdown 80ms→240ms silently made this worse — the spinner
+  was the app's only frame clock.) The daemon-event batch loop now kicks a
+  root notify per applied **visible** grid batch: immediately while a human
+  keystroke is in flight (~250ms typing-hot window), throttled to ~30fps for
+  plain streams, with a 33ms deferred kick so burst tails never wait for the
+  spinner. Root notify → render measured at p50 2.9ms / p95 15.3ms.
+- **Bridge events apply in batches — one render cycle per batch.** The old
+  loop did one `update` per daemon event, interleaving render work between
+  events; a keystroke's echo could queue behind a grid backlog (measured
+  bridge→apply p95 198ms). One `update` now drains everything queued
+  (cap 512), then decides on a single frame kick.
+
+### Added
+
+- More `[seance lat]` gauges: `gui bridge age`, `gui grid apply`,
+  `gui render gap`, `gui paint replay` / `gui paint fresh`,
+  `gui apply→paint`, `gui kick→render`.
+
 ## [0.10.6] — 2026-07-30
 
 ### Fixed

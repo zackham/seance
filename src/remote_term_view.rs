@@ -1224,6 +1224,8 @@ fn shape_run_cached(
 
 fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
     crate::latency_probe::complete("g_paint", &layout.slug, "gui key→paint");
+    crate::latency_probe::complete("g_frame", &layout.slug, "gui apply→paint");
+    let paint_t0 = std::time::Instant::now();
     // Replay path: same grid + bounds as last paint → skip reshape (sidebar DnD).
     if let Ok(guard) = shaped_paint_caches().lock() {
         if let Some(c) = guard.get(&layout.slug) {
@@ -1235,6 +1237,10 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
                     paint_origin_gutter(layout, window);
                 }
                 paint_stat(true, 0);
+                crate::latency_probe::record(
+                    "gui paint replay",
+                    paint_t0.elapsed().as_micros() as u64,
+                );
                 return;
             }
         }
@@ -1457,6 +1463,7 @@ fn paint_grid(layout: &Layout, window: &mut Window, cx: &mut App) {
     }
     paint_origin_gutter(layout, window);
     paint_stat(false, reshape_t0.elapsed().as_nanos() as u64);
+    crate::latency_probe::record("gui paint fresh", paint_t0.elapsed().as_micros() as u64);
 }
 
 /// 2px left gutter tinted by who last wrote stdin — causal attribution made

@@ -131,6 +131,9 @@ pub struct SeanceApp {
     pending_rename: Option<RenameTarget>,
     /// Next `PaneSpawned` from our summon should open rename (not external ctl).
     rename_next_spawn: bool,
+    /// Set by [`Self::apply_grid_snap`] when a grid landed on a VISIBLE pane;
+    /// the event-batch loop reads+clears it to decide whether to kick a frame.
+    grid_batch_visible: bool,
     /// Focus-zoom: only this pane fills the tile region (None = normal grid).
     zoomed_slug: Option<String>,
     /// Overlay palette (ctrl+shift+k prompts / ctrl+shift+j jump).
@@ -314,6 +317,7 @@ impl SeanceApp {
             pending_focus: None,
             pending_rename: None,
             rename_next_spawn: false,
+            grid_batch_visible: false,
             zoomed_slug: None,
             palette: PaletteMode::Closed,
             split_ratio: 0.5,
@@ -375,24 +379,94 @@ impl SeanceApp {
         // pushes (thin clients see the daemon machine's chips) — no GUI poll.
 
         // Bridge: std thread blocks on daemon events → unbounded mpsc → gpui task.
-        let (async_tx, mut async_rx) = futures::channel::mpsc::unbounded::<GuiEvent>();
+        // Events are timestamped at the bridge so queue age is measurable at
+        // apply time ([seance lat] "gui bridge age").
+        let (async_tx, mut async_rx) =
+            futures::channel::mpsc::unbounded::<(std::time::Instant, GuiEvent)>();
         std::thread::Builder::new()
             .name("seance-gui-events".into())
             .spawn(move || {
                 while let Ok(ev) = event_rx.recv() {
-                    if async_tx.unbounded_send(ev).is_err() {
+                    if async_tx
+                        .unbounded_send((std::time::Instant::now(), ev))
+                        .is_err()
+                    {
                         break;
                     }
                 }
             })
             .ok();
 
+        // Batch-drain: one `update` (→ one render cycle) applies EVERYTHING
+        // queued, instead of one update per event. Under grid streams the old
+        // per-event loop interleaved a render cycle between events, so a
+        // keystroke's echo waited behind backlog × frame-cost (measured p95
+        // 198ms bridge→apply). Cap keeps one pathological burst from wedging
+        // the main thread for unbounded time.
         cx.spawn(async move |this, cx| {
             use futures::StreamExt as _;
-            while let Some(ev) = async_rx.next().await {
+            while let Some(first) = async_rx.next().await {
+                let mut batch = vec![first];
+                while batch.len() < 512 {
+                    match async_rx.try_recv() {
+                        Ok(ev) => batch.push(ev),
+                        Err(_) => break, // empty or closed — apply what we have
+                    }
+                }
                 let Some(this) = this.upgrade() else { break };
                 this.update(cx, |app: &mut SeanceApp, cx| {
-                    app.apply_gui_event_no_window(ev, cx);
+                    app.grid_batch_visible = false;
+                    for (t, ev) in batch.drain(..) {
+                        crate::latency_probe::record(
+                            "gui bridge age",
+                            t.elapsed().as_micros() as u64,
+                        );
+                        app.apply_gui_event_no_window(ev, cx);
+                    }
+                    let grids = app.grid_batch_visible;
+                    // Pane-entity notify does NOT schedule a window frame in
+                    // this gpui build — measured: grids applied between spinner
+                    // ticks sat unpainted until the next 240ms tick
+                    // (apply→paint p50 ~68ms, render gap pinned at 233–250ms).
+                    // A root notify is what actually produces a frame, so kick
+                    // one per applied grid batch: immediately while a human
+                    // keystroke is in flight (echo latency), at most ~30fps
+                    // otherwise (stream smoothness without per-event churn).
+                    if grids {
+                        static LAST_KICK: std::sync::Mutex<Option<std::time::Instant>> =
+                            std::sync::Mutex::new(None);
+                        let now = std::time::Instant::now();
+                        let mut g = LAST_KICK.lock().unwrap();
+                        let due = crate::term_shared::typing_hot()
+                            || g.is_none_or(|t| now.duration_since(t).as_millis() >= 33);
+                        if due {
+                            *g = Some(now);
+                            // Frame-scheduling gauge: root notify → render()
+                            // ("gui kick→render") — must be ~1 vsync for the
+                            // typing-hot path to meet the latency target.
+                            crate::latency_probe::mark("g_kick", "app");
+                            cx.notify();
+                        } else {
+                            // Throttled — arm ONE deferred kick so the final
+                            // frame of a burst paints within ~33ms instead of
+                            // waiting for the next 240ms spinner tick.
+                            static KICK_ARMED: std::sync::atomic::AtomicBool =
+                                std::sync::atomic::AtomicBool::new(false);
+                            use std::sync::atomic::Ordering;
+                            if !KICK_ARMED.swap(true, Ordering::Relaxed) {
+                                cx.spawn(async move |this, cx| {
+                                    cx.background_executor()
+                                        .timer(Duration::from_millis(33))
+                                        .await;
+                                    KICK_ARMED.store(false, Ordering::Relaxed);
+                                    if let Some(this) = this.upgrade() {
+                                        this.update(cx, |_, cx| cx.notify());
+                                    }
+                                })
+                                .detach();
+                            }
+                        }
+                    }
                 });
             }
         })
@@ -560,6 +634,7 @@ impl SeanceApp {
                 self.apply_grid_snap(snap, cx);
             }
             GuiEvent::GridBin { pane, data_b64 } => {
+                let apply_t0 = std::time::Instant::now();
                 // Damage frames need the previous snapshot as base.
                 let base = self
                     .panes
@@ -569,7 +644,13 @@ impl SeanceApp {
                     .map(|rt| rt.read(cx).snapshot.clone());
                 let base_ref = base.as_ref().map(|a| a.as_ref());
                 match decode_grid_b64(&data_b64, base_ref) {
-                    Ok(snap) => self.apply_grid_snap(snap, cx),
+                    Ok(snap) => {
+                        self.apply_grid_snap(snap, cx);
+                        crate::latency_probe::record(
+                            "gui grid apply",
+                            apply_t0.elapsed().as_micros() as u64,
+                        );
+                    }
                     Err(e) => {
                         // Size mismatch / missing base after upgrade or resize:
                         // drop local base so the next FULL frame applies cleanly.
@@ -836,6 +917,7 @@ impl SeanceApp {
                 t.apply_snapshot(snap, cx);
             });
             self.sync_workspace_working_touches(cx);
+            self.grid_batch_visible = true;
         }
     }
 
@@ -1920,6 +2002,18 @@ impl Render for SeanceApp {
         // stderr (gui.stderr.log). Measures element construction only — gpui
         // layout/paint happen outside this fn — but the RATE is exact.
         self.render_probe.tick();
+        crate::latency_probe::complete("g_kick", "app", "gui kick→render");
+        // Always-on inter-render gap ([seance lat] "gui render gap"): the
+        // effective app frame cadence — the ceiling on notify→paint latency.
+        {
+            static LAST_RENDER: std::sync::Mutex<Option<std::time::Instant>> =
+                std::sync::Mutex::new(None);
+            let mut g = LAST_RENDER.lock().unwrap();
+            if let Some(prev) = *g {
+                crate::latency_probe::record("gui render gap", prev.elapsed().as_micros() as u64);
+            }
+            *g = Some(std::time::Instant::now());
+        }
 
         // Quicklaunch config hot-reload (background bridge stat, ~2s throttle).
         self.reload_quicklaunch_if_stale(cx);
