@@ -1,0 +1,35 @@
+[package]
+name = "seance-web"
+version.workspace = true
+edition.workspace = true
+description = "seance web client: wasm terminal renderer + chrome speaking the GUI wire protocol over websocket."
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+seance-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+# Pin to the installed wasm-bindgen-cli (0.2.126) — CLI and crate must match.
+wasm-bindgen = "=0.2.126"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+  "Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement",
+  "HtmlInputElement", "HtmlTextAreaElement", "CssStyleDeclaration", "DomRect",
+  "WebSocket", "BinaryType", "MessageEvent", "CloseEvent", "ErrorEvent",
+  "KeyboardEvent", "MouseEvent", "WheelEvent", "FocusEvent", "InputEvent",
+  "CompositionEvent", "ClipboardEvent", "DataTransfer", "Clipboard",
+  "WebGl2RenderingContext", "WebGlBuffer", "WebGlProgram", "WebGlShader",
+  "WebGlTexture", "WebGlUniformLocation", "WebGlVertexArrayObject",
+  "CanvasRenderingContext2d", "TextMetrics", "ImageData",
+  "Performance", "Storage", "Location", "History",
+  "ResizeObserver", "ResizeObserverEntry", "MediaQueryList",
+  "Navigator", "VisibilityState", "AddEventListenerOptions",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
