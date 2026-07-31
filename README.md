@@ -132,6 +132,7 @@ pane — agents only see their circle unless you pass `--all`.
 |-----|--|
 | [docs/CONTROL.md](docs/CONTROL.md) | control plane + how agents engage the human |
 | [docs/WEB.md](docs/WEB.md) | browser thin client (`seance web`): wasm renderer, ws bridge, token auth |
+| [docs/REPLAY.md](docs/REPLAY.md) | session replay: 48h DVR, prompt-chapter player, trim/publish editor |
 | [docs/DAEMON.md](docs/DAEMON.md) | daemon / GUI split, upgrade path |
 | [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md) | multi-agent swarm playbook |
 | [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md) | structured command boundaries |

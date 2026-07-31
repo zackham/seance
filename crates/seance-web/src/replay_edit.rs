@@ -597,7 +597,7 @@ fn wire_events(editor: &Rc<RefCell<Editor>>) {
                         e.rows.get(i).map(|r| r.t_ms).zip(e.player.clone())
                     };
                     if let Some((t, p)) = seek {
-                        p.borrow_mut().seek_ms(t);
+                        if let Ok(mut pb) = p.try_borrow_mut() { pb.seek_ms(t); }
                     }
                 }
             }
@@ -724,7 +724,9 @@ fn set_edge_to_playhead(editor: &Rc<RefCell<Editor>>, which: Handle) {
     let Some(player) = editor.borrow().player.clone() else {
         return;
     };
-    let at = player.borrow().current_ms();
+    let Ok(pb) = player.try_borrow() else { return };
+    let at = pb.current_ms();
+    drop(pb);
     {
         let mut ed = editor.borrow_mut();
         let (lo, hi) = (ed.lo_ms, ed.hi_ms);
@@ -750,7 +752,7 @@ fn push_range(editor: &Rc<RefCell<Editor>>) {
         (ed.player.clone(), ed.from_ms, ed.to_ms)
     };
     if let Some(p) = player {
-        p.borrow_mut().set_range(from, to);
+        if let Ok(mut pb) = p.try_borrow_mut() { pb.set_range(from, to); }
     }
 }
 
@@ -763,7 +765,7 @@ fn apply_chapters(editor: &Rc<RefCell<Editor>>) {
         )
     };
     if let Some(p) = player {
-        p.borrow_mut().set_chapters(chapters);
+        if let Ok(mut pb) = p.try_borrow_mut() { pb.set_chapters(chapters); }
     }
 }
 
@@ -779,7 +781,7 @@ fn review_pass(editor: &Rc<RefCell<Editor>>) {
         )
     };
     let Some(p) = player else { return };
-    let mut p = p.borrow_mut();
+    let Ok(mut p) = p.try_borrow_mut() else { return };
     p.set_mode(crate::replay::Mode::Chapters);
     p.seek_ms(start);
     p.play();
@@ -901,7 +903,9 @@ fn start_tick(editor: &Rc<RefCell<Editor>>) {
             (ed.player.clone(), ed.lo_ms, ed.hi_ms)
         };
         let Some(p) = player else { return };
-        let at = p.borrow().current_ms();
+        let Ok(pb) = p.try_borrow() else { return };
+        let at = pb.current_ms();
+        drop(pb);
         let frac = ms_to_frac(at, lo, hi) * 100.0;
         let ed = ed_ref.borrow();
         let _ = ed
@@ -1300,7 +1304,7 @@ font-size:13px;line-height:22px;text-shadow:0 0 10px rgba(233,160,58,.6);}
 #rpe-root .rpe-handle:hover{color:#F4BE62;}
 #rpe-root .rpe-trimctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
 #rpe-root .rpe-dur{margin-right:4px;color:var(--flame,#E9A03A);}
-#rpe-root .rpe-player{flex:1;min-height:0;border-radius:6px;overflow:hidden;
+#rpe-root .rpe-player{flex:1;min-height:0;border-radius:6px;overflow:hidden;position:relative;
 border:1px solid var(--border,#352C2E);background:var(--bg-elevated,#1C1718);}
 #rpe-root .rpe-side{width:300px;flex:0 0 300px;display:flex;flex-direction:column;
 min-height:0;border-left:1px solid var(--border,#352C2E);
