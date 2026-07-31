@@ -687,6 +687,19 @@ impl Chrome {
                         })
                     }));
                 }
+                {
+                    let w = ws.clone();
+                    entries.push(MenuEntry::item("share replay…", move || {
+                        // The editor is a page-level takeover — route via hash
+                        // + reload so start() re-dispatches into replay_edit.
+                        if let Some(win) = web_sys::window() {
+                            let _ = win
+                                .location()
+                                .set_hash(&format!("replay-edit?workspace={w}"));
+                            let _ = win.location().reload();
+                        }
+                    }));
+                }
                 // WEB DIVERGENCE #3: no "send to new window" — a tab can't
                 // spawn a peer GUI window. Existing peers only.
                 if !peers.is_empty() {

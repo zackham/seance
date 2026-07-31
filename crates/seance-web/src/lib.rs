@@ -27,6 +27,8 @@ pub mod keymap;
 pub mod menus;
 pub mod probe;
 pub mod renderer;
+pub mod replay;
+pub mod replay_edit;
 pub mod state;
 pub mod ui;
 
@@ -1007,6 +1009,19 @@ pub fn start() -> Result<(), JsValue> {
         web_sys::console::error_1(&format!("seance-web panic: {info}").into());
     }));
 
+    // ── replay modes take over the page entirely ────────────────────────────
+    // Published bundle: index.html sets window.__SEANCE_REPLAY__ = manifest url.
+    if let Some(manifest_url) = replay_bundle_url() {
+        boot_replay_player(manifest_url)?;
+        return Ok(());
+    }
+    // Editor route: #replay-edit?workspace=W[&from_ms=..&to_ms=..]
+    if let Some((ws, from, to)) = replay_edit_route() {
+        let token = initial_token().unwrap_or_default();
+        replay_edit::open(ws, token, from, to);
+        return Ok(());
+    }
+
     let app = App::new();
     let actions: Rc<dyn Actions> = Rc::new(AppActions(Rc::clone(&app)));
     *app.chrome.borrow_mut() = Some(ui::Chrome::new(actions)?);
@@ -1082,4 +1097,63 @@ pub fn start() -> Result<(), JsValue> {
     std::mem::forget(raf);
 
     Ok(())
+}
+
+// ── replay boot helpers ─────────────────────────────────────────────────────
+
+/// Published-bundle marker: `window.__SEANCE_REPLAY__ = "recording/manifest.json"`.
+fn replay_bundle_url() -> Option<String> {
+    let win = web_sys::window()?;
+    js_sys::Reflect::get(&win, &JsValue::from_str("__SEANCE_REPLAY__"))
+        .ok()?
+        .as_string()
+}
+
+fn boot_replay_player(manifest_url: String) -> Result<(), JsValue> {
+    let doc = document();
+    // The player owns the page: hide the app shell, mount into a fresh root.
+    if let Some(app) = doc.get_element_by_id("app") {
+        if let Some(el) = app.dyn_ref::<web_sys::HtmlElement>() {
+            let _ = el.style().set_property("display", "none");
+        }
+    }
+    let mount = doc.create_element("div")?;
+    mount.set_id("replay-root");
+    if let Some(body) = doc.body() {
+        body.append_child(&mount)?;
+    }
+    let _player = replay::Player::create(
+        mount,
+        replay::Source::Bundle { manifest_url },
+        Box::new(|res| {
+            if let Err(e) = res {
+                web_sys::console::error_1(&format!("replay load failed: {e}").into());
+            }
+        }),
+    );
+    // Keep the player alive for the page lifetime.
+    std::mem::forget(_player);
+    Ok(())
+}
+
+/// Parse `#replay-edit?workspace=W&from_ms=..&to_ms=..` from the location hash.
+fn replay_edit_route() -> Option<(String, Option<u64>, Option<u64>)> {
+    let hash = window().location().hash().ok()?;
+    let rest = hash.strip_prefix("#replay-edit")?;
+    let query = rest.strip_prefix('?').unwrap_or("");
+    let mut ws = None;
+    let mut from = None;
+    let mut to = None;
+    for pair in query.split('&') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        match k {
+            "workspace" => ws = Some(v.to_string()),
+            "from_ms" => from = v.parse().ok(),
+            "to_ms" => to = v.parse().ok(),
+            _ => {}
+        }
+    }
+    ws.map(|w| (w, from, to))
 }

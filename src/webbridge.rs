@@ -19,7 +19,13 @@
 //!   re-parses the handshake from byte zero. `TcpStream::peek` leaves the bytes
 //!   in the kernel buffer for it. Constraint: a request whose headers exceed
 //!   the socket receive buffer can't be peeked whole — capped at
-//!   [`MAX_HEADER_BYTES`], which is far above any real client request.
+//!   [`MAX_HEADER_BYTES`], which is far above any real client request. A body
+//!   (only `POST /replay/publish` has one) is read *after* the peeked headers
+//!   are consumed, `Content-Length`-delimited and capped.
+//! - **Replay endpoints are query-token'd.** `/replay/*` verifies the same
+//!   token as `/ws` via [`seance_core::auth`] — but as a plain HTTP 401, which
+//!   `fetch()` (unlike a websocket upgrade) surfaces fine. They route before
+//!   the static handler and never appear in a log line with their token.
 //! - **The ws is owned by exactly one thread.** `WebSocket<TcpStream>` is
 //!   `Send` but not `Sync` and cannot be split, so the connection thread owns
 //!   it and polls `read()` against a short TCP read timeout (tungstenite keeps
@@ -43,6 +49,7 @@ use tungstenite::protocol::frame::CloseFrame;
 use tungstenite::Message;
 
 use crate::control::socket_path;
+use crate::replayexport;
 
 /// Default bind — loopback only. Remote access is tailscale's job, not ours.
 const DEFAULT_BIND: &str = "127.0.0.1:9666";
@@ -212,7 +219,7 @@ impl Options {
 
 /// Static root: explicit flag → `$SEANCE_WEB_DIST` → `./crates/seance-web/dist`
 /// (running from a source checkout) → `<exe>/../share/seance/web` (installed).
-fn resolve_dist(explicit: Option<PathBuf>) -> Result<PathBuf> {
+pub(crate) fn resolve_dist(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(p) = explicit {
         return Ok(p);
     }
@@ -236,6 +243,25 @@ fn resolve_dist(explicit: Option<PathBuf>) -> Result<PathBuf> {
 
 fn token_path() -> Result<PathBuf> {
     Ok(crate::runtime::state_data_dir().join(TOKEN_FILE))
+}
+
+/// Read the existing token without minting one.
+///
+/// Minting here would be a lie: a fresh token wouldn't match the token a
+/// *running* bridge already loaded, and callers (the replay editor URL) need
+/// the one that works right now.
+pub(crate) fn read_token() -> Result<String> {
+    let path = token_path()?;
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {} (start `seance web` once to mint it)", path.display()))?;
+    let t = raw.trim().to_string();
+    if !seance_core::auth::token_well_formed(&t) {
+        return Err(anyhow!(
+            "{} is malformed — run `seance web --regen-token`",
+            path.display()
+        ));
+    }
+    Ok(t)
 }
 
 fn load_or_mint_token() -> Result<String> {
@@ -476,6 +502,18 @@ fn serve_conn(stream: TcpStream, peer: &str, token: &str, dist: &Path) -> Result
             let mut s = stream;
             write_response(&mut s, 200, "OK", "text/plain; charset=utf-8", false, b"ok")
         }
+        // Replay routes come before the static handler; each is token-gated.
+        ("GET", "/replay/list") | ("GET", "/replay/manifest") | ("GET", "/replay/pane") => {
+            let mut s = stream;
+            serve_replay_get(&mut s, peer, &req, token)
+        }
+        ("POST", "/replay/publish") => {
+            // The body must be drained whether or not auth passes, or the
+            // client sees a reset instead of our response.
+            let body = read_body(&stream, &head, replayexport::MAX_PUBLISH_BODY);
+            let mut s = stream;
+            serve_replay_publish(&mut s, peer, &req, token, body)
+        }
         ("GET", _) => {
             let mut s = stream;
             serve_static(&mut s, peer, req.path(), dist)
@@ -580,6 +618,216 @@ fn serve_static(stream: &mut TcpStream, peer: &str, url_path: &str, dist: &Path)
             false,
             b"not found",
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// replay endpoints
+// ---------------------------------------------------------------------------
+
+/// Read a `Content-Length`-delimited body after the headers were consumed.
+///
+/// Over-long bodies are refused rather than truncated: a half-parsed publish
+/// request is worse than a clear 413. Returns an empty body when the header is
+/// absent (a bodyless POST is a client bug we report as a parse failure).
+fn read_body(stream: &TcpStream, head: &str, cap: usize) -> Result<Vec<u8>> {
+    let len: usize = match header(head, "Content-Length") {
+        Some(v) => v.trim().parse().unwrap_or(0),
+        None => 0,
+    };
+    if len > cap {
+        return Err(anyhow!("request body of {len} bytes exceeds the {cap}-byte cap"));
+    }
+    let mut buf = vec![0u8; len];
+    if len > 0 {
+        let mut s = stream;
+        s.read_exact(&mut buf).context("reading request body")?;
+    }
+    Ok(buf)
+}
+
+/// Same token as `/ws` — but over plain HTTP, where a 401 is visible to
+/// `fetch()` (the websocket close-code dance exists only for upgrades).
+fn replay_auth_ok(req: &RequestLine, token: &str) -> bool {
+    let presented = req.query("token").unwrap_or_default();
+    seance_core::auth::token_well_formed(&presented)
+        && seance_core::auth::token_matches(token, &presented)
+}
+
+fn json_ok(stream: &mut TcpStream, body: &[u8]) -> Result<()> {
+    write_response(stream, 200, "OK", "application/json", true, body)
+}
+
+fn json_err(stream: &mut TcpStream, code: u16, reason: &str, msg: &str) -> Result<()> {
+    let body = serde_json::json!({ "error": msg }).to_string();
+    write_response(stream, code, reason, "application/json", true, body.as_bytes())
+}
+
+/// Required unsigned query param.
+fn q_u64(req: &RequestLine, key: &str) -> Result<u64> {
+    req.query(key)
+        .ok_or_else(|| anyhow!("missing {key}"))?
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| anyhow!("{key} must be unix milliseconds"))
+}
+
+fn q_panes(req: &RequestLine) -> Option<Vec<String>> {
+    let raw = req.query("panes")?;
+    let v: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    (!v.is_empty()).then_some(v)
+}
+
+fn serve_replay_get(
+    stream: &mut TcpStream,
+    peer: &str,
+    req: &RequestLine,
+    token: &str,
+) -> Result<()> {
+    if !replay_auth_ok(req, token) {
+        // Never echo the presented token — not to the client, not to the log.
+        eprintln!("seance web: [{peer}] replay auth failure on {}", req.path());
+        return json_err(stream, 401, "Unauthorized", "bad token");
+    }
+    let root = replayexport::ring_root();
+    match req.path() {
+        "/replay/list" => match replayexport::coverage(&root) {
+            Ok(cov) => json_ok(stream, &serde_json::to_vec(&cov)?),
+            Err(e) => json_err(stream, 500, "Internal Server Error", &e.to_string()),
+        },
+        "/replay/manifest" => {
+            let spec = match manifest_spec(req, &root) {
+                Ok(s) => s,
+                Err(e) => return json_err(stream, 400, "Bad Request", &e.to_string()),
+            };
+            match replayexport::build_manifest(&root, &spec) {
+                Ok(m) => json_ok(stream, &serde_json::to_vec(&m)?),
+                Err(e) => json_err(stream, 500, "Internal Server Error", &e.to_string()),
+            }
+        }
+        "/replay/pane" => {
+            let slug = match req.query("slug").filter(|s| !s.is_empty()) {
+                Some(s) => s,
+                None => return json_err(stream, 400, "Bad Request", "missing slug"),
+            };
+            let (from, to) = match (q_u64(req, "from_ms"), q_u64(req, "to_ms")) {
+                (Ok(f), Ok(t)) => (f, t),
+                (Err(e), _) | (_, Err(e)) => {
+                    return json_err(stream, 400, "Bad Request", &e.to_string())
+                }
+            };
+            match replayexport::slice_pane(&root, &slug, from, to)
+                .and_then(|s| replayexport::gzip(&s))
+            {
+                Ok(gz) => write_response(
+                    stream,
+                    200,
+                    "OK",
+                    "application/octet-stream",
+                    true,
+                    &gz,
+                ),
+                Err(e) => json_err(stream, 500, "Internal Server Error", &e.to_string()),
+            }
+        }
+        other => json_err(stream, 404, "Not Found", &format!("no replay route {other}")),
+    }
+}
+
+/// `?workspace=&from_ms=&to_ms=[&panes=a,b]` → an [`ExportSpec`] with no
+/// chapter override (the bridge extracts them; the editor overrides at publish).
+fn manifest_spec(req: &RequestLine, root: &Path) -> Result<replayexport::ExportSpec> {
+    let workspace = req
+        .query("workspace")
+        .filter(|w| !w.is_empty())
+        .ok_or_else(|| anyhow!("missing workspace"))?;
+    let from_ms = q_u64(req, "from_ms")?;
+    let to_ms = q_u64(req, "to_ms")?;
+    let panes = match q_panes(req) {
+        Some(p) => p,
+        // allow_all: the bridge is local and the caller already picked a range,
+        // so a daemon-less lookup degrades to "everything recorded in it".
+        None => replayexport::resolve_panes(root, &workspace, from_ms, to_ms, true)?,
+    };
+    Ok(replayexport::ExportSpec {
+        workspace,
+        panes,
+        from_ms,
+        to_ms,
+        title: None,
+        chapters_override: None,
+    })
+}
+
+/// `POST /replay/publish` body — the editor's finished cut.
+#[derive(serde::Deserialize)]
+struct PublishReq {
+    workspace: String,
+    #[serde(default)]
+    panes: Option<Vec<String>>,
+    from_ms: u64,
+    to_ms: u64,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    chapters: Option<Vec<seance_core::replay::Chapter>>,
+}
+
+fn serve_replay_publish(
+    stream: &mut TcpStream,
+    peer: &str,
+    req: &RequestLine,
+    token: &str,
+    body: Result<Vec<u8>>,
+) -> Result<()> {
+    if !replay_auth_ok(req, token) {
+        eprintln!("seance web: [{peer}] replay auth failure on {}", req.path());
+        return json_err(stream, 401, "Unauthorized", "bad token");
+    }
+    let body = match body {
+        Ok(b) => b,
+        Err(e) => return json_err(stream, 413, "Payload Too Large", &e.to_string()),
+    };
+    let parsed: PublishReq = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => return json_err(stream, 400, "Bad Request", &format!("bad publish body: {e}")),
+    };
+
+    let root = replayexport::ring_root();
+    let panes = match parsed.panes.filter(|p| !p.is_empty()) {
+        Some(p) => p,
+        None => match replayexport::resolve_panes(&root, &parsed.workspace, parsed.from_ms, parsed.to_ms, true) {
+            Ok(p) => p,
+            Err(e) => return json_err(stream, 400, "Bad Request", &e.to_string()),
+        },
+    };
+    let spec = replayexport::ExportSpec {
+        workspace: parsed.workspace,
+        panes,
+        from_ms: parsed.from_ms,
+        to_ms: parsed.to_ms,
+        title: parsed.title,
+        chapters_override: parsed.chapters,
+    };
+
+    let out_dir = replayexport::out_root().join(replayexport::now_ms().to_string());
+    let result = replayexport::load_publish_config().and_then(|cfg| {
+        let dir = replayexport::export_bundle(&spec, &out_dir, cfg.assets_url.as_deref())?;
+        replayexport::publish(&dir, &cfg)
+    });
+    match result {
+        Ok(url) => {
+            eprintln!("seance web: [{peer}] published replay → {url}");
+            json_ok(stream, serde_json::json!({ "url": url }).to_string().as_bytes())
+        }
+        Err(e) => {
+            eprintln!("seance web: [{peer}] replay publish failed: {e}");
+            json_err(stream, 500, "Internal Server Error", &e.to_string())
+        }
     }
 }
 
@@ -847,6 +1095,49 @@ mod tests {
         assert_eq!(t.len(), seance_core::auth::TOKEN_LEN);
         assert!(seance_core::auth::token_well_formed(&t));
         assert_eq!(hex(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    #[test]
+    fn replay_query_params_parse() {
+        let r = parse_request_line(
+            "GET /replay/manifest?workspace=lab&from_ms=10&to_ms=20&panes=a%2Cb HTTP/1.1",
+        )
+        .expect("parse");
+        assert_eq!(r.path(), "/replay/manifest");
+        assert_eq!(q_u64(&r, "from_ms").unwrap(), 10);
+        assert_eq!(q_u64(&r, "to_ms").unwrap(), 20);
+        assert!(q_u64(&r, "nope").is_err());
+        assert_eq!(q_panes(&r), Some(vec!["a".into(), "b".into()]));
+
+        let bare = parse_request_line("GET /replay/list HTTP/1.1").expect("parse");
+        assert_eq!(q_panes(&bare), None);
+        assert!(q_u64(&bare, "from_ms").is_err());
+    }
+
+    #[test]
+    fn replay_auth_rejects_absent_and_malformed_tokens() {
+        let good = hex(&[7u8; 32]);
+        let with = |t: &str| {
+            parse_request_line(&format!("GET /replay/list?token={t} HTTP/1.1")).expect("parse")
+        };
+        assert!(replay_auth_ok(&with(&good), &good));
+        assert!(!replay_auth_ok(&with("short"), &good));
+        assert!(!replay_auth_ok(&with(&hex(&[8u8; 32])), &good));
+        assert!(!replay_auth_ok(&parse_request_line("GET /replay/list HTTP/1.1").unwrap(), &good));
+    }
+
+    #[test]
+    fn publish_body_shape_round_trips() {
+        let raw = r#"{"workspace":"lab","from_ms":1,"to_ms":2,"title":"t",
+                      "chapters":[{"t_ms":5,"pane":"w-1","text":"hi"}]}"#;
+        let p: PublishReq = serde_json::from_str(raw).unwrap();
+        assert_eq!(p.workspace, "lab");
+        assert!(p.panes.is_none());
+        assert_eq!(p.chapters.unwrap()[0].text, "hi");
+        // panes optional, chapters optional
+        let min: PublishReq =
+            serde_json::from_str(r#"{"workspace":"lab","from_ms":1,"to_ms":2}"#).unwrap();
+        assert!(min.title.is_none() && min.chapters.is_none());
     }
 
     #[test]
