@@ -18,9 +18,13 @@ use wasm_bindgen::JsCast;
 use seance_core::input::{key_to_bytes, TermModes};
 use seance_core::protocol::{GuiEvent, GuiRequest};
 
+pub mod activity;
 pub mod app_api;
 pub mod conn;
+pub mod help;
 pub mod input;
+pub mod keymap;
+pub mod menus;
 pub mod probe;
 pub mod renderer;
 pub mod state;
@@ -81,6 +85,10 @@ pub struct App {
     blink_t0: Cell<f64>,
     /// Last blink on/off we painted the focused pane with.
     blink_last: Cell<bool>,
+    /// Summon: the next PaneSpawned opens an inline rename on its tile header
+    /// (native `rename_next_spawn`).
+    rename_next_spawn: Cell<bool>,
+    session_counter: Cell<u64>,
 }
 
 impl App {
@@ -100,6 +108,8 @@ impl App {
             input_hot_ms: RefCell::new(HashMap::new()),
             blink_t0: Cell::new(0.0),
             blink_last: Cell::new(true),
+            rename_next_spawn: Cell::new(false),
+            session_counter: Cell::new(0),
         })
     }
 
@@ -110,7 +120,7 @@ impl App {
     }
 
     fn handle_event(&self, ev: GuiEvent) {
-        let applied = self.state.borrow_mut().apply_event(ev);
+        let applied = self.state.borrow_mut().apply_event(ev, now_ms());
         match applied {
             Applied::Nothing => {}
             Applied::Grid { pane } => {
@@ -151,6 +161,55 @@ impl App {
 
     fn focused_pane(&self) -> Option<String> {
         self.state.borrow().focused_pane.clone()
+    }
+
+    /// Public mirror for keymap execution.
+    pub fn focused_pane_pub(&self) -> Option<String> {
+        self.focused_pane()
+    }
+
+    /// ctrl+shift+r: inline-rename the selected workspace in the sidebar.
+    pub fn begin_selected_workspace_rename(&self) -> bool {
+        let ws = match self.state.borrow().selected_workspace.clone() {
+            Some(w) => w,
+            None => return false,
+        };
+        if let Some(ch) = self.chrome.borrow_mut().as_mut() {
+            ch.begin_rename_workspace(&ws);
+            return true;
+        }
+        false
+    }
+
+    /// Escape closes the topmost chrome layer; false = nothing open, the key
+    /// belongs to the PTY. Order mirrors native: menu > help > activity >
+    /// zoom > selection.
+    pub fn escape_topmost(&self) -> bool {
+        if menus::close_menu() || help::close() || activity::close() {
+            return true;
+        }
+        {
+            let mut st = self.state.borrow_mut();
+            if st.zoomed.is_some() {
+                st.zoomed = None;
+                drop(st);
+                self.need_rebuild.set(true);
+                return true;
+            }
+        }
+        let had_sel = self.selection.borrow().is_some();
+        if had_sel {
+            let pane = self
+                .selection
+                .borrow_mut()
+                .take()
+                .map(|(p, _, _, _)| p);
+            if let Some(p) = pane {
+                self.dirty_grids.borrow_mut().insert(p);
+            }
+            return true;
+        }
+        false
     }
 
     /// Rebuild chrome DOM and (re)bind canvases → renderers.
@@ -278,16 +337,33 @@ impl App {
     }
 
     fn frame(self: &Rc<Self>) {
+        {
+            // Finish detection re-sorts the sidebar; cheap, once per frame.
+            let mut st = self.state.borrow_mut();
+            st.sync_working_touches(now_ms());
+        }
         if self.need_rebuild.get() {
             self.need_rebuild.set(false);
             self.rebuild();
             self.badges_dirty.set(false);
+            // Summon: the freshly arrived pane opens an inline header rename.
+            if self.rename_next_spawn.get() {
+                let spawned = self.state.borrow_mut().last_spawned.take();
+                if let Some(slug) = spawned {
+                    self.rename_next_spawn.set(false);
+                    self.focus_pane(&slug);
+                    if let Some(ch) = self.chrome.borrow_mut().as_mut() {
+                        ch.begin_rename_pane(&slug);
+                    }
+                }
+            }
         } else if self.badges_dirty.get() {
             self.badges_dirty.set(false);
             let st = self.state.borrow();
             if let Some(ch) = self.chrome.borrow_mut().as_mut() {
                 ch.update_badges(&st);
             }
+            activity::refresh(&st);
         }
         self.sync_sizes();
         self.paint();
@@ -320,19 +396,17 @@ impl App {
     }
 
     fn on_keydown(self: &Rc<Self>, ev: web_sys::KeyboardEvent) {
-        // Chrome shortcuts first.
-        let (ctrl, shift, meta) = (ev.ctrl_key(), ev.shift_key(), ev.meta_key());
+        // Chrome commands first (native keymap + alt-fallbacks; keymap.rs).
+        if let Some(cmd) = keymap::command_for(&ev) {
+            let actions = AppActions(Rc::clone(self));
+            if keymap::execute(cmd, &actions, self) {
+                ev.prevent_default();
+                ev.stop_propagation();
+                return;
+            }
+        }
+        let (ctrl, meta) = (ev.ctrl_key(), ev.meta_key());
         let key = ev.key();
-        if ctrl && shift && (key == "P" || key == "p") {
-            self.toggle_probe();
-            ev.prevent_default();
-            return;
-        }
-        if ctrl && (key == "PageUp" || key == "PageDown") {
-            self.cycle_workspace(if key == "PageUp" { -1 } else { 1 });
-            ev.prevent_default();
-            return;
-        }
         let Some(pane) = self.focused_pane() else {
             return;
         };
@@ -644,6 +718,159 @@ impl Actions for AppActions {
     }
     fn toggle_probe(&self) {
         self.0.toggle_probe();
+    }
+
+    fn summon(&self) {
+        let n = self.0.session_counter.get() + 1;
+        self.0.session_counter.set(n);
+        self.0.rename_next_spawn.set(true);
+        self.0.send(&GuiRequest::Spawn {
+            name: format!("term-{n}"),
+            cwd: None,
+            command: None,
+            workspace: self.0.selected_workspace(),
+            file: None,
+            tiled: true,
+        });
+    }
+
+    fn quicklaunch(&self, name: &str, cwd: Option<String>, command: Option<String>) {
+        let ws = {
+            let st = self.0.state.borrow();
+            let mut taken: Vec<String> = st.workspaces();
+            taken.extend(st.foreign_workspaces.iter().map(|f| f.workspace.clone()));
+            let refs: Vec<&str> = taken.iter().map(|s| s.as_str()).collect();
+            seance_core::util::unique_slug(name, &refs)
+        };
+        self.0.send(&GuiRequest::Spawn {
+            name: name.to_string(),
+            cwd,
+            command: command.filter(|c| !c.trim().is_empty()),
+            workspace: Some(ws.clone()),
+            file: None,
+            tiled: true,
+        });
+        // Land in the fresh circle when its pane arrives.
+        self.0.state.borrow_mut().selected_workspace = Some(ws);
+        self.0.need_rebuild.set(true);
+    }
+
+    fn touch_workspace(&self, ws: &str) {
+        self.0.state.borrow_mut().touch_workspace(ws, now_ms());
+        self.0.send(&GuiRequest::Event {
+            actor: "human".into(),
+            workspace: Some(ws.to_string()),
+            pane: None,
+            kind: "workspace.touch".into(),
+            detail: "sidebar menu".into(),
+        });
+        self.0.need_rebuild.set(true);
+    }
+
+    fn cycle_workspace(&self, delta: i32) {
+        self.0.cycle_workspace(delta);
+    }
+
+    fn cycle_pane(&self, delta: i32) {
+        let (slugs, cur) = {
+            let st = self.0.state.borrow();
+            let ws = match &st.selected_workspace {
+                Some(w) => w.clone(),
+                None => return,
+            };
+            let slugs: Vec<String> = st
+                .panes_in(&ws)
+                .iter()
+                .filter(|p| p.tiled)
+                .map(|p| p.slug.clone())
+                .collect();
+            (slugs, st.focused_pane.clone())
+        };
+        if slugs.is_empty() {
+            return;
+        }
+        let idx = cur
+            .and_then(|c| slugs.iter().position(|s| *s == c))
+            .unwrap_or(0);
+        let next = ((idx as i32 + delta).rem_euclid(slugs.len() as i32)) as usize;
+        self.0.focus_pane(&slugs[next]);
+    }
+
+    fn kill_active(&self) {
+        let st = self.0.state.borrow();
+        let focused = st.focused_pane.clone();
+        if let Some(slug) = focused {
+            let ws = st.pane(&slug).map(|p| p.workspace.clone());
+            let last_in_ws = ws
+                .as_ref()
+                .is_some_and(|w| st.panes.iter().filter(|p| p.workspace == *w).count() == 1);
+            drop(st);
+            if last_in_ws {
+                if let Some(w) = ws {
+                    self.0.send(&GuiRequest::KillWorkspace { workspace: w });
+                }
+            } else {
+                self.0.send(&GuiRequest::Kill { pane: slug });
+            }
+        } else if let Some(ws) = st.selected_workspace.clone() {
+            let empty = !st.panes.iter().any(|p| p.workspace == ws);
+            drop(st);
+            if empty {
+                self.0.send(&GuiRequest::KillWorkspace { workspace: ws });
+            }
+        }
+    }
+
+    fn toggle_zoom(&self, slug: &str) {
+        {
+            let mut st = self.0.state.borrow_mut();
+            st.zoomed = if st.zoomed.as_deref() == Some(slug) {
+                None
+            } else {
+                Some(slug.to_string())
+            };
+        }
+        self.0.need_rebuild.set(true);
+    }
+
+    fn toggle_help(&self) {
+        help::toggle();
+    }
+
+    fn toggle_activity(&self) {
+        let st = self.0.state.borrow();
+        activity::toggle(&st);
+    }
+
+    fn fs_call(
+        &self,
+        op: seance_core::protocol::FsOp,
+        cb: Box<dyn FnOnce(Result<serde_json::Value, String>)>,
+    ) {
+        if let Some(c) = self.0.conn.borrow().as_ref() {
+            c.fs_call(op, cb);
+        }
+    }
+
+    fn host_select(&self, widget: &str, item: &str) {
+        let app = Rc::clone(&self.0);
+        let item_label = item.to_string();
+        let op = seance_core::protocol::FsOp::HostSelect {
+            widget: widget.to_string(),
+            item: item.to_string(),
+        };
+        self.fs_call(
+            op,
+            Box::new(move |result| {
+                let msg = match result {
+                    Ok(_) => format!("claude → {item_label}"),
+                    Err(e) => format!("switch failed: {e}"),
+                };
+                if let Some(ch) = app.chrome.borrow_mut().as_mut() {
+                    ch.toast(&msg);
+                }
+            }),
+        );
     }
 }
 

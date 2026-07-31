@@ -14,7 +14,7 @@
 //! path — replaced (and thus dropped) exactly when their socket is replaced.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::rc::{Rc, Weak};
 
 use base64::Engine as _;
@@ -73,6 +73,9 @@ struct Inner {
     reconnect_closure: Option<Closure<dyn FnMut()>>,
     /// Terminal state: auth failure or explicit teardown.
     stopped: bool,
+    /// In-flight fs bridge calls awaiting their FsResult, keyed by id.
+    fs_pending: HashMap<u64, Box<dyn FnOnce(Result<serde_json::Value, String>)>>,
+    fs_next_id: u64,
 }
 
 pub struct Conn {
@@ -100,6 +103,8 @@ pub fn connect(
             reconnect_timer: None,
             reconnect_closure: None,
             stopped: false,
+            fs_pending: HashMap::new(),
+            fs_next_id: 1,
         }),
         handlers: RefCell::new(Handlers { on_event, on_status }),
     });
@@ -130,6 +135,26 @@ impl Conn {
     /// Round-trip time from the last resolved ping, if any.
     pub fn rtt_ms(&self) -> Option<f64> {
         self.inner.borrow().rtt_ms
+    }
+
+    /// Async daemon fs-bridge call (files/config/host-select live on the
+    /// DAEMON's machine — same seam the native thin client uses). The callback
+    /// fires with `Ok(data)` on success or `Err(message)` on failure; if the
+    /// connection drops before the reply arrives the callback is simply never
+    /// invoked (callers must tolerate silence — reload-on-reconnect covers it).
+    pub fn fs_call(
+        &self,
+        op: seance_core::protocol::FsOp,
+        cb: Box<dyn FnOnce(Result<serde_json::Value, String>)>,
+    ) {
+        let id = {
+            let mut inner = self.inner.borrow_mut();
+            let id = inner.fs_next_id;
+            inner.fs_next_id += 1;
+            inner.fs_pending.insert(id, cb);
+            id
+        };
+        self.send(&GuiRequest::Fs { id, fs: op });
     }
 
     /// Best-effort `Bye` + permanent teardown (page unload / logout). After
@@ -291,6 +316,27 @@ impl Conn {
             if matches!(event, GuiEvent::Pong) {
                 self.resolve_ping();
                 continue; // never forwarded — the probe is ours
+            }
+            // fs bridge replies route to their waiter, mirroring the native
+            // gui_client — the app event stream never sees them.
+            if let GuiEvent::FsResult {
+                id,
+                ok,
+                data,
+                error,
+            } = &event
+            {
+                let cb = self.inner.borrow_mut().fs_pending.remove(id);
+                if let Some(cb) = cb {
+                    if *ok {
+                        cb(Ok(data.clone().unwrap_or(serde_json::Value::Null)));
+                    } else {
+                        cb(Err(error
+                            .clone()
+                            .unwrap_or_else(|| "fs op failed".to_string())));
+                    }
+                }
+                continue;
             }
             if let Ok(mut h) = self.handlers.try_borrow_mut() {
                 (h.on_event)(event);

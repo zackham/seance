@@ -31,4 +31,35 @@ pub trait Actions {
     fn ghost_reject(&self, pane: &str);
     /// Toggle the latency probe overlay.
     fn toggle_probe(&self);
+
+    // ── native-parity chrome ────────────────────────────────────────────────
+
+    /// "+ summon": new shell pane in the selected workspace; the pane's tile
+    /// header opens an inline rename when it arrives (native
+    /// `new_default_session` semantics).
+    fn summon(&self);
+    /// Quicklaunch chip click: FRESH workspace named after the entry
+    /// (uniquified against all known + foreign workspaces), single pane,
+    /// no rename prompt.
+    fn quicklaunch(&self, name: &str, cwd: Option<String>, command: Option<String>);
+    /// Bump a workspace's recency (context-menu "touch") + flight-recorder log.
+    fn touch_workspace(&self, ws: &str);
+    fn cycle_workspace(&self, delta: i32);
+    fn cycle_pane(&self, delta: i32);
+    /// ctrl+shift+w semantics: kill active pane; last pane in the circle (or
+    /// an empty selected circle) banishes the workspace instead.
+    fn kill_active(&self);
+    fn toggle_zoom(&self, slug: &str);
+    fn toggle_help(&self);
+    fn toggle_activity(&self);
+    /// Daemon fs-bridge call (quicklaunch config, host select, …). Callback
+    /// may never fire if the socket drops mid-flight — tolerate silence.
+    fn fs_call(
+        &self,
+        op: seance_core::protocol::FsOp,
+        cb: Box<dyn FnOnce(Result<serde_json::Value, String>)>,
+    );
+    /// Host widget select (account switch) — runs daemon-side, seconds-slow;
+    /// success/failure surfaces as a toast.
+    fn host_select(&self, widget: &str, item: &str);
 }

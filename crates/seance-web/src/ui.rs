@@ -581,6 +581,10 @@ impl Chrome {
 
     /// Patch status dots, titles, origin badges, ghost chips, focus ring and
     /// the asks banner. Never touches canvases.
+    /// Inline-rename hooks (parity build replaces these with real inputs).
+    pub fn begin_rename_workspace(&mut self, _ws: &str) {}
+    pub fn begin_rename_pane(&mut self, _slug: &str) {}
+
     pub fn update_badges(&mut self, state: &ClientState) {
         self.apply_badges(state);
         if let Err(e) = self.render_asks(state) {

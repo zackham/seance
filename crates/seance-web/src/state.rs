@@ -57,11 +57,106 @@ pub struct ClientState {
     pub input_origin: HashMap<String, String>,
     /// Monotonic revision bumped on every Structure-level change.
     pub structure_rev: u64,
+    /// Host-bridge widgets (claude accounts strip) — daemon-polled, pushed on
+    /// attach + every poll tick.
+    pub host_widgets: Vec<HostWidget>,
+    /// Client-local: last human-touch ms per workspace (sidebar auto-sort key;
+    /// mirrors the native app — selecting alone does NOT bump).
+    pub workspace_touch: HashMap<String, f64>,
+    /// Sticky unread attention per non-selected workspace (cleared on select).
+    pub workspace_unread: HashMap<String, Attention>,
+    /// Workspaces observed live-working last check (finish detection).
+    pub workspace_was_working: std::collections::HashSet<String>,
+    /// Client-local zoomed pane (fills the tile area; esc restores).
+    pub zoomed: Option<String>,
+    /// Recent activity (Touch/status/spawn/kill/ask), newest last, capped.
+    pub activity: std::collections::VecDeque<ActivityItem>,
+    /// Slug of the most recent PaneSpawned (summon's rename-on-arrival hook).
+    pub last_spawned: Option<String>,
+}
+
+/// One row of the host-bridge widget strip (native `HostWidgetSnap` shape).
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct HostWidget {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub items: Vec<HostItem>,
+    #[serde(default)]
+    pub active: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct HostItem {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub detail2: String,
+    #[serde(default)]
+    pub selected: bool,
+}
+
+/// Sidebar badge for a workspace (native `WorkspaceAttention` mirror).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attention {
+    Working,
+    NeedsHuman,
+    Done,
+}
+
+impl Attention {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::NeedsHuman => "needs",
+            Self::Done => "done",
+        }
+    }
+    fn priority(self) -> u8 {
+        match self {
+            Self::NeedsHuman => 3,
+            Self::Working => 2,
+            Self::Done => 1,
+        }
+    }
+}
+
+/// One line of the activity drawer.
+#[derive(Clone, Debug)]
+pub struct ActivityItem {
+    /// performance.now-ish ms stamped by the caller via [`ClientState::note_activity`].
+    pub at_ms: f64,
+    pub actor: String,
+    pub pane: Option<String>,
+    pub text: String,
+}
+
+const ACTIVITY_CAP: usize = 200;
+
+/// Busy TUI title: braille spinner (U+2800..=U+28FF) as first non-space char —
+/// same detector as the native `title_looks_busy`.
+pub fn title_looks_busy(title: &str) -> bool {
+    matches!(
+        title.trim_start().chars().next(),
+        Some('\u{2800}'..='\u{28FF}')
+    )
 }
 
 impl ClientState {
-    /// Ordered workspace names: explicit order first, then any stragglers
-    /// (pane-derived or extra) in first-seen order.
+    /// All workspaces in sidebar display order — the native auto-sort:
+    /// 1. circles with an actively working agent float to the top;
+    /// 2. within/outside that band, most recent human *touch* first
+    ///    (typing into the circle, context-menu touch, fresh spawn —
+    ///    selecting alone does not bump);
+    /// 3. name as the stable tiebreak.
     pub fn workspaces(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let seen = |out: &mut Vec<String>, name: &str| {
@@ -78,7 +173,128 @@ impl ClientState {
         for w in &self.extra_workspaces {
             seen(&mut out, w);
         }
+        if let Some(sel) = &self.selected_workspace {
+            seen(&mut out, sel);
+        }
+        out.sort_by(|a, b| {
+            let key = |ws: &str| {
+                let band = if self.workspace_has_working_agent(ws) { 0u8 } else { 1 };
+                let touch = self.workspace_touch.get(ws).copied().unwrap_or(0.0);
+                (band, std::cmp::Reverse(touch as u64))
+            };
+            key(a).cmp(&key(b)).then_with(|| a.cmp(b))
+        });
         out
+    }
+
+    /// Observed live-busy: braille title spinner, or agent-driven working
+    /// status (human-owned sticky "working" is ignored — stale inject chrome).
+    pub fn pane_is_live_working(&self, slug: &str) -> bool {
+        let title = self
+            .grids
+            .get(slug)
+            .and_then(|g| g.title.clone())
+            .or_else(|| self.pane(slug).and_then(|p| p.title.clone()));
+        if title.as_deref().is_some_and(title_looks_busy) {
+            return true;
+        }
+        let owner = self.agency.get(slug).map(|a| a.owner.as_str());
+        match (owner, self.statuses.get(slug).map(|s| s.state.as_str())) {
+            (Some("human"), Some("working" | "planning")) => false,
+            (_, Some("working" | "planning")) => true,
+            _ => false,
+        }
+    }
+
+    pub fn workspace_has_working_agent(&self, workspace: &str) -> bool {
+        self.panes
+            .iter()
+            .any(|p| p.workspace == workspace && self.pane_is_live_working(&p.slug))
+    }
+
+    /// Live attention badge for a sidebar row (native `workspace_attention_cx`).
+    pub fn workspace_attention(&self, workspace: &str) -> Option<Attention> {
+        let needs = self.panes.iter().any(|p| {
+            p.workspace == workspace
+                && matches!(
+                    self.statuses.get(&p.slug).map(|s| s.state.as_str()),
+                    Some("needs-human" | "blocked" | "risky")
+                )
+        });
+        if needs {
+            return Some(Attention::NeedsHuman);
+        }
+        if self.workspace_has_working_agent(workspace) {
+            return Some(Attention::Working);
+        }
+        self.workspace_unread.get(workspace).copied()
+    }
+
+    /// Bump recency (human typing here / context-menu touch / fresh spawn).
+    pub fn touch_workspace(&mut self, ws: &str, now_ms: f64) {
+        if !ws.is_empty() {
+            self.workspace_touch.insert(ws.to_string(), now_ms);
+        }
+    }
+
+    /// Finish detection: a circle that stops working gets a touch so it lands
+    /// at the top of the idle band (freshly finished work is what you want
+    /// next). Call once per frame; cheap.
+    pub fn sync_working_touches(&mut self, now_ms: f64) {
+        let names = self.workspaces();
+        for ws in names {
+            let now_working = self.workspace_has_working_agent(&ws);
+            let was = self.workspace_was_working.contains(&ws);
+            if was && !now_working {
+                self.touch_workspace(&ws, now_ms);
+            }
+            if now_working {
+                self.workspace_was_working.insert(ws);
+            } else {
+                self.workspace_was_working.remove(&ws);
+            }
+        }
+    }
+
+    /// Local select bookkeeping: clear sticky unread for the circle.
+    pub fn note_selected(&mut self, ws: &str) {
+        self.workspace_unread.remove(ws);
+    }
+
+    pub fn note_activity(&mut self, at_ms: f64, actor: &str, pane: Option<&str>, text: String) {
+        self.activity.push_back(ActivityItem {
+            at_ms,
+            actor: actor.to_string(),
+            pane: pane.map(str::to_string),
+            text,
+        });
+        while self.activity.len() > ACTIVITY_CAP {
+            self.activity.pop_front();
+        }
+    }
+
+    /// Sticky unread bookkeeping for a status event on a non-selected circle
+    /// (native `note_workspace_status_event`).
+    fn note_status_attention(&mut self, slug: &str, state: &str) {
+        let Some(ws) = self.pane(slug).map(|p| p.workspace.clone()) else {
+            return;
+        };
+        if self.selected_workspace.as_deref() == Some(ws.as_str()) {
+            self.workspace_unread.remove(&ws);
+            return;
+        }
+        let att = match state {
+            "needs-human" | "blocked" | "risky" => Some(Attention::NeedsHuman),
+            "done" => Some(Attention::Done),
+            "working" | "planning" => Some(Attention::Working),
+            _ => None,
+        };
+        if let Some(a) = att {
+            let cur = self.workspace_unread.get(&ws).copied();
+            if cur.map(|c| a.priority() > c.priority()).unwrap_or(true) {
+                self.workspace_unread.insert(ws, a);
+            }
+        }
     }
 
     /// Tiled panes in one workspace, list order (the daemon's persistence key).
@@ -93,8 +309,9 @@ impl ClientState {
         self.panes.iter().find(|p| p.slug == slug)
     }
 
-    /// Fold one daemon event into the store.
-    pub fn apply_event(&mut self, ev: GuiEvent) -> Applied {
+    /// Fold one daemon event into the store. `now_ms` stamps activity rows
+    /// and touch bumps (pass `performance.now()`; tests pass 0).
+    pub fn apply_event(&mut self, ev: GuiEvent, now_ms: f64) -> Applied {
         match ev {
             GuiEvent::State {
                 panes,
@@ -149,6 +366,9 @@ impl ClientState {
                 }
             }
             GuiEvent::PaneSpawned { pane } => {
+                self.last_spawned = Some(pane.slug.clone());
+                self.touch_workspace(&pane.workspace.clone(), now_ms);
+                self.note_activity(now_ms, "daemon", Some(&pane.slug), format!("pane spawned: {}", pane.name));
                 if let Some(existing) = self.panes.iter_mut().find(|p| p.slug == pane.slug) {
                     *existing = pane;
                 } else {
@@ -158,6 +378,10 @@ impl ClientState {
                 Applied::Structure
             }
             GuiEvent::PaneKilled { slug } => {
+                self.note_activity(now_ms, "daemon", Some(&slug), "pane killed".into());
+                if self.zoomed.as_deref() == Some(slug.as_str()) {
+                    self.zoomed = None;
+                }
                 self.panes.retain(|p| p.slug != slug);
                 self.grids.remove(&slug);
                 self.statuses.remove(&slug);
@@ -175,6 +399,7 @@ impl ClientState {
                 Applied::Structure
             }
             GuiEvent::Ask { ask } => {
+                self.note_activity(now_ms, &ask.from, None, format!("asks: {}", ask.question));
                 if let Some(existing) = self.asks.iter_mut().find(|a| a.id == ask.id) {
                     *existing = ask;
                 } else {
@@ -187,6 +412,16 @@ impl ClientState {
                 Applied::Badges
             }
             GuiEvent::Status { slug, state, note } => {
+                self.note_status_attention(&slug, &state);
+                self.note_activity(
+                    now_ms,
+                    "agent",
+                    Some(&slug),
+                    match &note {
+                        Some(n) => format!("status: {state} — {n}"),
+                        None => format!("status: {state}"),
+                    },
+                );
                 let entry = self.statuses.entry(slug.clone()).or_insert(StatusInfo {
                     slug: slug.clone(),
                     state: String::new(),
@@ -197,7 +432,10 @@ impl ClientState {
                 entry.note = note;
                 Applied::Badges
             }
-            GuiEvent::Touch { .. } => Applied::Nothing,
+            GuiEvent::Touch { slug, verb, actor } => {
+                self.note_activity(now_ms, &actor, Some(&slug), verb);
+                Applied::Badges
+            }
             GuiEvent::InputOrigin { pane, origin } => {
                 self.input_origin.insert(pane, origin);
                 Applied::Badges
@@ -232,7 +470,12 @@ impl ClientState {
             }
             GuiEvent::Error { message } => Applied::Error { message },
             GuiEvent::Ack { .. } | GuiEvent::FsResult { .. } => Applied::Nothing,
-            GuiEvent::HostWidgets { .. } => Applied::Nothing,
+            GuiEvent::HostWidgets { widgets } => {
+                if let Ok(parsed) = serde_json::from_value::<Vec<HostWidget>>(widgets) {
+                    self.host_widgets = parsed;
+                }
+                Applied::Badges
+            }
             GuiEvent::Pong => Applied::Nothing,
         }
     }
@@ -258,7 +501,7 @@ mod tests {
     #[test]
     fn state_then_grid_bin_applies() {
         let mut st = ClientState::default();
-        assert_eq!(st.apply_event(state_event()), Applied::Structure);
+        assert_eq!(st.apply_event(state_event(), 0.0), Applied::Structure);
         assert_eq!(st.workspaces(), vec!["lab".to_string()]);
 
         let mut snap = GridSnapshot::empty("w-1");
@@ -269,7 +512,7 @@ mod tests {
             data_b64: base64::engine::general_purpose::STANDARD.encode(bin),
         };
         assert_eq!(
-            st.apply_event(ev),
+            st.apply_event(ev, 0.0),
             Applied::Grid {
                 pane: "w-1".into()
             }
@@ -294,7 +537,7 @@ mod tests {
         };
         // No base grid stored → decoder fails → refresh requested.
         assert_eq!(
-            st.apply_event(ev),
+            st.apply_event(ev, 0.0),
             Applied::NeedRefresh {
                 pane: "w-1".into()
             }
@@ -304,9 +547,9 @@ mod tests {
     #[test]
     fn kill_prunes_everything() {
         let mut st = ClientState::default();
-        st.apply_event(state_event());
+        st.apply_event(state_event(), 0.0);
         st.grids.insert("w-1".into(), GridSnapshot::empty("w-1"));
-        st.apply_event(GuiEvent::PaneKilled { slug: "w-1".into() });
+        st.apply_event(GuiEvent::PaneKilled { slug: "w-1".into() }, 0.0);
         assert!(st.panes.is_empty() && st.grids.is_empty());
     }
 }

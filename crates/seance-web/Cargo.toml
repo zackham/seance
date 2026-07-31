@@ -24,7 +24,7 @@ web-sys = { version = "0.3", features = [
   "CompositionEvent", "ClipboardEvent", "DataTransfer", "Clipboard",
   "WebGl2RenderingContext", "WebGlBuffer", "WebGlProgram", "WebGlShader",
   "WebGlTexture", "WebGlUniformLocation", "WebGlVertexArrayObject",
-  "CanvasRenderingContext2d", "TextMetrics", "ImageData",
+  "CanvasRenderingContext2d", "TextMetrics", "ImageData", "HtmlHeadElement",
   "Performance", "Storage", "Location", "History",
   "ResizeObserver", "ResizeObserverEntry", "MediaQueryList",
   "Navigator", "VisibilityState", "AddEventListenerOptions", "console",
