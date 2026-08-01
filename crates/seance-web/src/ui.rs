@@ -774,7 +774,16 @@ impl Chrome {
         let Some(my_window) = state.window_id.clone() else {
             return Ok(());
         };
-        for fw in &state.foreign_workspaces {
+        // Same ordering rule as the local rail: most recent output first.
+        let mut foreign: Vec<_> = state.foreign_workspaces.iter().collect();
+        foreign.sort_by(|a, b| {
+            let at = |w: &str| state.workspace_activity.get(w).copied().unwrap_or(f64::MIN);
+            at(&b.workspace)
+                .partial_cmp(&at(&a.workspace))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.workspace.cmp(&b.workspace))
+        });
+        for fw in foreign {
             let row = mk(&doc, "div", "ws-row foreign")?;
             let main = mk(&doc, "div", "ws-main")?;
             main.append_child(text_el(&doc, "span", "ws-glyph idle", "◈")?.unchecked_ref())?;

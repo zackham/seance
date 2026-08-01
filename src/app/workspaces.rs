@@ -86,8 +86,15 @@ impl SeanceApp {
         } else {
             1
         };
-        let touch = self.workspace_touch.get(ws).copied().unwrap_or(0);
-        (band, std::cmp::Reverse(touch), ws.to_string())
+        // Sort by the SAME clock the row displays (last real output) — the
+        // human-touch clock made the order contradict the visible times.
+        let at = self
+            .workspace_activity
+            .get(ws)
+            .copied()
+            .max(self.workspace_touch.get(ws).copied())
+            .unwrap_or(0);
+        (band, std::cmp::Reverse(at), ws.to_string())
     }
 
     /// Any pane in this circle currently shows agent work in progress.

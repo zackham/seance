@@ -198,8 +198,15 @@ impl ClientState {
         out.sort_by(|a, b| {
             let key = |ws: &str| {
                 let band = if self.workspace_has_working_agent(ws) { 0u8 } else { 1 };
-                let touch = self.workspace_touch.get(ws).copied().unwrap_or(0.0);
-                (band, std::cmp::Reverse(touch as u64))
+                // Same clock the row displays (last output); touch as tiebreak
+                // floor so a circle you just typed into doesn't lag behind.
+                let at = self
+                    .workspace_activity
+                    .get(ws)
+                    .copied()
+                    .unwrap_or(f64::MIN)
+                    .max(self.workspace_touch.get(ws).copied().unwrap_or(f64::MIN));
+                (band, std::cmp::Reverse(at.max(0.0) as u64))
             };
             key(a).cmp(&key(b)).then_with(|| a.cmp(b))
         });
