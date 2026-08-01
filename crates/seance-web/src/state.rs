@@ -75,6 +75,8 @@ pub struct ClientState {
     pub last_spawned: Option<String>,
     /// Last pane output per workspace (ms) — sidebar shows time-since-update.
     pub workspace_activity: HashMap<String, f64>,
+    /// When each workspace entered the working band (stable sort key there).
+    pub workspace_working_since: HashMap<String, f64>,
     /// `Date.now() - performance.now()` at boot. Both local clocks above live
     /// in the `performance.now()` domain; the daemon's are unix ms, so every
     /// ingested daemon stamp is converted with `perf = unix - offset`. Set
@@ -198,15 +200,21 @@ impl ClientState {
         out.sort_by(|a, b| {
             let key = |ws: &str| {
                 let band = if self.workspace_has_working_agent(ws) { 0u8 } else { 1 };
-                // Same clock the row displays (last output); touch as tiebreak
-                // floor so a circle you just typed into doesn't lag behind.
-                let at = self
-                    .workspace_activity
-                    .get(ws)
-                    .copied()
-                    .unwrap_or(f64::MIN)
-                    .max(self.workspace_touch.get(ws).copied().unwrap_or(f64::MIN));
-                (band, std::cmp::Reverse(at.max(0.0) as u64))
+                // Working band: when work STARTED (stable while working).
+                // Idle band: the displayed clock (last output; touch floor).
+                let at = if band == 0 {
+                    self.workspace_working_since
+                        .get(ws)
+                        .copied()
+                        .unwrap_or(f64::MAX)
+                } else {
+                    self.workspace_activity
+                        .get(ws)
+                        .copied()
+                        .unwrap_or(f64::MIN)
+                        .max(self.workspace_touch.get(ws).copied().unwrap_or(f64::MIN))
+                };
+                (band, std::cmp::Reverse(at.clamp(0.0, u64::MAX as f64) as u64))
             };
             key(a).cmp(&key(b)).then_with(|| a.cmp(b))
         });
@@ -273,6 +281,10 @@ impl ClientState {
             let was = self.workspace_was_working.contains(&ws);
             if was && !now_working {
                 self.touch_workspace(&ws, now_ms);
+                self.workspace_working_since.remove(&ws);
+            }
+            if now_working && !was {
+                self.workspace_working_since.insert(ws.clone(), now_ms);
             }
             if now_working {
                 self.workspace_was_working.insert(ws);

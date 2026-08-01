@@ -166,6 +166,9 @@ pub struct SeanceApp {
     /// Last observed pane output per workspace (ms) — sidebar shows "time
     /// since last update" instead of a pane count.
     workspace_activity: std::collections::HashMap<String, u64>,
+    /// When each workspace ENTERED the live-working band (sort key there —
+    /// stable while it keeps working; last-output would reshuffle per frame).
+    workspace_working_since: std::collections::HashMap<String, u64>,
     /// Workspaces that currently have a live-working agent (for falling-edge
     /// touch when work finishes → top of the non-working band).
     workspace_was_working: std::collections::HashSet<String>,
@@ -338,6 +341,7 @@ impl SeanceApp {
             foreign_workspaces: Vec::new(),
             workspace_touch: std::collections::HashMap::new(),
             workspace_activity: std::collections::HashMap::new(),
+            workspace_working_since: std::collections::HashMap::new(),
             workspace_was_working: std::collections::HashSet::new(),
             workspace_unread: std::collections::HashMap::new(),
             overview: false,

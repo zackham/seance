@@ -86,14 +86,21 @@ impl SeanceApp {
         } else {
             1
         };
-        // Sort by the SAME clock the row displays (last real output) — the
-        // human-touch clock made the order contradict the visible times.
-        let at = self
-            .workspace_activity
-            .get(ws)
-            .copied()
-            .max(self.workspace_touch.get(ws).copied())
-            .unwrap_or(0);
+        // Working band: ordered by when work STARTED (newest first) — stable
+        // while it keeps working. Idle band: by the clock the row displays
+        // (last real output; human touch as floor).
+        let at = if band == 0 {
+            self.workspace_working_since
+                .get(ws)
+                .copied()
+                .unwrap_or_else(now_ms)
+        } else {
+            self.workspace_activity
+                .get(ws)
+                .copied()
+                .max(self.workspace_touch.get(ws).copied())
+                .unwrap_or(0)
+        };
         (band, std::cmp::Reverse(at), ws.to_string())
     }
 
@@ -151,6 +158,10 @@ impl SeanceApp {
             let was = self.workspace_was_working.contains(&ws);
             if was && !now {
                 self.touch_workspace(&ws);
+                self.workspace_working_since.remove(&ws);
+            }
+            if now && !was {
+                self.workspace_working_since.insert(ws.clone(), now_ms());
             }
             if now {
                 self.workspace_was_working.insert(ws);
