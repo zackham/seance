@@ -56,6 +56,12 @@ pub enum SessionEvent {
         slug: String,
         code: Option<i32>,
     },
+    /// Recorder-observed real output for a pane (unix ms). Forwarded from the
+    /// recorder thread by the daemon so the engine owns the activity clock.
+    ActivityNote {
+        slug: String,
+        t_ms: u64,
+    },
 }
 
 struct Listener {

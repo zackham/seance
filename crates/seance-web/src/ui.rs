@@ -293,6 +293,9 @@ pub struct Chrome {
     kill_armed: Rc<RefCell<HashMap<String, f64>>>,
     /// Last connection status, re-applied on every rebuild.
     conn: (String, bool),
+    /// Last selected workspace we scrolled into view (avoid scroll-jacking on
+    /// unrelated rebuilds).
+    last_scrolled_ws: Option<String>,
 }
 
 impl Chrome {
@@ -351,6 +354,7 @@ impl Chrome {
             focused: None,
             kill_armed: Rc::new(RefCell::new(HashMap::new())),
             conn: ("connecting".to_string(), false),
+            last_scrolled_ws: None,
         })
     }
 
@@ -746,6 +750,14 @@ impl Chrome {
                 selected: is_selected,
             },
         );
+        // Cycling (ctrl+pageup/down) can select a row that's scrolled out of
+        // the rail — bring it into view once per selection change.
+        if is_selected && self.last_scrolled_ws.as_deref() != Some(ws) {
+            self.last_scrolled_ws = Some(ws.to_string());
+            if let Some(refs) = self.ws_refs.get(ws) {
+                refs.row.scroll_into_view_with_bool(false);
+            }
+        }
         Ok(())
     }
 

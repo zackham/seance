@@ -73,4 +73,11 @@ pub struct HandoffBundle {
     /// Shell command log (0.9.11 — survive upgrade).
     #[serde(default)]
     pub cmd_log: crate::cmdlog::CommandLog,
+    /// workspace → last real pane output (unix ms). Daemon-owned activity
+    /// clock; absent on older daemons → clocks start unknown, not zero.
+    #[serde(default)]
+    pub workspace_output: Vec<(String, u64)>,
+    /// workspace → last human input (unix ms).
+    #[serde(default)]
+    pub workspace_touch_ms: Vec<(String, u64)>,
 }

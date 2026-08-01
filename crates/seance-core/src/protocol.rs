@@ -292,6 +292,16 @@ pub enum GuiEvent {
         /// Workspaces owned by *other* windows (empty-sidebar pull menu).
         #[serde(default)]
         foreign_workspaces: Vec<ForeignWorkspace>,
+        /// Daemon-owned per-workspace activity clocks (0.11+). Absent on
+        /// older daemons — clients then keep their purely local stamps.
+        #[serde(default)]
+        workspace_meta: Vec<WorkspaceMeta>,
+    },
+    /// Incremental push of the daemon-owned output clock for one workspace.
+    /// Emitted by the recorder tap (real content change), throttled per pane.
+    Activity {
+        workspace: String,
+        last_output_ms: u64,
     },
     /// Legacy JSON grid (debug / fallback). Live path prefers [`Self::GridBin`].
     Grid(GridSnapshot),
@@ -423,6 +433,21 @@ pub struct StatusInfo {
     pub pad_rev: u64,
 }
 
+/// Daemon-owned activity clocks for one workspace (unix ms, 0 = never).
+///
+/// These live in the daemon so they survive GUI relaunch, workspace pulls
+/// between windows, and `seance upgrade` — the clients are mirrors.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct WorkspaceMeta {
+    pub workspace: String,
+    /// Last real pane output (recorder-observed content change).
+    #[serde(default)]
+    pub last_output_ms: u64,
+    /// Last human input (keystroke / inject) into any pane here.
+    #[serde(default)]
+    pub last_touch_ms: u64,
+}
+
 /// Pad rev + bytes recorded at last inject — wait uses this for since-inject evidence.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InjectBaseline {
@@ -452,4 +477,64 @@ pub struct TaskRecord {
 
 fn default_task_open() -> String {
     "open".into()
+}
+
+#[cfg(test)]
+mod workspace_meta_tests {
+    use super::*;
+
+    /// Old daemons/recordings have no `workspace_meta` — must still parse.
+    #[test]
+    fn legacy_state_without_workspace_meta_parses() {
+        let ev: GuiEvent = serde_json::from_str(
+            r#"{"event":"state","panes":[],"selected_workspace":"lab",
+                "focused_pane":null,"extra_workspaces":[],
+                "workspace_order":["lab"],"asks":[],"statuses":[]}"#,
+        )
+        .unwrap();
+        match ev {
+            GuiEvent::State { workspace_meta, .. } => assert!(workspace_meta.is_empty()),
+            _ => panic!("expected State"),
+        }
+    }
+
+    #[test]
+    fn workspace_meta_roundtrips_and_defaults_missing_clocks() {
+        let ev: GuiEvent = serde_json::from_str(
+            r#"{"event":"state","panes":[],"selected_workspace":null,
+                "focused_pane":null,"extra_workspaces":[],
+                "workspace_order":[],"asks":[],"statuses":[],
+                "workspace_meta":[{"workspace":"lab","last_output_ms":7},
+                                  {"workspace":"main"}]}"#,
+        )
+        .unwrap();
+        let GuiEvent::State { workspace_meta, .. } = ev else {
+            panic!("expected State");
+        };
+        assert_eq!(workspace_meta.len(), 2);
+        assert_eq!(workspace_meta[0].last_output_ms, 7);
+        assert_eq!(workspace_meta[0].last_touch_ms, 0);
+        assert_eq!(workspace_meta[1].workspace, "main");
+        assert_eq!(workspace_meta[1].last_output_ms, 0);
+    }
+
+    #[test]
+    fn activity_event_roundtrips() {
+        let json = serde_json::to_string(&GuiEvent::Activity {
+            workspace: "lab".into(),
+            last_output_ms: 42,
+        })
+        .unwrap();
+        let back: GuiEvent = serde_json::from_str(&json).unwrap();
+        match back {
+            GuiEvent::Activity {
+                workspace,
+                last_output_ms,
+            } => {
+                assert_eq!(workspace, "lab");
+                assert_eq!(last_output_ms, 42);
+            }
+            _ => panic!("expected Activity"),
+        }
+    }
 }

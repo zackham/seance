@@ -122,6 +122,14 @@ pub struct AppState {
     /// Shell command log (cold restore).
     #[serde(default)]
     pub cmd_log: crate::cmdlog::CommandLog,
+    /// workspace → last real pane output (unix ms). Daemon-owned activity
+    /// clock; persisted so a cold daemon restart keeps the sidebar's
+    /// "time since update" instead of blanking every circle.
+    #[serde(default)]
+    pub workspace_output: Vec<(String, u64)>,
+    /// workspace → last human input (unix ms) — sidebar recency sort key.
+    #[serde(default)]
+    pub workspace_touch_ms: Vec<(String, u64)>,
 }
 
 fn default_split_ratio() -> f32 {
@@ -424,10 +432,14 @@ mod tests {
             split_ratio: 0.5,
             pane_weights: vec![],
             cmd_log: crate::cmdlog::CommandLog::new(),
+            workspace_output: vec![("main".to_string(), 1_700_000_000_000)],
+            workspace_touch_ms: vec![("main".to_string(), 1_700_000_000_500)],
         };
 
         state.save().expect("save should succeed");
         let loaded = AppState::load();
+        assert_eq!(loaded.workspace_output, vec![("main".to_string(), 1_700_000_000_000)]);
+        assert_eq!(loaded.workspace_touch_ms, vec![("main".to_string(), 1_700_000_000_500)]);
 
         assert_eq!(loaded.panes.len(), 2);
         assert_eq!(loaded.panes[0].name, "Vita");

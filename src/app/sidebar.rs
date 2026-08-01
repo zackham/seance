@@ -388,6 +388,7 @@ impl SeanceApp {
                 // Empty-area multi-window menu is a separate flex filler (avoids double menus).
                 div()
                     .id("pane-list")
+                    .track_scroll(&self.sidebar_scroll)
                     .flex_1()
                     .overflow_y_scroll()
                     // No horizontal pad — selected workspace fill is full-bleed.

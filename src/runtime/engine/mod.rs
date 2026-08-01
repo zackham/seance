@@ -113,6 +113,13 @@ pub struct Engine {
     /// Last cells we broadcast per pane — enables row-damage frames + skip
     /// when nothing changed.
     last_grid_cells: HashMap<String, LastGridFrame>,
+    /// workspace → last real pane output (unix ms). Daemon-owned so the
+    /// sidebar's "time since update" survives GUI relaunch, workspace pulls
+    /// between windows, and `seance upgrade`. Fed by the recorder tap.
+    pub workspace_output: HashMap<String, u64>,
+    /// workspace → last human input (unix ms). Same durability story; drives
+    /// the sidebar's recency sort. Agent/ctl sends deliberately do NOT bump.
+    pub workspace_touch_ms: HashMap<String, u64>,
 }
 
 impl Engine {
@@ -150,6 +157,8 @@ impl Engine {
             last_record_grid: HashMap::new(),
             grid_flush_pending: HashSet::new(),
             last_grid_cells: HashMap::new(),
+            workspace_output: HashMap::new(),
+            workspace_touch_ms: HashMap::new(),
         };
         (eng, event_rx)
     }
@@ -210,7 +219,12 @@ impl Engine {
             last_record_grid: HashMap::new(),
             grid_flush_pending: HashSet::new(),
             last_grid_cells: HashMap::new(),
+            workspace_output: HashMap::new(),
+            workspace_touch_ms: HashMap::new(),
         };
+
+        eng.workspace_output = state.workspace_output.iter().cloned().collect();
+        eng.workspace_touch_ms = state.workspace_touch_ms.iter().cloned().collect();
 
         for t in state.tasks {
             eng.tasks.insert(t.id.clone(), t);
@@ -333,6 +347,10 @@ impl Engine {
             last_record_grid: HashMap::new(),
             grid_flush_pending: HashSet::new(),
             last_grid_cells: HashMap::new(),
+            // Activity clocks ride the handoff — an upgrade must not reset
+            // every circle's "time since update" to unknown.
+            workspace_output: bundle.workspace_output.into_iter().collect(),
+            workspace_touch_ms: bundle.workspace_touch_ms.into_iter().collect(),
         };
 
         let mut fd_map: HashMap<usize, OwnedFd> =
@@ -429,6 +447,12 @@ impl Engine {
         Ok((eng, event_rx))
     }
 
+    /// Clone of the session-event sender — the daemon uses it to forward
+    /// recorder activity notes into the same pump PTY events go through.
+    pub fn event_sender(&self) -> Sender<SessionEvent> {
+        self.event_tx.clone()
+    }
+
     pub(super) fn session_mut(&mut self, slug: &str) -> Option<&mut PtySession> {
         self.panes
             .iter_mut()
@@ -489,6 +513,16 @@ impl Engine {
             split_ratio: 0.5,
             pane_weights: vec![],
             cmd_log: self.cmd_log.clone(),
+            workspace_output: self
+                .workspace_output
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
+            workspace_touch_ms: self
+                .workspace_touch_ms
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
         };
         let _ = state.save();
     }
@@ -598,6 +632,16 @@ impl Engine {
             task_counter: self.task_counter,
             active_tasks,
             cmd_log: self.cmd_log.clone(),
+            workspace_output: self
+                .workspace_output
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
+            workspace_touch_ms: self
+                .workspace_touch_ms
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
         };
         Ok((bundle, fds))
     }

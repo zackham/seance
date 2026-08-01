@@ -75,6 +75,11 @@ pub struct ClientState {
     pub last_spawned: Option<String>,
     /// Last pane output per workspace (ms) — sidebar shows time-since-update.
     pub workspace_activity: HashMap<String, f64>,
+    /// `Date.now() - performance.now()` at boot. Both local clocks above live
+    /// in the `performance.now()` domain; the daemon's are unix ms, so every
+    /// ingested daemon stamp is converted with `perf = unix - offset`. Set
+    /// once by `lib.rs`; tests leave it at 0 so conversion is identity.
+    pub clock_offset_ms: f64,
 }
 
 /// One row of the host-bridge widget strip (native `HostWidgetSnap` shape).
@@ -270,6 +275,35 @@ impl ClientState {
         }
     }
 
+    /// Daemon unix-ms stamp → local `performance.now()` domain.
+    fn to_perf(&self, unix_ms: u64) -> f64 {
+        unix_ms as f64 - self.clock_offset_ms
+    }
+
+    /// MAX-merge a daemon output clock into the local mirror.
+    fn merge_activity(&mut self, ws: &str, unix_ms: u64) {
+        if unix_ms == 0 || ws.is_empty() {
+            return;
+        }
+        let t = self.to_perf(unix_ms);
+        let cur = self.workspace_activity.get(ws).copied().unwrap_or(f64::MIN);
+        if t > cur {
+            self.workspace_activity.insert(ws.to_string(), t);
+        }
+    }
+
+    /// MAX-merge a daemon touch clock into the local mirror.
+    fn merge_touch(&mut self, ws: &str, unix_ms: u64) {
+        if unix_ms == 0 || ws.is_empty() {
+            return;
+        }
+        let t = self.to_perf(unix_ms);
+        let cur = self.workspace_touch.get(ws).copied().unwrap_or(f64::MIN);
+        if t > cur {
+            self.workspace_touch.insert(ws.to_string(), t);
+        }
+    }
+
     fn note_pane_output(&mut self, slug: &str, now_ms: f64) {
         if let Some(ws) = self.pane(slug).map(|p| p.workspace.clone()) {
             self.workspace_activity.insert(ws, now_ms);
@@ -356,6 +390,7 @@ impl ClientState {
                 window_id,
                 windows,
                 foreign_workspaces,
+                workspace_meta,
             } => {
                 // Drop grids for panes that no longer exist (reattach after
                 // daemon restart must not paint ghosts).
@@ -375,6 +410,13 @@ impl ClientState {
                 self.window_id = window_id;
                 self.windows = windows;
                 self.foreign_workspaces = foreign_workspaces;
+                // Daemon-owned clocks are the durable copy — mirror them
+                // (converted to the perf domain, max-merged so a local stamp
+                // from a frame we already painted is never walked back).
+                for m in workspace_meta {
+                    self.merge_activity(&m.workspace, m.last_output_ms);
+                    self.merge_touch(&m.workspace, m.last_touch_ms);
+                }
                 self.structure_rev += 1;
                 Applied::Structure
             }
@@ -530,6 +572,13 @@ impl ClientState {
                     Applied::Nothing
                 }
             }
+            GuiEvent::Activity {
+                workspace,
+                last_output_ms,
+            } => {
+                self.merge_activity(&workspace, last_output_ms);
+                Applied::Badges
+            }
             GuiEvent::Error { message } => Applied::Error { message },
             GuiEvent::Ack { .. } | GuiEvent::FsResult { .. } => Applied::Nothing,
             GuiEvent::HostWidgets { widgets } => {
@@ -604,6 +653,72 @@ mod tests {
                 pane: "w-1".into()
             }
         );
+    }
+
+    fn state_event_with_meta(out_ms: u64, touch_ms: u64) -> GuiEvent {
+        serde_json::from_str(&format!(
+            r#"{{"event":"state","panes":[{{"kind":"term","name":"w","slug":"w-1",
+                "workspace":"lab","command":"bash","cwd":"/","tiled":true,
+                "running":true,"title":null,"scratchpad":"/tmp/p"}}],
+                "selected_workspace":"lab","focused_pane":"w-1",
+                "extra_workspaces":[],"workspace_order":["lab"],
+                "asks":[],"statuses":[],
+                "workspace_meta":[{{"workspace":"lab","last_output_ms":{out_ms},
+                                   "last_touch_ms":{touch_ms}}}]}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn legacy_state_without_meta_leaves_clocks_alone() {
+        let mut st = ClientState::default();
+        st.workspace_activity.insert("lab".into(), 500.0);
+        st.apply_event(state_event(), 0.0);
+        assert_eq!(st.workspace_activity.get("lab"), Some(&500.0));
+    }
+
+    #[test]
+    fn daemon_meta_seeds_clocks_and_max_merges() {
+        let mut st = ClientState::default();
+        // offset 0 → unix ms and perf ms are the same numbers in this test.
+        st.apply_event(state_event_with_meta(900, 800), 0.0);
+        assert_eq!(st.workspace_activity.get("lab"), Some(&900.0));
+        assert_eq!(st.workspace_touch.get("lab"), Some(&800.0));
+
+        // An older daemon stamp must never walk a fresher local one back.
+        st.workspace_activity.insert("lab".into(), 1_500.0);
+        st.apply_event(state_event_with_meta(900, 800), 0.0);
+        assert_eq!(st.workspace_activity.get("lab"), Some(&1_500.0));
+
+        // A newer one wins.
+        st.apply_event(state_event_with_meta(2_000, 1_900), 0.0);
+        assert_eq!(st.workspace_activity.get("lab"), Some(&2_000.0));
+        assert_eq!(st.workspace_touch.get("lab"), Some(&1_900.0));
+    }
+
+    #[test]
+    fn zero_clocks_are_unknown_not_epoch() {
+        let mut st = ClientState::default();
+        st.apply_event(state_event_with_meta(0, 0), 0.0);
+        assert!(st.workspace_activity.get("lab").is_none());
+        assert!(st.workspace_touch.get("lab").is_none());
+    }
+
+    #[test]
+    fn activity_event_converts_unix_to_perf_domain() {
+        let mut st = ClientState::default();
+        // Page booted 10_000ms ago at unix 1_700_000_000_000.
+        st.clock_offset_ms = 1_700_000_000_000.0 - 10_000.0;
+        st.apply_event(
+            GuiEvent::Activity {
+                workspace: "lab".into(),
+                last_output_ms: 1_700_000_005_000,
+            },
+            12_000.0,
+        );
+        // unix 1_700_000_005_000 → perf 15_000.
+        assert_eq!(st.workspace_activity.get("lab"), Some(&15_000.0));
+        assert_eq!(st.activity_label("lab", 25_000.0), "10s");
     }
 
     #[test]

@@ -97,8 +97,15 @@ pub struct App {
 
 impl App {
     fn new() -> Rc<App> {
+        // Local activity/touch clocks live in the performance.now() domain;
+        // the daemon's are unix ms. Capture the offset once at boot so daemon
+        // stamps can be converted on ingest (see ClientState::to_perf).
+        let state = ClientState {
+            clock_offset_ms: js_sys::Date::now() - now_ms(),
+            ..Default::default()
+        };
         Rc::new(App {
-            state: RefCell::new(ClientState::default()),
+            state: RefCell::new(state),
             conn: RefCell::new(None),
             chrome: RefCell::new(None),
             probe: RefCell::new(probe::Probe::new()),

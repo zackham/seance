@@ -53,10 +53,32 @@ fn run_daemon_inner(args: Vec<String>) -> Result<()> {
 
     let mut engine = engine;
     // Arm the session-replay ring recorder (48h DVR; `seance replay` reads it).
+    // The recorder is also the activity tap: it is the only place that already
+    // knows "real content change at unchanged dimensions", so it emits
+    // (pane, unix_ms) notes which we forward into the engine's own session
+    // event pump — that keeps the per-workspace clock daemon-owned.
+    let (notes_tx, notes_rx) = std::sync::mpsc::channel::<crate::runtime::recorder::ActivityNote>();
     engine.set_recorder(crate::runtime::recorder::spawn(
         crate::runtime::state_data_dir().join("replay"),
+        notes_tx,
     ));
+    let notes_event_tx = engine.event_sender();
     let engine = Arc::new(Mutex::new(engine));
+
+    // Recorder activity notes → session events (one hop, no engine lock here).
+    thread::Builder::new()
+        .name("seance-activity".into())
+        .spawn(move || {
+            while let Ok((slug, t_ms)) = notes_rx.recv() {
+                if notes_event_tx
+                    .send(SessionEvent::ActivityNote { slug, t_ms })
+                    .is_err()
+                {
+                    break; // engine gone — nothing left to notify
+                }
+            }
+        })
+        .ok();
 
     // Session event pump → broadcast grids.
     {

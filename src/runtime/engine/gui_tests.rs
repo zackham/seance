@@ -7,6 +7,7 @@ use super::helpers::now_ms;
 use super::tests::with_test_state_dir;
 use super::*;
 use crate::runtime::protocol::{GuiEvent, GuiRequest};
+use crate::runtime::pty_session::SessionEvent;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
@@ -667,6 +668,94 @@ fn prune_dead_guis_reassigns_dropped_window() {
             Some(g1.id.as_str())
         );
         assert!(eng.has_gui_window(&g1.id));
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+/// The activity clocks are daemon state: an ActivityNote stamps the pane's
+/// workspace and pushes an incremental `Activity`, human input stamps touch,
+/// and both ride every `State` push so a relaunched / pulled window can seed
+/// itself instead of starting blank.
+#[test]
+fn activity_and_touch_clocks_are_daemon_owned() {
+    with_test_state_dir("gui-clocks", || {
+        let scratch = temp_scratch("gui-clocks");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let slug = eng.push_stub_pane("worker-a", "lab");
+
+        let g = FakeGui::attach_to(&mut eng);
+        let _ = eng.handle_gui(
+            GuiRequest::Attach {
+                selected_workspace: None,
+                focused_pane: None,
+                empty: false,
+            },
+            &g.id,
+        );
+        g.drain();
+
+        // Recorder note → workspace clock + incremental broadcast.
+        eng.handle_session_event(SessionEvent::ActivityNote {
+            slug: slug.clone(),
+            t_ms: 1_700_000_000_000,
+        });
+        assert_eq!(eng.workspace_output.get("lab"), Some(&1_700_000_000_000));
+        let acts: Vec<(String, u64)> = g
+            .drain()
+            .into_iter()
+            .filter_map(|ev| match ev {
+                GuiEvent::Activity {
+                    workspace,
+                    last_output_ms,
+                } => Some((workspace, last_output_ms)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(acts, vec![("lab".to_string(), 1_700_000_000_000)]);
+
+        // Older note never walks the clock back, and emits nothing.
+        eng.handle_session_event(SessionEvent::ActivityNote {
+            slug: slug.clone(),
+            t_ms: 1_600_000_000_000,
+        });
+        assert_eq!(eng.workspace_output.get("lab"), Some(&1_700_000_000_000));
+        assert!(g.drain().is_empty());
+
+        // Human input stamps touch (ctl/agent sends deliberately do not).
+        assert!(eng.workspace_touch_ms.get("lab").is_none());
+        let _ = eng.handle_gui(
+            GuiRequest::Input {
+                pane: slug.clone(),
+                bytes_b64: "aGk=".into(),
+            },
+            &g.id,
+        );
+        assert!(eng.workspace_touch_ms.get("lab").copied().unwrap_or(0) > 0);
+
+        // GUI relaunch: the window dies, a fresh one attaches and must get
+        // both clocks in its State push (the whole point of daemon ownership).
+        drop(g);
+        eng.prune_dead_guis();
+        let g2 = FakeGui::attach_to(&mut eng);
+        let st = eng.handle_gui(
+            GuiRequest::Attach {
+                selected_workspace: None,
+                focused_pane: None,
+                empty: false,
+            },
+            &g2.id,
+        );
+        let meta = match st {
+            Some(GuiEvent::State { workspace_meta, .. }) => workspace_meta,
+            _ => panic!("attach returns State"),
+        };
+        let lab = meta
+            .iter()
+            .find(|m| m.workspace == "lab")
+            .expect("lab meta present");
+        assert_eq!(lab.last_output_ms, 1_700_000_000_000);
+        assert!(lab.last_touch_ms > 0);
 
         let _ = std::fs::remove_dir_all(&scratch);
     });

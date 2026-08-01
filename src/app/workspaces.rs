@@ -309,6 +309,12 @@ impl SeanceApp {
             }
         }
         self.selected_workspace = Some(workspace.to_string());
+        // Reveal the selection in the sidebar — ctrl+page cycling can land on
+        // a row scrolled out of the rail. Row index = position in display
+        // order (one child per workspace group in the list).
+        if let Some(idx) = self.workspaces(cx).iter().position(|w| w == workspace) {
+            self.sidebar_scroll.scroll_to_item(idx);
+        }
         // Selecting a circle clears sticky "done/needs" unread — does NOT bump touch.
         self.workspace_unread.remove(workspace);
         // When entering a circle that was off-screen, zero local revs for its

@@ -126,6 +126,8 @@ pub struct SeanceApp {
     client: Arc<GuiClient>,
     /// After a summon, focus this pane once its remote view exists.
     pending_focus: Option<String>,
+    /// Sidebar workspace-list scroll — cycling must reveal the selection.
+    sidebar_scroll: gpui::ScrollHandle,
     /// UI-initiated spawn/create: open the inline rename field as soon as the
     /// target exists (workspace is immediate; pane waits for PaneSpawned).
     pending_rename: Option<RenameTarget>,
@@ -318,6 +320,7 @@ impl SeanceApp {
             session_counter: 0,
             client,
             pending_focus: None,
+            sidebar_scroll: gpui::ScrollHandle::new(),
             pending_rename: None,
             rename_next_spawn: false,
             grid_batch_visible: false,
@@ -560,6 +563,7 @@ impl SeanceApp {
                 window_id,
                 windows,
                 foreign_workspaces,
+                workspace_meta,
             } => {
                 // Multi-window identity + peer list.
                 let prev_windows: std::collections::HashSet<String> =
@@ -642,6 +646,28 @@ impl SeanceApp {
                     .collect();
                 self.panes
                     .sort_by_key(|p| order.get(p.slug.as_str()).copied().unwrap_or(usize::MAX));
+                // Daemon-owned activity clocks are the durable copy: seed the
+                // local mirrors with a MAX merge (both are unix ms, so they
+                // compare directly). Local stamping stays for instant feedback.
+                for m in workspace_meta {
+                    if m.last_output_ms > 0 {
+                        let cur = self
+                            .workspace_activity
+                            .get(&m.workspace)
+                            .copied()
+                            .unwrap_or(0);
+                        if m.last_output_ms > cur {
+                            self.workspace_activity
+                                .insert(m.workspace.clone(), m.last_output_ms);
+                        }
+                    }
+                    if m.last_touch_ms > 0 {
+                        let cur = self.workspace_touch.get(&m.workspace).copied().unwrap_or(0);
+                        if m.last_touch_ms > cur {
+                            self.workspace_touch.insert(m.workspace, m.last_touch_ms);
+                        }
+                    }
+                }
                 // active_slug from daemon; repair if missing / not in selected
                 // workspace. Keyboard recovery is render-side (ensure_keyboard_focus)
                 // so we don't steal focus from whisper / rename / palette here.
@@ -849,6 +875,18 @@ impl SeanceApp {
                     .cloned()
                 {
                     rt.update(cx, |t, cx| t.set_ghost(ghost, cx));
+                }
+            }
+            GuiEvent::Activity {
+                workspace,
+                last_output_ms,
+            } => {
+                // Daemon says this circle produced real output. Max-merge:
+                // a local stamp from a frame we just painted may be newer.
+                let cur = self.workspace_activity.get(&workspace).copied().unwrap_or(0);
+                if last_output_ms > cur {
+                    self.workspace_activity.insert(workspace, last_output_ms);
+                    cx.notify();
                 }
             }
             GuiEvent::Error { message } => {

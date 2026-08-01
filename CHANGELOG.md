@@ -15,6 +15,26 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]
 
+## [0.11.1] — 2026-08-01
+
+### Fixed
+
+- **Workspace activity clocks are daemon-owned** — time-since-output labels
+  and auto-sort recency now survive GUI relaunch, workspace pulls, `seance
+  upgrade` (handoff) and cold daemon restarts (state.json). Stamps originate
+  in the recorder (the one place that knows "real content change at unchanged
+  dims"), throttled to one note per pane per 5s; `State` carries
+  `workspace_meta`, live updates ride a new `Activity` event. Attach / pull /
+  relaunch / resize reflows no longer reset any clock.
+- **The jump-focus class**: every chrome navigation (ctrl+shift+j palette,
+  tile clicks, workspace switches, palette close) now arms `pending_focus` as
+  a render-time backstop — no more "jumped but can't type until I click".
+- Banishing the ACTIVE workspace selects the neighbor below (above when last)
+  in sidebar order, both GUIs.
+- Ctrl+page cycling reveals the newly selected workspace in the sidebar
+  (native `scroll_to_item`; web `scrollIntoView`) instead of leaving it
+  scrolled out of view.
+
 ## [0.11.0] — 2026-07-31
 
 The web era: seance from anywhere, and sessions you can share.

@@ -307,6 +307,29 @@ impl Engine {
                 answer: a.answer.clone(),
             })
             .collect();
+        // Daemon-owned activity clocks for EVERY known workspace — owned AND
+        // foreign. A fresh/empty window needs times for the elsewhere rail,
+        // and a pulled workspace must arrive with its clock, not a blank one.
+        let mut meta_names: Vec<String> = owned.clone();
+        for ws in self
+            .workspace_output
+            .keys()
+            .chain(self.workspace_touch_ms.keys())
+            .cloned()
+            .chain(foreign.iter().map(|f| f.workspace.clone()))
+        {
+            if !meta_names.iter().any(|m| *m == ws) {
+                meta_names.push(ws);
+            }
+        }
+        let workspace_meta: Vec<WorkspaceMeta> = meta_names
+            .into_iter()
+            .map(|ws| WorkspaceMeta {
+                last_output_ms: self.workspace_output.get(&ws).copied().unwrap_or(0),
+                last_touch_ms: self.workspace_touch_ms.get(&ws).copied().unwrap_or(0),
+                workspace: ws,
+            })
+            .collect();
         GuiEvent::State {
             panes,
             selected_workspace: selected,
@@ -318,6 +341,7 @@ impl Engine {
             window_id: Some(window_id.to_string()),
             windows: self.window_infos(),
             foreign_workspaces: foreign,
+            workspace_meta,
         }
     }
 
@@ -557,6 +581,22 @@ impl Engine {
         }
     }
 
+    /// Human input landed in this pane's workspace — bump the daemon-owned
+    /// recency clock (agent/ctl sends deliberately do NOT, matching the
+    /// client semantics this replaced).
+    pub(super) fn stamp_workspace_touch(&mut self, pane: &str) {
+        if let Some(ws) = self
+            .panes
+            .iter()
+            .find(|p| p.slug == pane)
+            .map(|p| p.workspace.clone())
+        {
+            if !ws.is_empty() {
+                self.workspace_touch_ms.insert(ws, now_ms());
+            }
+        }
+    }
+
     /// Recorder event tap (no-op until armed).
     pub(crate) fn record_event(&self, slug: &str, ev: seance_core::replay::ReplayEvent) {
         if let Some(rec) = self.recorder.as_ref() {
@@ -579,6 +619,26 @@ impl Engine {
             }
             SessionEvent::ForceFullGrid { slug } => {
                 self.push_grid_full(slug);
+            }
+            SessionEvent::ActivityNote { slug, t_ms } => {
+                // Recorder observed real output for this pane — the daemon
+                // owns the clock, clients only mirror it.
+                let t = *t_ms;
+                if let Some(ws) = self
+                    .panes
+                    .iter()
+                    .find(|p| p.slug == *slug)
+                    .map(|p| p.workspace.clone())
+                {
+                    let cur = self.workspace_output.get(&ws).copied().unwrap_or(0);
+                    if t > cur {
+                        self.workspace_output.insert(ws.clone(), t);
+                        self.broadcast(GuiEvent::Activity {
+                            workspace: ws,
+                            last_output_ms: t,
+                        });
+                    }
+                }
             }
             SessionEvent::Title { slug, title } => {
                 self.record_event(
@@ -961,6 +1021,7 @@ impl Engine {
                         pane: pane.clone(),
                         origin: "human".into(),
                     });
+                    self.stamp_workspace_touch(&pane);
                 }
                 None
             }
@@ -1028,6 +1089,7 @@ impl Engine {
                     pane: pane.clone(),
                     origin: "human".into(),
                 });
+                self.stamp_workspace_touch(&pane);
                 None
             }
             GuiRequest::GhostAccept { pane } => {
@@ -1215,6 +1277,12 @@ impl Engine {
                 }
                 if let Some(owner) = self.workspace_window.remove(&old) {
                     self.workspace_window.insert(new.clone(), owner);
+                }
+                if let Some(t) = self.workspace_output.remove(&old) {
+                    self.workspace_output.insert(new.clone(), t);
+                }
+                if let Some(t) = self.workspace_touch_ms.remove(&old) {
+                    self.workspace_touch_ms.insert(new.clone(), t);
                 }
                 if self.selected_workspace.as_deref() == Some(old.as_str()) {
                     self.selected_workspace = Some(new.clone());

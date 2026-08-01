@@ -55,6 +55,9 @@ const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const PRUNE_EVERY_MS: u64 = 10 * 60 * 1000;
 /// Error log rate limit.
 const ERR_EVERY_MS: u64 = 5_000;
+/// Max one activity note per pane per this window (the engine only needs a
+/// coarse "last real output" clock; a chatty TUI must not spam the pump).
+const NOTE_EVERY_MS: u64 = 5_000;
 
 const MS_PER_HOUR: u64 = 3_600_000;
 
@@ -129,19 +132,27 @@ impl RecorderHandle {
     }
 }
 
+/// Activity note: `(pane_slug, unix_ms)` — "this pane produced real output".
+/// The daemon forwards these into the engine's session-event pump; the engine
+/// owns the per-workspace clock so it survives GUI relaunch / upgrade.
+pub type ActivityNote = (String, u64);
+
 /// Spawn the recorder thread. `root` = `<state_dir>/replay` (created here).
-pub fn spawn(root: PathBuf) -> RecorderHandle {
-    spawn_with_join(root).0
+pub fn spawn(root: PathBuf, notes: Sender<ActivityNote>) -> RecorderHandle {
+    spawn_with_join(root, notes).0
 }
 
 /// Same as [`spawn`], but hands back the join handle so a caller can
 /// `shutdown()` then `join()` deterministically (tests, clean daemon exit).
-pub fn spawn_with_join(root: PathBuf) -> (RecorderHandle, std::thread::JoinHandle<()>) {
+pub fn spawn_with_join(
+    root: PathBuf,
+    notes: Sender<ActivityNote>,
+) -> (RecorderHandle, std::thread::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel();
     let join = std::thread::Builder::new()
         .name("seance-recorder".into())
         .spawn(move || {
-            let mut rec = Recorder::new(root);
+            let mut rec = Recorder::new(root, notes);
             rec.run(rx);
         })
         .expect("spawn seance-recorder");
@@ -174,6 +185,8 @@ struct PaneState {
     pending: Option<(u64, GridSnapshot)>,
     /// Next grid record must be a keyframe (post human Input).
     force_full: bool,
+    /// Last activity note emitted for this pane (throttle).
+    last_note_ms: u64,
 }
 
 impl PaneState {
@@ -187,6 +200,7 @@ impl PaneState {
             last_keyframe_ms: 0,
             pending: None,
             force_full: false,
+            last_note_ms: 0,
         }
     }
 }
@@ -197,16 +211,20 @@ struct Recorder {
     last_prune_ms: u64,
     last_err_ms: u64,
     suppressed_errs: u64,
+    /// Activity notes out (never blocks, never panics: a dead receiver is a
+    /// silent no-op, same discipline as the inbound handle).
+    notes: Sender<ActivityNote>,
 }
 
 impl Recorder {
-    fn new(root: PathBuf) -> Self {
+    fn new(root: PathBuf, notes: Sender<ActivityNote>) -> Self {
         let mut me = Self {
             root,
             panes: HashMap::new(),
             last_prune_ms: 0,
             last_err_ms: 0,
             suppressed_errs: 0,
+            notes,
         };
         let root = me.root.clone();
         me.check(fs::create_dir_all(&root), "create replay root");
@@ -339,26 +357,37 @@ impl Recorder {
             || st.last.is_none()
             || t_ms.saturating_sub(st.last_keyframe_ms) >= KEYFRAME_MS;
         let mut dirty: Option<Vec<u16>> = None;
+        // Real content change at unchanged dimensions — the activity clock's
+        // definition of "output". Computed even when the frame is already
+        // destined to be FULL (10s keyframe cadence), so a keyframe that
+        // *replaced* genuine damage still stamps.
+        let mut content_changed = false;
 
         if let Some(prev) = &st.last {
             if prev.cols != snap.cols || prev.rows != snap.rows {
                 full = true; // resize invalidates the damage base
-            } else if !full {
+            } else {
                 let d = dirty_rows(&prev.cells, &snap.cells, cols, rows);
-                if d.is_empty() {
-                    let moved =
-                        prev.cursor_col != snap.cursor_col || prev.cursor_row != snap.cursor_row;
-                    if !moved && prev.title == snap.title {
-                        // Nothing changed at all — record nothing, keep base.
-                        return;
-                    }
-                    if prev.title != snap.title {
-                        full = true; // title lives in the header: needs a full frame
+                content_changed = !d.is_empty();
+                // When `full` is already forced (post-input / 10s cadence)
+                // there is nothing to choose — but the diff above still
+                // decides whether this counts as output.
+                if !full {
+                    if d.is_empty() {
+                        let moved = prev.cursor_col != snap.cursor_col
+                            || prev.cursor_row != snap.cursor_row;
+                        if !moved && prev.title == snap.title {
+                            // Nothing changed at all — record nothing, keep base.
+                            return;
+                        }
+                        if prev.title != snap.title {
+                            full = true; // title lives in the header: needs a full frame
+                        } else {
+                            dirty = Some(vec![snap.cursor_row]);
+                        }
                     } else {
-                        dirty = Some(vec![snap.cursor_row]);
+                        dirty = Some(d);
                     }
-                } else {
-                    dirty = Some(d);
                 }
             }
         }
@@ -390,6 +419,9 @@ impl Recorder {
         };
         let kind = if use_damage { KIND_DAMAGE } else { KIND_FULL };
         self.write_record(slug, t_ms, kind, &bytes);
+        if content_changed {
+            self.note_activity(slug, t_ms);
+        }
 
         let st = self.pane(slug);
         if kind == KIND_FULL {
@@ -404,6 +436,21 @@ impl Recorder {
             title: snap.title.clone(),
             cells: snap.cells,
         });
+    }
+
+    /// Tell the engine this pane produced real output, at most once per
+    /// [`NOTE_EVERY_MS`] per pane. Fire-and-forget: a dead receiver (engine
+    /// gone / not armed) must never take the recorder down.
+    fn note_activity(&mut self, slug: &str, t_ms: u64) {
+        let due = {
+            let st = self.pane(slug);
+            st.last_note_ms == 0 || t_ms.saturating_sub(st.last_note_ms) >= NOTE_EVERY_MS
+        };
+        if !due {
+            return;
+        }
+        self.pane(slug).last_note_ms = t_ms;
+        let _ = self.notes.send((slug.to_string(), t_ms));
     }
 
     // -- segments ----------------------------------------------------------
@@ -672,6 +719,14 @@ mod tests {
         });
     }
 
+    /// Recorder + a note receiver. Most tests ignore the notes, but the
+    /// receiver must stay alive so the throttle path is exercised for real.
+    fn spawn_rec(root: PathBuf) -> (RecorderHandle, std::thread::JoinHandle<()>, Receiver<ActivityNote>) {
+        let (ntx, nrx) = mpsc::channel();
+        let (h, join) = spawn_with_join(root, ntx);
+        (h, join, nrx)
+    }
+
     fn read_segment(root: &Path, pane: &str, hour: u64) -> Vec<u8> {
         fs::read(root.join(pane).join(format!("{hour}.srr"))).expect("segment exists")
     }
@@ -682,7 +737,7 @@ mod tests {
     #[test]
     fn records_land_and_parse() {
         let root = tmp_root("land");
-        let (h, join) = spawn_with_join(root.clone());
+        let (h, join, _notes) = spawn_rec(root.clone());
 
         send_grid(&h, T0, grid("p1", 1, 'a'));
         send_grid(&h, T0 + 100, grid("p1", 2, 'b'));
@@ -714,7 +769,7 @@ mod tests {
     #[test]
     fn unchanged_grid_is_skipped() {
         let root = tmp_root("skip");
-        let (h, join) = spawn_with_join(root.clone());
+        let (h, join, _notes) = spawn_rec(root.clone());
         send_grid(&h, T0, grid("p1", 1, 'a'));
         send_grid(&h, T0 + 100, grid("p1", 1, 'a')); // identical
         h.shutdown();
@@ -728,7 +783,7 @@ mod tests {
     #[test]
     fn coalesce_keeps_latest_within_window() {
         let root = tmp_root("coalesce");
-        let (h, join) = spawn_with_join(root.clone());
+        let (h, join, _notes) = spawn_rec(root.clone());
         send_grid(&h, T0, grid("p1", 1, 'a'));
         // Both inside the 33ms window after the first write: only the last one
         // survives, and it lands on shutdown flush.
@@ -747,7 +802,7 @@ mod tests {
     #[test]
     fn human_input_forces_keyframe_before_event() {
         let root = tmp_root("keyframe");
-        let (h, join) = spawn_with_join(root.clone());
+        let (h, join, _notes) = spawn_rec(root.clone());
         send_grid(&h, T0, grid("p1", 1, 'a'));
         // Pending (inside the window) — must be flushed as FULL, then the event.
         send_grid(&h, T0 + 5, grid("p1", 2, 'b'));
@@ -778,7 +833,7 @@ mod tests {
     #[test]
     fn resize_forces_full() {
         let root = tmp_root("resize");
-        let (h, join) = spawn_with_join(root.clone());
+        let (h, join, _notes) = spawn_rec(root.clone());
         send_grid(&h, T0, grid("p1", 1, 'a'));
         let mut wide = grid("p1", 2, 'a');
         wide.cols = 12;
@@ -797,7 +852,7 @@ mod tests {
     #[test]
     fn hour_rotation_gzips_finished_segment() {
         let root = tmp_root("rotate");
-        let (h, join) = spawn_with_join(root.clone());
+        let (h, join, _notes) = spawn_rec(root.clone());
         send_grid(&h, T0, grid("p1", 1, 'a'));
         send_grid(&h, T0 + MS_PER_HOUR, grid("p1", 2, 'b'));
         h.shutdown();
@@ -819,7 +874,7 @@ mod tests {
     #[test]
     fn pane_closed_closes_and_compresses() {
         let root = tmp_root("closed");
-        let (h, join) = spawn_with_join(root.clone());
+        let (h, join, _notes) = spawn_rec(root.clone());
         send_grid(&h, T0, grid("p1", 1, 'a'));
         h.send_at(Msg::PaneClosed {
             t_ms: T0 + 10,
@@ -841,7 +896,7 @@ mod tests {
         let stale = old_dir.join("951.srr.gz");
         fs::write(&stale, b"junk").unwrap();
 
-        let (h, join) = spawn_with_join(root.clone());
+        let (h, join, _notes) = spawn_rec(root.clone());
         // A rotation triggers a prune pass.
         send_grid(&h, T0, grid("p1", 1, 'a'));
         send_grid(&h, T0 + MS_PER_HOUR, grid("p1", 2, 'b'));
@@ -850,6 +905,92 @@ mod tests {
 
         assert!(!stale.exists(), "aged segment must be pruned");
         assert!(root.join("p1").join("1001.srr").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn activity_notes_stamp_on_content_change_and_throttle() {
+        let root = tmp_root("notes");
+        let (h, join, notes) = spawn_rec(root.clone());
+        // First frame: no previous base → not "output" (attach/relaunch must
+        // not reset the clock).
+        send_grid(&h, T0, grid("p1", 1, 'a'));
+        // Real content change → note.
+        send_grid(&h, T0 + 100, grid("p1", 2, 'b'));
+        // Another change inside the 5s throttle window → no second note.
+        send_grid(&h, T0 + 200, grid("p1", 3, 'c'));
+        // Identical frame → no record, no note.
+        send_grid(&h, T0 + NOTE_EVERY_MS + 100, grid("p1", 4, 'c'));
+        // Change after the window → note again.
+        send_grid(&h, T0 + NOTE_EVERY_MS + 200, grid("p1", 5, 'd'));
+        h.shutdown();
+        join.join().unwrap();
+
+        let got: Vec<ActivityNote> = notes.try_iter().collect();
+        assert_eq!(got, vec![
+            ("p1".to_string(), T0 + 100),
+            ("p1".to_string(), T0 + NOTE_EVERY_MS + 200),
+        ]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn keyframe_replacing_damage_still_stamps_but_resize_does_not() {
+        let root = tmp_root("notes-kf");
+        let (h, join, notes) = spawn_rec(root.clone());
+        send_grid(&h, T0, grid("p1", 1, 'a'));
+        // Past the 10s keyframe cadence: the frame is written FULL, but the
+        // diff was non-empty, so it is still real output.
+        send_grid(&h, T0 + KEYFRAME_MS + 1, grid("p1", 2, 'b'));
+        // Resize: dims changed → FULL, and never counted as output.
+        let mut wide = grid("p1", 3, 'b');
+        wide.cols = 12;
+        wide.cells = vec![CellSnap::blank(); 36];
+        send_grid(&h, T0 + 2 * KEYFRAME_MS + 2, wide);
+        h.shutdown();
+        join.join().unwrap();
+
+        let got: Vec<ActivityNote> = notes.try_iter().collect();
+        assert_eq!(got, vec![("p1".to_string(), T0 + KEYFRAME_MS + 1)]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cursor_or_title_only_change_is_not_output() {
+        let root = tmp_root("notes-cursor");
+        let (h, join, notes) = spawn_rec(root.clone());
+        send_grid(&h, T0, grid("p1", 1, 'a'));
+        let mut moved = grid("p1", 2, 'a');
+        moved.cursor_col = 4;
+        send_grid(&h, T0 + 100, moved);
+        let mut retitled = grid("p1", 3, 'a');
+        retitled.cursor_col = 4;
+        retitled.title = Some("zsh".into());
+        send_grid(&h, T0 + 200, retitled);
+        h.shutdown();
+        join.join().unwrap();
+
+        assert!(
+            notes.try_iter().next().is_none(),
+            "cursor/title churn must not move the activity clock"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dead_note_receiver_does_not_kill_the_recorder() {
+        let root = tmp_root("notes-dead");
+        let (ntx, nrx) = mpsc::channel();
+        drop(nrx); // engine gone / recorder armed without a pump
+        let (h, join) = spawn_with_join(root.clone(), ntx);
+        send_grid(&h, T0, grid("p1", 1, 'a'));
+        send_grid(&h, T0 + 100, grid("p1", 2, 'b'));
+        h.shutdown();
+        join.join().expect("recorder must survive a dead notes receiver");
+
+        // Records still landed — recording is independent of the note channel.
+        let data = read_segment(&root, "p1", 1_000);
+        assert_eq!(records(&data).unwrap().count(), 2);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -865,7 +1006,7 @@ mod tests {
     #[test]
     fn send_after_thread_exit_is_silent() {
         let root = tmp_root("dead");
-        let (h, join) = spawn_with_join(root.clone());
+        let (h, join, _notes) = spawn_rec(root.clone());
         h.shutdown();
         join.join().unwrap();
         // Must not panic: recorder death is invisible to the engine.
