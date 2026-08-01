@@ -263,6 +263,7 @@ input:focus {
 
 /* ── sidebar: brand header ──────────────────────────────────────────── */
 .side-brand {
+  position: relative; /* the ✦ census popover lives here in the DOM */
   flex: 0 0 auto;
   height: var(--brand-h);
   display: flex;
@@ -272,10 +273,101 @@ input:focus {
   border-bottom: 1px solid var(--border);
 }
 .brand-mark {
-  color: var(--flame);
+  color: var(--flame-dim);
   font-size: 16px;
   line-height: 1;
+  padding: 2px 3px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  user-select: none;
+}
+.brand-mark:hover {
+  color: var(--flame);
+  background: var(--surface);
   text-shadow: 0 0 12px rgba(233, 160, 58, 0.28);
+}
+
+/* ✦ census popover — every GUI window attached to this daemon. */
+.gui-menu {
+  /* fixed, not absolute: the card is wider than the 232px rail and #sidebar
+     clips its overflow. Anchored to the same spot the header would give it. */
+  position: fixed;
+  left: 8px;
+  top: calc(var(--topbar-h) + var(--brand-h) - 4px);
+  z-index: 950;
+  width: 260px;
+  padding: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--flame-dim);
+  border-radius: var(--r);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  user-select: none;
+}
+.gui-menu-head {
+  padding: 2px 6px 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+.gui-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: var(--r-sm);
+}
+.gui-menu-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-row);
+  color: var(--text);
+}
+.gui-menu-count,
+.gui-menu-self {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+.gui-menu-kill {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.gui-menu-kill:hover {
+  color: var(--danger);
+  background: var(--surface);
+  border-color: var(--danger);
+}
+.gui-menu-sep {
+  height: 1px;
+  margin: 5px 6px;
+  background: var(--border);
+}
+.gui-menu-foot {
+  padding: 2px 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+.gui-menu-help {
+  cursor: pointer;
+}
+.gui-menu-help .gui-menu-label {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+.gui-menu-help:hover {
+  background: var(--surface);
+}
+.gui-menu-help:hover .gui-menu-label,
+.gui-menu-help:hover .gui-menu-count {
+  color: var(--flame);
 }
 .brand-name {
   flex: 1 1 auto;

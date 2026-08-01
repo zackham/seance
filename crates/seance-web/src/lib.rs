@@ -160,6 +160,17 @@ impl App {
                     ch.toast(&message);
                 }
             }
+            Applied::Kicked { by } => {
+                // Stop the reconnect loop and say why — a kicked window that
+                // silently reconnects defeats the ✦ census kill.
+                if let Some(c) = self.conn.borrow().as_ref() {
+                    c.shutdown();
+                }
+                if let Some(ch) = self.chrome.borrow_mut().as_mut() {
+                    ch.set_conn_status("closed remotely", false);
+                    ch.toast(&format!("this window was closed from {by}"));
+                }
+            }
         }
     }
 

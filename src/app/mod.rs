@@ -189,6 +189,8 @@ pub struct SeanceApp {
     quicklaunch_checked: Option<std::time::Instant>,
     /// Open quicklaunch create/edit modal (None = closed).
     quicklaunch_editor: Option<quicklaunch::QuickLaunchEditor>,
+    /// `✦` popover: census of the GUI windows attached to this daemon.
+    gui_menu_open: bool,
     /// Render-safe cache of daemon-side files (pad sidecars, phone binds,
     /// prompt library) — refreshed by a ~2s background loop.
     remote_cache: Arc<crate::remote_cache::RemoteCache>,
@@ -351,6 +353,7 @@ impl SeanceApp {
             quicklaunch_mtime: None,
             quicklaunch_checked: None,
             quicklaunch_editor: None,
+            gui_menu_open: false,
             remote_cache,
             render_probe: RenderProbe::default(),
         };
@@ -893,6 +896,13 @@ impl SeanceApp {
                     cx.notify();
                 }
             }
+            GuiEvent::Kicked { by } => {
+                // Closed from another GUI's ✦ popover — leave cleanly, no
+                // reconnect (the supervisor would just re-register us).
+                eprintln!("[seance gui] closed remotely by {by}");
+                self.client.disconnect();
+                cx.quit();
+            }
             GuiEvent::Error { message } => {
                 eprintln!("[seance gui] daemon error: {message}");
             }
@@ -1171,6 +1181,12 @@ impl SeanceApp {
 
         // ---- escape for chrome overlays only; else let terminal get it ----
         if key == "escape" {
+            if self.gui_menu_open {
+                self.gui_menu_open = false;
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
             if self.quicklaunch_editor.is_some() {
                 self.cancel_quicklaunch_editor(cx);
                 if let Some(slug) = self.active_slug.clone() {
@@ -2337,6 +2353,7 @@ impl Render for SeanceApp {
             )
             .children(self.render_palette(cx))
             .children(self.render_quicklaunch_editor(cx))
+            .children(self.render_gui_menu(cx))
             .children(match &self.drawer {
                 Drawer::Closed => None,
                 Drawer::Activity => Some(

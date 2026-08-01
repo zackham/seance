@@ -15,7 +15,9 @@
 //! A deliberate replica of `src/app/sidebar.rs`, `src/app/quicklaunch.rs` and
 //! the pane header in `src/app/chrome.rs`:
 //!
-//! * **sidebar** — 232px, `bg_elevated`, 44px brand header (`✦ seance` + `◈+`),
+//! * **sidebar** — 232px, `bg_elevated`, 44px brand header (`✦ seance` + `◈+`;
+//!   `✦` toggles the GUI-census popover — window list, kill-other-window,
+//!   version + grimoire),
 //!   workspace rows only (glyph `◆` selected / `◈` idle / pulsing `◆` while
 //!   working, `needs`/`done` text badges in their colors, hover `×` banish,
 //!   pane count, full-bleed selected fill, double-click inline rename, per-row
@@ -296,6 +298,15 @@ pub struct Chrome {
     /// Last selected workspace we scrolled into view (avoid scroll-jacking on
     /// unrelated rebuilds).
     last_scrolled_ws: Option<String>,
+
+    /// `✦` popover (GUI census) is open. Shared with its own listeners (they
+    /// close it) and survives a rebuild — the card is re-rendered under the
+    /// fresh brand header.
+    gui_menu_open: Rc<Cell<bool>>,
+    /// Popover-scoped listeners, replaced on every popover render.
+    gui_menu_clicks: ClickSink,
+    /// Document-level click-away dismisser, live only while the popover is up.
+    gui_menu_dismiss: Rc<RefCell<Option<ClickClosure>>>,
 }
 
 impl Chrome {
@@ -355,6 +366,9 @@ impl Chrome {
             kill_armed: Rc::new(RefCell::new(HashMap::new())),
             conn: ("connecting".to_string(), false),
             last_scrolled_ws: None,
+            gui_menu_open: Rc::new(Cell::new(false)),
+            gui_menu_clicks: Rc::new(RefCell::new(Vec::new())),
+            gui_menu_dismiss: Rc::new(RefCell::new(None)),
         })
     }
 
@@ -455,7 +469,7 @@ impl Chrome {
         let doc = self.doc.clone();
         self.sidebar.set_inner_html("");
 
-        self.build_brand(workspaces)?;
+        self.build_brand(state, workspaces)?;
 
         let list = mk(&doc, "div", "ws-list")?;
         self.sidebar.append_child(&list)?;
@@ -534,11 +548,14 @@ impl Chrome {
         Ok(())
     }
 
-    /// `✦ seance` + `◈+` (new empty workspace, named immediately).
-    fn build_brand(&mut self, workspaces: &[String]) -> Result<(), JsValue> {
+    /// `✦ seance` + `◈+` (new empty workspace, named immediately). The `✦`
+    /// glyph toggles the GUI-census popover.
+    fn build_brand(&mut self, state: &ClientState, workspaces: &[String]) -> Result<(), JsValue> {
         let doc = self.doc.clone();
         let head = mk(&doc, "div", "side-brand")?;
-        head.append_child(text_el(&doc, "span", "brand-mark", "✦")?.unchecked_ref())?;
+        let mark = text_el(&doc, "span", "brand-mark", "✦")?;
+        mark.set_attribute("title", "connected guis")?;
+        head.append_child(&mark)?;
         head.append_child(text_el(&doc, "span", "brand-name", "seance")?.unchecked_ref())?;
         let new_ws = text_el(&doc, "button", "brand-new", "◈+")?;
         new_ws.set_attribute("title", "new empty workspace (name it immediately)")?;
@@ -563,6 +580,57 @@ impl Chrome {
             actions.select_workspace(&name);
             *pending.borrow_mut() = Some(name);
         })?;
+
+        // ── ✦ census popover ────────────────────────────────────────────
+        let rows: Vec<WindowRow> = state
+            .windows
+            .iter()
+            .map(|w| (w.id.clone(), w.label.clone(), w.workspace_count))
+            .collect();
+        let self_id = state.window_id.clone();
+        {
+            let doc2 = doc.clone();
+            let head2 = head.clone();
+            let actions = self.actions.clone();
+            let open = self.gui_menu_open.clone();
+            let clicks = self.gui_menu_clicks.clone();
+            let dismiss = self.gui_menu_dismiss.clone();
+            let rows = rows.clone();
+            let self_id = self_id.clone();
+            bind_click(&mark, &mut self.structural, move |ev| {
+                ev.stop_propagation();
+                if open.get() {
+                    gui_menu_close(&open, &clicks, &dismiss);
+                    return;
+                }
+                open.set(true);
+                if let Err(e) = gui_menu_render(
+                    &doc2,
+                    &head2,
+                    &rows,
+                    self_id.as_deref(),
+                    &actions,
+                    &open,
+                    &clicks,
+                    &dismiss,
+                ) {
+                    log("chrome: gui menu render failed", &e);
+                }
+            })?;
+        }
+        // Survive the rebuild: re-render under the fresh header when open.
+        if self.gui_menu_open.get() {
+            gui_menu_render(
+                &doc,
+                &head,
+                &rows,
+                self_id.as_deref(),
+                &self.actions,
+                &self.gui_menu_open,
+                &self.gui_menu_clicks,
+                &self.gui_menu_dismiss,
+            )?;
+        }
         Ok(())
     }
 
@@ -788,8 +856,18 @@ impl Chrome {
             let main = mk(&doc, "div", "ws-main")?;
             main.append_child(text_el(&doc, "span", "ws-glyph idle", "◈")?.unchecked_ref())?;
             main.append_child(text_el(&doc, "span", "ws-name", &fw.workspace)?.unchecked_ref())?;
+            // Same activity clock as the local rail. The window label used to
+            // live here, but every row carried the SAME wide string ("education
+            // +42") and crushed the workspace name — the window is already
+            // named by the ✦ census popover.
             main.append_child(
-                text_el(&doc, "span", "ws-count", &fw.window_label)?.unchecked_ref(),
+                text_el(
+                    &doc,
+                    "span",
+                    "ws-count",
+                    &state.activity_label(&fw.workspace, self.now_ms()),
+                )?
+                .unchecked_ref(),
             )?;
             let pull = text_el(&doc, "button", "pull-btn", "pull")?;
             pull.set_attribute("title", &format!("pull «{}» here", fw.workspace))?;
@@ -2116,6 +2194,145 @@ fn host_render(doc: &Document, host: &HostStrip, actions: &Rc<dyn Actions>) {
     }
     let stale = std::mem::replace(&mut *host.clicks.borrow_mut(), fresh);
     drop_later(stale, Vec::new());
+}
+
+// ── ✦ census popover ────────────────────────────────────────────────────
+
+/// One window in the census: `(id, label, workspace_count)`.
+type WindowRow = (String, String, usize);
+
+/// Tear the popover down: drop the card, release the click-away listener and
+/// retire the popover-scoped closures. Safe to call from *inside* one of those
+/// closures — they're freed in a later task (`drop_later`).
+fn gui_menu_close(
+    open: &Rc<Cell<bool>>,
+    clicks: &ClickSink,
+    dismiss: &Rc<RefCell<Option<ClickClosure>>>,
+) {
+    open.set(false);
+    let doc = web_sys::window().and_then(|w| w.document());
+    if let Some(doc) = doc.as_ref() {
+        if let Ok(Some(card)) = doc.query_selector(".gui-menu") {
+            card.remove();
+        }
+    }
+    let mut stale: Vec<ClickClosure> = std::mem::take(&mut *clicks.borrow_mut());
+    if let Some(cb) = dismiss.borrow_mut().take() {
+        if let Some(doc) = doc.as_ref() {
+            let _ =
+                doc.remove_event_listener_with_callback("mousedown", cb.as_ref().unchecked_ref());
+        }
+        stale.push(cb);
+    }
+    drop_later(stale, Vec::new());
+}
+
+/// Build the popover under the brand header: one row per connected GUI window
+/// (label + circle count), a `kill` affordance for every window but this one
+/// (`CloseWindow` — the daemon unregisters it and the client quits on
+/// `Kicked`), then the version + grimoire footer.
+#[allow(clippy::too_many_arguments)]
+fn gui_menu_render(
+    doc: &Document,
+    host: &Element,
+    rows: &[WindowRow],
+    self_id: Option<&str>,
+    actions: &Rc<dyn Actions>,
+    open: &Rc<Cell<bool>>,
+    clicks: &ClickSink,
+    dismiss: &Rc<RefCell<Option<ClickClosure>>>,
+) -> Result<(), JsValue> {
+    // Any previous card (and its listeners) goes first.
+    if let Ok(Some(old)) = host.query_selector(".gui-menu") {
+        old.remove();
+    }
+    drop_later(std::mem::take(&mut *clicks.borrow_mut()), Vec::new());
+
+    let card = mk(doc, "div", "gui-menu")?;
+    card.append_child(text_el(doc, "div", "gui-menu-head", "connected guis")?.unchecked_ref())?;
+
+    for (id, label, count) in rows {
+        let row = mk(doc, "div", "gui-menu-row")?;
+        row.append_child(text_el(doc, "span", "gui-menu-label", label)?.unchecked_ref())?;
+        let circles = if *count == 1 {
+            "1 circle".to_string()
+        } else {
+            format!("{count} circles")
+        };
+        row.append_child(text_el(doc, "span", "gui-menu-count", &circles)?.unchecked_ref())?;
+        if Some(id.as_str()) == self_id {
+            row.append_child(
+                text_el(doc, "span", "gui-menu-self", "(this window)")?.unchecked_ref(),
+            )?;
+        } else {
+            let kill = text_el(doc, "button", "gui-menu-kill", "kill")?;
+            kill.set_attribute("title", &format!("close «{label}»"))?;
+            row.append_child(kill.unchecked_ref())?;
+            let actions = actions.clone();
+            let id = id.clone();
+            let open = open.clone();
+            let clicks2 = clicks.clone();
+            let dismiss2 = dismiss.clone();
+            bind_click(&kill, &mut clicks.borrow_mut(), move |ev| {
+                ev.stop_propagation();
+                actions.send(GuiRequest::CloseWindow {
+                    window: id.clone(),
+                });
+                gui_menu_close(&open, &clicks2, &dismiss2);
+            })?;
+        }
+        card.append_child(&row)?;
+    }
+
+    card.append_child(mk(doc, "div", "gui-menu-sep")?.unchecked_ref())?;
+    card.append_child(
+        text_el(
+            doc,
+            "div",
+            "gui-menu-foot",
+            concat!("seance ", env!("CARGO_PKG_VERSION")),
+        )?
+        .unchecked_ref(),
+    )?;
+
+    let help = mk(doc, "div", "gui-menu-row gui-menu-help")?;
+    help.append_child(text_el(doc, "span", "gui-menu-label", "grimoire")?.unchecked_ref())?;
+    help.append_child(text_el(doc, "span", "gui-menu-count", "?")?.unchecked_ref())?;
+    card.append_child(&help)?;
+    {
+        let actions = actions.clone();
+        let open = open.clone();
+        let clicks2 = clicks.clone();
+        let dismiss2 = dismiss.clone();
+        bind_click(&help, &mut clicks.borrow_mut(), move |ev| {
+            ev.stop_propagation();
+            actions.toggle_help();
+            gui_menu_close(&open, &clicks2, &dismiss2);
+        })?;
+    }
+
+    host.append_child(&card)?;
+
+    // Click-away. `.brand-mark` is excluded so pressing ✦ again reaches its own
+    // click handler and toggles cleanly instead of double-closing.
+    if dismiss.borrow().is_none() {
+        let open2 = open.clone();
+        let clicks2 = clicks.clone();
+        let dismiss2 = dismiss.clone();
+        let cb = Closure::wrap(Box::new(move |ev: MouseEvent| {
+            let inside = ev
+                .target()
+                .and_then(|t| t.dyn_into::<Element>().ok())
+                .and_then(|e| e.closest(".gui-menu, .brand-mark").ok().flatten())
+                .is_some();
+            if !inside {
+                gui_menu_close(&open2, &clicks2, &dismiss2);
+            }
+        }) as Box<dyn FnMut(MouseEvent)>);
+        doc.add_event_listener_with_callback("mousedown", cb.as_ref().unchecked_ref())?;
+        *dismiss.borrow_mut() = Some(cb);
+    }
+    Ok(())
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────

@@ -1493,6 +1493,23 @@ impl Engine {
                 self.unregister_gui(window_id);
                 None
             }
+            GuiRequest::CloseWindow { window } => {
+                if window == window_id {
+                    return Some(GuiEvent::Error {
+                        message: "close this window locally, not via the daemon".into(),
+                    });
+                }
+                // Tell the victim first (it must stop reconnecting), then
+                // unregister — workspaces reassign exactly like a Bye.
+                self.send_to(
+                    &window,
+                    GuiEvent::Kicked {
+                        by: window_id.to_string(),
+                    },
+                );
+                self.unregister_gui(&window);
+                None
+            }
             GuiRequest::CollectAll => {
                 for ws in self.all_workspace_names() {
                     self.workspace_window.insert(ws, window_id.to_string());

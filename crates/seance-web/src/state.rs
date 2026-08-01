@@ -27,6 +27,8 @@ pub enum Applied {
     Badges,
     /// Daemon error message to surface.
     Error { message: String },
+    /// This window was remote-closed (✦ popover) — stop reconnecting.
+    Kicked { by: String },
 }
 
 /// Per-pane co-presence state (from Agency events).
@@ -599,6 +601,7 @@ impl ClientState {
                 Applied::Badges
             }
             GuiEvent::Error { message } => Applied::Error { message },
+            GuiEvent::Kicked { by } => Applied::Kicked { by },
             GuiEvent::Ack { .. } | GuiEvent::FsResult { .. } => Applied::Nothing,
             GuiEvent::HostWidgets { widgets } => {
                 if let Ok(parsed) = serde_json::from_value::<Vec<HostWidget>>(widgets) {

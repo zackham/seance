@@ -8,6 +8,7 @@ use gpui_component::{
 };
 
 use crate::pane::Pane;
+use crate::runtime::protocol::GuiRequest;
 use crate::theme::SeancePalette;
 
 use super::actions::*;
@@ -19,6 +20,161 @@ use super::workspaces::WorkspaceAttention;
 use super::{RenameTarget, SeanceApp};
 
 impl SeanceApp {
+    /// `✦` popover: every GUI window attached to this daemon, with a kill
+    /// affordance for the others (`CloseWindow` — the daemon unregisters the
+    /// window and the client quits on `Kicked`). Anchored under the brand
+    /// header; a transparent full-window backdrop behind it eats the
+    /// click-away, same trick as the quicklaunch editor overlay.
+    pub(super) fn render_gui_menu(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.gui_menu_open {
+            return None;
+        }
+        let self_id = self.window_id.clone();
+        let rows: Vec<(String, String, usize)> = self
+            .windows
+            .iter()
+            .map(|w| (w.id.clone(), w.label.clone(), w.workspace_count))
+            .collect();
+        Some(
+            div()
+                .id("gui-menu-backdrop")
+                .absolute()
+                .inset_0()
+                // Swallow mouse events so a click-away doesn't also land in a
+                // terminal underneath (and steal focus).
+                .occlude()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gui_menu_open = false;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id("gui-menu-card")
+                        .absolute()
+                        .left(px(8.))
+                        .top(px(48.))
+                        .w(px(260.))
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .p_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(SeancePalette::flame_dim())
+                        .bg(SeancePalette::bg_elevated())
+                        // Clicks inside the card must not reach the backdrop.
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .px_1()
+                                .text_xs()
+                                .text_color(SeancePalette::text_faint())
+                                .child("connected guis"),
+                        )
+                        .children(rows.into_iter().map(|(id, label, count)| {
+                            let is_self = self_id.as_deref() == Some(id.as_str());
+                            let circles = if count == 1 {
+                                "1 circle".to_string()
+                            } else {
+                                format!("{count} circles")
+                            };
+                            div()
+                                .px_1()
+                                .py_0p5()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_sm()
+                                        .text_color(SeancePalette::text())
+                                        .child(SharedString::from(label)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(SeancePalette::text_faint())
+                                        .child(SharedString::from(circles)),
+                                )
+                                .child(if is_self {
+                                    div()
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(SeancePalette::text_faint())
+                                        .child("(this window)")
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .id(SharedString::from(format!("gui-kill-{id}")))
+                                        .flex_none()
+                                        .px_1p5()
+                                        .rounded_md()
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .text_color(SeancePalette::text_faint())
+                                        .hover(|s| {
+                                            s.text_color(SeancePalette::danger())
+                                                .bg(SeancePalette::surface())
+                                        })
+                                        .tooltip(tip("close that window"))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            let _ = this.client.send(GuiRequest::CloseWindow {
+                                                window: id.clone(),
+                                            });
+                                            this.gui_menu_open = false;
+                                            cx.notify();
+                                        }))
+                                        .child("kill")
+                                        .into_any_element()
+                                })
+                        }))
+                        .child(
+                            div()
+                                .my_1()
+                                .h(px(1.))
+                                .bg(SeancePalette::border()),
+                        )
+                        .child(
+                            div()
+                                .px_1()
+                                .text_xs()
+                                .text_color(SeancePalette::text_faint())
+                                .child(concat!("seance ", env!("CARGO_PKG_VERSION"))),
+                        )
+                        .child(
+                            div()
+                                .id("gui-menu-help")
+                                .px_1()
+                                .py_0p5()
+                                .rounded_md()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .cursor_pointer()
+                                .text_xs()
+                                .text_color(SeancePalette::text_dim())
+                                .hover(|s| {
+                                    s.text_color(SeancePalette::flame())
+                                        .bg(SeancePalette::surface())
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.gui_menu_open = false;
+                                    this.open_help_window(cx);
+                                    cx.notify();
+                                }))
+                                .child("grimoire")
+                                .child("?"),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Host-bridge strip(s) above the summon footer. Empty when no host or poll failed.
     ///
     /// Collapsed (default): only the current/selected account. Click expands
@@ -354,8 +510,21 @@ impl SeanceApp {
                     .border_color(SeancePalette::border())
                     .child(
                         div()
-                            .text_color(SeancePalette::flame())
+                            .id("gui-census")
+                            .px_1()
+                            .rounded_md()
+                            .text_color(SeancePalette::flame_dim())
                             .text_lg()
+                            .cursor_pointer()
+                            .hover(|s| {
+                                s.text_color(SeancePalette::flame())
+                                    .bg(SeancePalette::surface())
+                            })
+                            .tooltip(tip("connected guis"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.gui_menu_open = !this.gui_menu_open;
+                                cx.notify();
+                            }))
                             .child("✦"),
                     )
                     .child(

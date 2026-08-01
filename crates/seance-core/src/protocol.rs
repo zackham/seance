@@ -171,6 +171,11 @@ pub enum GuiRequest {
     },
     /// Pull every workspace into this window (other windows go empty).
     CollectAll,
+    /// Kick another GUI window off the daemon (✦ popover "kill"). Its
+    /// workspaces reassign exactly as if it had sent Bye.
+    CloseWindow {
+        window: String,
+    },
     AnswerAsk {
         id: String,
         answer: String,
@@ -358,6 +363,11 @@ pub enum GuiEvent {
     },
     Error {
         message: String,
+    },
+    /// This window was closed from another GUI (✦ popover). The client must
+    /// stop reconnecting and show why — reconnect would just re-register.
+    Kicked {
+        by: String,
     },
     /// Response to a GuiRequest that needs ack (spawn, etc.).
     Ack {

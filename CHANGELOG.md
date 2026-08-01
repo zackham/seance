@@ -15,6 +15,24 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]
 
+## [0.11.2] — 2026-08-01
+
+### Added
+
+- **✦ GUI census** (both GUIs): click the brand ✦ for a popover listing every
+  connected GUI window with a remote **kill** (`CloseWindow` → `Kicked`; the
+  kicked client stops reconnecting and says who closed it), plus version and
+  grimoire shortcuts. The buried-tab problem dies here.
+- `docs/design/SUBSCRIPTIONS.md` — the ownership→subscriptions design
+  (active/parked, multiplayer, PR links) awaiting a decision pass.
+
+### Changed
+
+- Sidebar sort matches the displayed clock: working band ordered by
+  when-work-started (stable, newest first); idle band by last output.
+  Web "elsewhere" rows show the activity time instead of the (identical)
+  host-window label.
+
 ## [0.11.1] — 2026-08-01
 
 ### Fixed
