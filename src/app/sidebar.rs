@@ -597,8 +597,8 @@ impl SeanceApp {
                                         .cursor_pointer()
                                         .on_click({
                                             let ws = workspace.clone();
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.kill_workspace(&ws, cx);
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.kill_workspace(&ws, window, cx);
                                             })
                                         })
                                         .tooltip(tip("banish workspace (kill all panes)"))

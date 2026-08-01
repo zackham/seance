@@ -1179,14 +1179,14 @@ impl SeanceApp {
                         });
                         if last_in_ws {
                             if let Some(w) = ws {
-                                self.kill_workspace(&w, cx);
+                                self.kill_workspace(&w, window, cx);
                             }
                         } else {
                             self.kill_active_pane(cx);
                         }
                     } else if let Some(ws) = self.selected_workspace.clone() {
                         if !self.panes.iter().any(|p| p.workspace == ws) {
-                            self.kill_workspace(&ws, cx);
+                            self.kill_workspace(&ws, window, cx);
                         }
                     }
                     cx.stop_propagation();
@@ -2104,8 +2104,8 @@ impl Render for SeanceApp {
             .on_action(cx.listener(|this, act: &ActKillSession, _, cx| {
                 this.kill_session(&act.0.clone(), cx);
             }))
-            .on_action(cx.listener(|this, act: &ActKillWorkspace, _, cx| {
-                this.kill_workspace(&act.0.clone(), cx);
+            .on_action(cx.listener(|this, act: &ActKillWorkspace, window, cx| {
+                this.kill_workspace(&act.0.clone(), window, cx);
             }))
             .on_action(cx.listener(|this, act: &ActMoveToWorkspace, _, cx| {
                 this.move_to_workspace(&act.slug.clone(), &act.workspace.clone(), cx);

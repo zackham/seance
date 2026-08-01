@@ -173,6 +173,32 @@ impl App {
         self.focused_pane()
     }
 
+    /// Kill a workspace; when it is the SELECTED one, pre-select the neighbor
+    /// below (above when last) in sidebar order so the human lands somewhere
+    /// predictable instead of the daemon's first-pane fallback.
+    pub fn kill_workspace_selecting_neighbor(self: &Rc<Self>, ws: &str) {
+        let neighbor = {
+            let st = self.state.borrow();
+            if st.selected_workspace.as_deref() == Some(ws) {
+                let order = st.workspaces();
+                order.iter().position(|w| w == ws).and_then(|idx| {
+                    order
+                        .get(idx + 1)
+                        .or_else(|| idx.checked_sub(1).and_then(|j| order.get(j)))
+                        .cloned()
+                })
+            } else {
+                None
+            }
+        };
+        self.send(&GuiRequest::KillWorkspace {
+            workspace: ws.to_string(),
+        });
+        if let Some(n) = neighbor {
+            self.select_workspace(&n);
+        }
+    }
+
     /// ctrl+shift+r: inline-rename the selected workspace in the sidebar.
     pub fn begin_selected_workspace_rename(&self) -> bool {
         let ws = match self.state.borrow().selected_workspace.clone() {
@@ -704,7 +730,7 @@ impl Actions for AppActions {
         self.0.send(&GuiRequest::RenameWorkspace { old: old.into(), new: new.into() });
     }
     fn kill_workspace(&self, ws: &str) {
-        self.0.send(&GuiRequest::KillWorkspace { workspace: ws.into() });
+        self.0.kill_workspace_selecting_neighbor(ws);
     }
     fn answer_ask(&self, id: &str, answer: &str) {
         self.0.send(&GuiRequest::AnswerAsk { id: id.into(), answer: answer.into() });
@@ -824,7 +850,7 @@ impl Actions for AppActions {
             drop(st);
             if last_in_ws {
                 if let Some(w) = ws {
-                    self.0.send(&GuiRequest::KillWorkspace { workspace: w });
+                    self.0.kill_workspace_selecting_neighbor(&w);
                 }
             } else {
                 self.0.send(&GuiRequest::Kill { pane: slug });
@@ -833,7 +859,7 @@ impl Actions for AppActions {
             let empty = !st.panes.iter().any(|p| p.workspace == ws);
             drop(st);
             if empty {
-                self.0.send(&GuiRequest::KillWorkspace { workspace: ws });
+                self.0.kill_workspace_selecting_neighbor(&ws);
             }
         }
     }

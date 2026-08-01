@@ -443,7 +443,30 @@ impl SeanceApp {
     }
 
     /// Kill every pane in a workspace, then drop the workspace itself.
-    pub(super) fn kill_workspace(&mut self, workspace: &str, cx: &mut Context<Self>) {
+    pub(super) fn kill_workspace(
+        &mut self,
+        workspace: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Banishing the ACTIVE circle: select the neighbor below (above when
+        // last) in sidebar order — not the daemon's arbitrary first-pane
+        // fallback — so the human lands somewhere predictable.
+        if self.selected_workspace.as_deref() == Some(workspace) {
+            let order = self.workspaces(cx);
+            if let Some(idx) = order.iter().position(|w| w == workspace) {
+                let neighbor = order
+                    .get(idx + 1)
+                    .or_else(|| idx.checked_sub(1).and_then(|j| order.get(j)))
+                    .cloned();
+                if let Some(n) = neighbor {
+                    let _ = self.client.kill_workspace(workspace);
+                    self.select_workspace(&n, window, cx);
+                    cx.notify();
+                    return;
+                }
+            }
+        }
         let _ = self.client.kill_workspace(workspace);
         cx.notify();
     }
