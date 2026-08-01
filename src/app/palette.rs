@@ -20,11 +20,13 @@ impl SeanceApp {
 
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = PaletteMode::Closed;
-        // Return keys to the active terminal after overlay.
+        // Return keys to the active terminal after overlay — eager, plus the
+        // render-time backstop for targets whose tiles aren't mounted yet.
         if let Some(slug) = self.active_slug.clone() {
             if let Some(pane) = self.panes.iter().find(|p| p.slug == slug) {
                 pane.focus_content(window, cx);
             }
+            self.pending_focus = Some(slug);
         }
         cx.notify();
     }

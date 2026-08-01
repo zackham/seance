@@ -887,8 +887,32 @@ impl SeanceApp {
     /// stay correct without the old 90%+ CPU tax from spinning TUIs.
     fn apply_grid_snap(&mut self, snap: GridSnapshot, cx: &mut Context<Self>) {
         let slug = snap.pane.clone();
-        if let Some(ws) = self.panes.iter().find(|p| p.slug == slug).map(|p| p.workspace.clone()) {
-            self.workspace_activity.insert(ws, crate::app::util::now_ms());
+        // Time-since-activity stamps ONLY on real content change. Attach /
+        // pull / relaunch / workspace-switch all re-push FULL frames with
+        // identical (or first-seen) content — those must not reset the clock.
+        let content_changed = self
+            .panes
+            .iter()
+            .find(|p| p.slug == slug)
+            .and_then(|p| p.remote_terminal())
+            .map(|rt| {
+                let prev = &rt.read(cx).snapshot;
+                // Same dims only: resize reflow is not output.
+                !prev.cells.is_empty()
+                    && prev.cols == snap.cols
+                    && prev.rows == snap.rows
+                    && prev.cells != snap.cells
+            })
+            .unwrap_or(false);
+        if content_changed {
+            if let Some(ws) = self
+                .panes
+                .iter()
+                .find(|p| p.slug == slug)
+                .map(|p| p.workspace.clone())
+            {
+                self.workspace_activity.insert(ws, crate::app::util::now_ms());
+            }
         }
         if !self.overview {
             let ws = self.selected_workspace.as_deref();
@@ -1654,7 +1678,13 @@ impl SeanceApp {
                     window.focus(&fh, cx);
                 }
             } else {
+                // Eager focus for the common case + a render-time backstop:
+                // when this navigation just switched workspaces, the target
+                // tile may not exist yet — pending_focus re-applies once it
+                // renders (ensure_keyboard_focus), killing the recurring
+                // "jumped but can't type until I click" class.
                 pane.focus_content(window, cx);
+                self.pending_focus = Some(slug.to_string());
             }
         }
         cx.notify();
@@ -1997,6 +2027,7 @@ impl SeanceApp {
             let _ = self.client.set_focus(Some(slug.to_string()), Some(ws));
         }
         self.focus_pane_if_possible(slug, cx);
+        self.pending_focus = Some(slug.to_string());
         let _ = window;
         cx.notify();
     }

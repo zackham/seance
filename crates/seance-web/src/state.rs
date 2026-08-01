@@ -380,8 +380,21 @@ impl ClientState {
             }
             GuiEvent::Grid(snap) => {
                 let pane = snap.pane.clone();
+                let changed = self
+                    .grids
+                    .get(&pane)
+                    .is_some_and(|prev| {
+                        // Same dims only: a resize reflow re-renders everything
+                        // without any real output.
+                        !prev.cells.is_empty()
+                            && prev.cols == snap.cols
+                            && prev.rows == snap.rows
+                            && prev.cells != snap.cells
+                    });
                 self.grids.insert(pane.clone(), snap);
-                self.note_pane_output(&pane, now_ms);
+                if changed {
+                    self.note_pane_output(&pane, now_ms);
+                }
                 Applied::Grid { pane }
             }
             GuiEvent::GridBin { pane, data_b64 } => {
@@ -392,8 +405,23 @@ impl ClientState {
                 let base = self.grids.get(&pane);
                 match decode_grid_bin_onto(&data, base) {
                     Ok(snap) => {
+                        // Stamp only real content change — full re-pushes on
+                        // attach/pull must not reset the activity clock.
+                        let changed = self
+                            .grids
+                            .get(&pane)
+                            .is_some_and(|prev| {
+                        // Same dims only: a resize reflow re-renders everything
+                        // without any real output.
+                        !prev.cells.is_empty()
+                            && prev.cols == snap.cols
+                            && prev.rows == snap.rows
+                            && prev.cells != snap.cells
+                    });
                         self.grids.insert(pane.clone(), snap);
-                        self.note_pane_output(&pane, now_ms);
+                        if changed {
+                            self.note_pane_output(&pane, now_ms);
+                        }
                         Applied::Grid { pane }
                     }
                     Err(_) => Applied::NeedRefresh { pane },
