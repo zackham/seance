@@ -513,7 +513,13 @@ fn other_gui_running() -> bool {
         if pid == self_pid {
             continue;
         }
-        if crate::sysopen::process_cmdline(pid).contains("daemon") {
+        // Only a bare `seance` invocation is a GUI. Anything with a
+        // subcommand (`daemon`, `web`, `restart-gui`, `ctl`, …) is not —
+        // under the 0.11 ownership model miscounting was masked by the
+        // daemon's sole-window vacuum, but with subscriptions an Attach as
+        // "second window" means a blank sidebar, so the check must be exact.
+        let cmdline = crate::sysopen::process_cmdline(pid);
+        if cmdline.split_whitespace().nth(1).is_some() {
             continue;
         }
         return true;
