@@ -34,6 +34,7 @@ mod layout;
 mod overview;
 mod pads;
 mod palette;
+mod prboard;
 mod prlinks;
 mod quicklaunch;
 mod sidebar;
@@ -208,6 +209,8 @@ pub struct SeanceApp {
     pr_links: std::collections::HashMap<String, Vec<seance_core::protocol::PrLink>>,
     /// Header-chip popover listing every PR link of the selected circle.
     pr_menu_open: bool,
+    /// Full-content PR board overlay (sidebar `PRs (N)` button).
+    pr_board: bool,
     /// Render-safe cache of daemon-side files (pad sidecars, phone binds,
     /// prompt library) — refreshed by a ~2s background loop.
     remote_cache: Arc<crate::remote_cache::RemoteCache>,
@@ -391,6 +394,7 @@ impl SeanceApp {
             gui_menu_open: false,
             pr_links: std::collections::HashMap::new(),
             pr_menu_open: false,
+            pr_board: false,
             remote_cache,
             render_probe: RenderProbe::default(),
         };
@@ -1249,6 +1253,11 @@ impl SeanceApp {
             }
             if self.overview {
                 self.set_overview(false, cx);
+                cx.stop_propagation();
+                return;
+            }
+            if self.pr_board {
+                self.set_pr_board(false, cx);
                 cx.stop_propagation();
                 return;
             }
@@ -2388,6 +2397,10 @@ impl Render for SeanceApp {
             .children(
                 self.overview
                     .then(|| self.render_overview(cx).into_any_element()),
+            )
+            .children(
+                (self.pr_board && !self.overview)
+                    .then(|| self.render_pr_board(cx).into_any_element()),
             )
             .children(self.render_palette(cx))
             .children(self.render_quicklaunch_editor(cx))

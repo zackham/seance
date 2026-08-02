@@ -852,6 +852,9 @@ impl SeanceApp {
                     // ownership model; phase 2 puts the parked group here.
                     .child(div().id("sidebar-empty-hit").flex_1().min_h(px(48.)).w_full())
             })
+            // `PRs (N)` sweep button — sits just above the quicklaunch strip so
+            // it reads as a rail-wide affordance, not a per-circle one.
+            .children(self.render_pr_board_button(cx))
             .child(self.render_quicklaunch(cx))
             .child(self.render_host_sidebar(cx))
             .child(

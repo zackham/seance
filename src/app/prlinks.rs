@@ -50,16 +50,15 @@ fn link_color(link: &PrLink) -> gpui::Hsla {
     }
 }
 
-/// `#123 label` chip text.
-fn chip_label(link: &PrLink) -> String {
-    let num = pr_number(&link.url)
-        .map(|n| format!("#{n}"))
-        .unwrap_or_else(|| "PR".into());
+/// `repo#123 label` chip text — org-prefixed only when the client's current
+/// link set spans more than one org.
+fn chip_label(link: &PrLink, with_org: bool) -> String {
+    let head = super::prboard::repo_ref(&link.url, with_org);
     let label = link.status.as_ref().map(|s| s.label.as_str()).unwrap_or("");
     if label.is_empty() {
-        num
+        head
     } else {
-        format!("{num} {label}")
+        format!("{head} {label}")
     }
 }
 
@@ -67,6 +66,17 @@ impl SeanceApp {
     /// This window's mirror of the daemon-owned link list for `ws`.
     pub(super) fn pr_links_for(&self, ws: &str) -> &[PrLink] {
         self.pr_links.get(ws).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Does this client's whole link set span >1 github org? Decides whether
+    /// chip/popover/board refs carry the `org/` prefix.
+    pub(super) fn pr_links_span_orgs(&self) -> bool {
+        super::prboard::spans_multiple_orgs(
+            self.pr_links
+                .values()
+                .flat_map(|v| v.iter())
+                .map(|l| l.url.as_str()),
+        )
     }
 
     /// Header strip: chip for the selected workspace's most recent PR link,
@@ -81,6 +91,7 @@ impl SeanceApp {
             return div().flex_none().into_any_element();
         };
         let count = links.len();
+        let with_org = self.pr_links_span_orgs();
         let url = latest.url.clone();
         let open_url = url.clone();
         let expanded = self.pr_menu_open;
@@ -112,7 +123,7 @@ impl SeanceApp {
                     .on_click(cx.listener(move |_this, _, _, _| {
                         crate::sysopen::open_detached(&open_url);
                     }))
-                    .child(chip_label(latest)),
+                    .child(chip_label(latest, with_org)),
             );
         if count > 1 {
             row = row.child(
@@ -162,9 +173,9 @@ impl SeanceApp {
                         crate::sysopen::open_detached(&target);
                     }))
                     .child(if state.is_empty() {
-                        chip_label(l)
+                        chip_label(l, with_org)
                     } else {
-                        format!("{} · {state}", chip_label(l))
+                        format!("{} · {state}", chip_label(l, with_org))
                     })
                     .into_any_element()
             })
@@ -282,14 +293,15 @@ mod tests {
     }
 
     #[test]
-    fn chip_label_falls_back_without_a_poller_label() {
+    fn chip_label_carries_repo_and_falls_back_without_a_poller_label() {
         let mut l = link("https://github.com/o/r/pull/42", Some("needs"));
-        assert_eq!(chip_label(&l), "#42 CI ✗");
+        assert_eq!(chip_label(&l, false), "r#42 CI ✗");
+        assert_eq!(chip_label(&l, true), "o/r#42 CI ✗");
         l.status.as_mut().unwrap().label.clear();
-        assert_eq!(chip_label(&l), "#42");
+        assert_eq!(chip_label(&l, false), "r#42");
         assert_eq!(
-            chip_label(&link("https://github.com/o/r/pull/42", None)),
-            "#42"
+            chip_label(&link("https://github.com/o/r/pull/42", None), false),
+            "r#42"
         );
     }
 }

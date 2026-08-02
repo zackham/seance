@@ -25,6 +25,7 @@ pub mod help;
 pub mod input;
 pub mod keymap;
 pub mod menus;
+pub mod pr_board;
 pub mod probe;
 pub mod renderer;
 pub mod replay;
@@ -54,6 +55,13 @@ fn document() -> web_sys::Document {
 
 fn now_ms() -> f64 {
     window().performance().map(|p| p.now()).unwrap_or(0.0)
+}
+
+/// `now` in the DAEMON's unix-ms domain — the clock every PR stamp on the wire
+/// uses. Local clocks live in `performance.now()`; `clock_offset_ms` is the
+/// boot-time difference (0 in tests, so this is identity there).
+fn now_unix_ms(state: &state::ClientState) -> f64 {
+    now_ms() + state.clock_offset_ms
 }
 
 /// One pane's client-side render context.
@@ -308,7 +316,7 @@ impl App {
     /// belongs to the PTY. Order mirrors native: menu > help > activity >
     /// zoom > selection.
     pub fn escape_topmost(&self) -> bool {
-        if menus::close_menu() || help::close() || activity::close() {
+        if menus::close_menu() || help::close() || activity::close() || pr_board::close() {
             return true;
         }
         {
@@ -487,6 +495,7 @@ impl App {
                 ch.update_badges(&st);
             }
             activity::refresh(&st);
+            pr_board::refresh(&st, now_unix_ms(&st));
         }
         self.sync_sizes();
         self.paint();
@@ -1022,6 +1031,12 @@ impl Actions for AppActions {
     fn toggle_activity(&self) {
         let st = self.0.state.borrow();
         activity::toggle(&st);
+    }
+
+    fn toggle_pr_board(&self) {
+        let actions: Rc<dyn Actions> = Rc::new(AppActions(Rc::clone(&self.0)));
+        let st = self.0.state.borrow();
+        pr_board::toggle(&st, now_unix_ms(&st), actions);
     }
 
     fn fs_call(

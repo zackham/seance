@@ -477,6 +477,7 @@ impl Chrome {
             return Ok(());
         };
         let doc = self.doc.clone();
+        let show_org = crate::pr_board::org_span_multi(state);
         let status = latest.status.clone();
         let att = status.as_ref().and_then(|s| s.attention.as_deref());
         let class = match att {
@@ -484,7 +485,7 @@ impl Chrome {
             Some("done") => "pr-chip done",
             _ => "pr-chip",
         };
-        let chip = text_el(&doc, "button", class, &pr_chip_text(&latest))?;
+        let chip = text_el(&doc, "button", class, &pr_chip_text(&latest, show_org))?;
         chip.set_id("pr-chip");
         chip.set_attribute("title", &latest.url)?;
         self.topbar.append_child(&chip)?;
@@ -498,7 +499,7 @@ impl Chrome {
             let w = ws.to_string();
             bind_ctx(&chip, &mut self.structural, move |ev| {
                 ev.prevent_default();
-                open_pr_menu(&actions, &w, &all, &ev);
+                open_pr_menu(&actions, &w, &all, show_org, &ev);
             })?;
         }
         if links.len() > 1 {
@@ -509,7 +510,7 @@ impl Chrome {
             let actions = self.actions.clone();
             let w = ws.to_string();
             bind_click(&more, &mut self.structural, move |ev| {
-                open_pr_menu(&actions, &w, &links, &ev);
+                open_pr_menu(&actions, &w, &links, show_org, &ev);
             })?;
         }
         Ok(())
@@ -560,7 +561,7 @@ impl Chrome {
 
         self.build_quicklaunch()?;
         self.build_host()?;
-        self.build_footer()?;
+        self.build_footer(state)?;
         Ok(())
     }
 
@@ -1066,8 +1067,23 @@ impl Chrome {
 
     // ── footer ──────────────────────────────────────────────────────────
 
-    fn build_footer(&mut self) -> Result<(), JsValue> {
+    fn build_footer(&mut self, state: &ClientState) -> Result<(), JsValue> {
         let doc = self.doc.clone();
+
+        // Sweep affordance: one visible button over every circle's PR links.
+        // Hidden entirely when there is nothing open — no zero-state noise.
+        let open_prs = crate::pr_board::open_count(state);
+        if open_prs > 0 {
+            let board_btn = text_el(&doc, "button", "foot-prs", &format!("PRs ({open_prs})"))?;
+            board_btn.set_id("pr-board-btn");
+            board_btn.set_attribute("title", "PR board — every circle's open PRs")?;
+            self.sidebar.append_child(&board_btn)?;
+            let actions = self.actions.clone();
+            bind_click(&board_btn, &mut self.structural, move |_| {
+                actions.toggle_pr_board()
+            })?;
+        }
+
         let footer = mk(&doc, "div", "side-footer")?;
 
         let summon = text_el(&doc, "button", "foot-summon", "+ summon")?;
@@ -2386,32 +2402,41 @@ fn need(doc: &Document, id: &str) -> Result<Element, JsValue> {
 }
 
 /// `#123 approved ✓` (label omitted when the poller hasn't spoken yet).
-fn pr_chip_text(link: &PrLink) -> String {
-    let num = crate::state::pr_number(&link.url)
-        .map(|n| format!("#{n}"))
-        .unwrap_or_else(|| "PR".to_string());
+/// `repo#123 label` — the org prefix (`org/repo#123`) appears only when this
+/// client's links span more than one org (`show_org`), so the common
+/// single-org case stays short.
+fn pr_chip_text(link: &PrLink, show_org: bool) -> String {
+    let head = crate::pr_board::pr_head(&link.url, show_org);
     let label = link.status.as_ref().map(|s| s.label.trim()).unwrap_or("");
     if label.is_empty() {
-        num
+        head
     } else {
-        format!("{num} {label}")
+        format!("{head} {label}")
     }
 }
 
 /// New tab, never navigating away from a live session.
-fn open_url(url: &str) {
+pub(crate) fn open_url(url: &str) {
     if let Some(win) = web_sys::window() {
         let _ = win.open_with_url_and_target(url, "_blank");
     }
 }
 
 /// All links for the circle, each clickable, plus the clear affordance.
-fn open_pr_menu(actions: &Rc<dyn Actions>, ws: &str, links: &[PrLink], ev: &MouseEvent) {
+fn open_pr_menu(
+    actions: &Rc<dyn Actions>,
+    ws: &str,
+    links: &[PrLink],
+    show_org: bool,
+    ev: &MouseEvent,
+) {
     let mut entries: Vec<MenuEntry> = Vec::new();
     // Most recent first in the list (the chip's link on top).
     for link in links.iter().rev() {
         let url = link.url.clone();
-        entries.push(MenuEntry::item(pr_chip_text(link), move || open_url(&url)));
+        entries.push(MenuEntry::item(pr_chip_text(link, show_org), move || {
+            open_url(&url)
+        }));
     }
     entries.push(MenuEntry::Separator);
     {

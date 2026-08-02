@@ -67,6 +67,8 @@ pub trait Actions {
     fn toggle_zoom(&self, slug: &str);
     fn toggle_help(&self);
     fn toggle_activity(&self);
+    /// Toggle the PR board sweep overlay (`PRs (N)` in the sidebar footer).
+    fn toggle_pr_board(&self);
     /// Daemon fs-bridge call (quicklaunch config, host select, …). Callback
     /// may never fire if the socket drops mid-flight — tolerate silence.
     fn fs_call(

@@ -1273,3 +1273,170 @@ input:focus {
     transition: none !important;
   }
 }
+
+/* ── PR board: the circle-first sweep over every circle's PR links ──────
+   Opener sits just above the sidebar footer (`#pr-board-btn`, hidden when
+   nothing is open); the overlay itself is the grimoire pattern — dimmed
+   viewport, one centered card, backdrop/✕/escape all close. */
+#pr-board-btn {
+  flex: 0 0 auto;
+  margin: 0 8px 6px;
+  padding: 5px 10px;
+  border-radius: var(--r);
+  font-size: var(--fs-row);
+  text-align: left;
+  color: var(--flame);
+  background: var(--surface);
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+#pr-board-btn:hover {
+  background: var(--border);
+  border-color: var(--flame-dim);
+}
+#pr-board {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+#pr-board-card {
+  display: flex;
+  flex-direction: column;
+  width: min(820px, 92vw);
+  max-height: 82vh;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+#pr-board-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+#pr-board-head .prb-title {
+  color: var(--text);
+  font-weight: 600;
+}
+#pr-board-counts {
+  color: var(--text-faint);
+}
+#pr-board-head .prb-hspacer {
+  flex: 1 1 auto;
+}
+#pr-board-close {
+  cursor: pointer;
+  user-select: none;
+  padding: 0 4px;
+  border-radius: var(--r-sm);
+  color: var(--text-faint);
+}
+#pr-board-close:hover {
+  color: var(--flame);
+  background: var(--surface);
+}
+#pr-board-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 0 12px;
+}
+.prb-circle {
+  padding: 2px 0 6px;
+}
+.prb-circle-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 12px 3px;
+  cursor: pointer;
+}
+.prb-circle-head:hover .prb-circle-name {
+  color: var(--flame);
+}
+.prb-circle-name {
+  color: var(--text);
+  font-weight: 600;
+}
+.prb-circle-needs {
+  color: var(--violet);
+}
+.prb-circle-state {
+  color: var(--text-faint);
+}
+.prb-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 12px 3px 22px;
+  cursor: pointer;
+}
+.prb-row:hover {
+  background: var(--surface);
+}
+.prb-head {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.prb-row.prb-needs .prb-head {
+  color: var(--violet);
+}
+.prb-row.prb-done-att .prb-head {
+  color: var(--success);
+}
+.prb-row.prb-muted {
+  opacity: 0.55;
+}
+.prb-draft,
+.prb-state,
+.prb-label,
+.prb-also,
+.prb-last,
+.prb-age {
+  color: var(--text-faint);
+}
+.prb-ci-pass {
+  color: var(--success);
+}
+.prb-ci-fail {
+  color: var(--danger, #E06C6C);
+}
+.prb-ci-running {
+  color: var(--text-dim);
+}
+.prb-review-approved {
+  color: var(--success);
+}
+.prb-review-changes {
+  color: var(--danger, #E06C6C);
+}
+.prb-review-required {
+  color: var(--text-dim);
+}
+.prb-spacer {
+  flex: 1 1 auto;
+}
+.prb-stale-mark {
+  color: var(--flame);
+  border: 1px solid var(--flame-dim);
+  border-radius: var(--r-sm);
+  padding: 0 4px;
+}
+.prb-age {
+  font-variant-numeric: tabular-nums;
+  min-width: 28px;
+  text-align: right;
+}
+.prb-empty {
+  padding: 16px 14px;
+  color: var(--text-faint);
+}
