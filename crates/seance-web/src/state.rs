@@ -10,6 +10,8 @@ use base64::Engine as _;
 use seance_core::protocol::{AskInfo, GuiEvent, PaneInfo, StatusInfo, WindowInfo};
 use seance_core::snapshot::{decode_grid_bin_onto, GridSnapshot};
 
+use crate::subs::SubPrefs;
+
 /// What a folded event dirtied.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Applied {
@@ -52,10 +54,13 @@ pub struct ClientState {
     pub agency: HashMap<String, AgencyState>,
     pub window_id: Option<String>,
     pub windows: Vec<WindowInfo>,
-    /// This connection's subscription set (daemon order). State arrives
-    /// GLOBAL and is filtered to these at ingest — the parked group is a
-    /// later phase.
+    /// This connection's subscription set (daemon order). State arrives and is
+    /// KEPT global; the sidebar splits it into active/parked from [`subs`].
     pub subscriptions: Vec<String>,
+    /// Per-GUI active/parked split (localStorage-backed; see [`crate::subs`]).
+    pub subs: SubPrefs,
+    /// Set when a fold changed [`subs`] — the app persists and clears it.
+    pub subs_dirty: bool,
     /// Who last wrote stdin per pane (`human` / `agent:x` / `cli` / `propose`).
     pub input_origin: HashMap<String, String>,
     /// Monotonic revision bumped on every Structure-level change.
@@ -229,6 +234,42 @@ impl ClientState {
             key(a).cmp(&key(b)).then_with(|| a.cmp(b))
         });
         out
+    }
+
+    /// Sidebar main list: [`workspaces`](Self::workspaces) restricted to the
+    /// active set. Ctrl+PageUp/Down cycles exactly this.
+    pub fn active_workspaces(&self) -> Vec<String> {
+        self.workspaces()
+            .into_iter()
+            .filter(|w| self.subs.is_active(w))
+            .collect()
+    }
+
+    /// The collapsed "parked (N)" group: everything else, same sort.
+    pub fn parked_workspaces(&self) -> Vec<String> {
+        self.workspaces()
+            .into_iter()
+            .filter(|w| !self.subs.is_active(w))
+            .collect()
+    }
+
+    /// Row badge including the parked-only rule: a circle this GUI has never
+    /// seen (a `ctl` spawn with no GUI attribution) badges `needs` until it is
+    /// first selected.
+    pub fn row_attention(&self, ws: &str) -> Option<Attention> {
+        if !self.subs.has_seen(ws) {
+            return Some(Attention::NeedsHuman);
+        }
+        self.workspace_attention(ws)
+    }
+
+    /// Highest-priority badge among the parked rows — what the collapsed
+    /// header dot shows.
+    pub fn parked_attention(&self) -> Option<Attention> {
+        self.parked_workspaces()
+            .iter()
+            .filter_map(|w| self.row_attention(w))
+            .max_by_key(|a| a.priority())
     }
 
     /// Observed live-busy: braille title spinner, or agent-driven working
@@ -421,15 +462,9 @@ impl ClientState {
                 subscriptions,
                 workspace_meta,
             } => {
-                // State is global from 0.12: keep only what this connection
-                // subscribes to, so the UI looks exactly like it did under
-                // ownership. `workspace_meta` stays global (name/clock census).
-                let subs: std::collections::HashSet<String> =
-                    subscriptions.iter().cloned().collect();
-                let panes: Vec<PaneInfo> = panes
-                    .into_iter()
-                    .filter(|p| subs.contains(&p.workspace))
-                    .collect();
+                // State is global from 0.12 and STAYS global: the sidebar
+                // renders the active list plus a parked group built from the
+                // same lists, so nothing is dropped at ingest.
                 // Drop grids for panes that no longer exist (reattach after
                 // daemon restart must not paint ghosts).
                 let live: std::collections::HashSet<String> =
@@ -438,23 +473,9 @@ impl ClientState {
                 self.panes = panes;
                 self.selected_workspace = selected_workspace;
                 self.focused_pane = focused_pane;
-                self.extra_workspaces = extra_workspaces
-                    .into_iter()
-                    .filter(|w| subs.contains(w))
-                    .collect();
-                self.workspace_order = workspace_order
-                    .into_iter()
-                    .filter(|w| subs.contains(w))
-                    .collect();
-                self.asks = asks
-                    .into_iter()
-                    .filter(|a| {
-                        a.workspace
-                            .as_ref()
-                            .map(|w| subs.contains(w))
-                            .unwrap_or(true)
-                    })
-                    .collect();
+                self.extra_workspaces = extra_workspaces;
+                self.workspace_order = workspace_order;
+                self.asks = asks;
                 self.statuses = statuses
                     .into_iter()
                     .filter(|s| live.contains(&s.slug))
@@ -469,6 +490,17 @@ impl ClientState {
                 for m in workspace_meta {
                     self.merge_activity(&m.workspace, m.last_output_ms);
                     self.merge_touch(&m.workspace, m.last_touch_ms);
+                }
+                // Active/parked bookkeeping: first State seeds the list
+                // (migration), every State folds daemon-side auto-subscribes
+                // in and prunes circles that are gone.
+                let known = self.workspaces();
+                let subscriptions = self.subscriptions.clone();
+                if self.subs.seeded {
+                    self.subs_dirty |= self.subs.reconcile(&subscriptions, &known);
+                } else {
+                    self.subs.seed(&subscriptions, &known);
+                    self.subs_dirty = true;
                 }
                 self.structure_rev += 1;
                 Applied::Structure
@@ -768,6 +800,107 @@ mod tests {
         // unix 1_700_000_005_000 → perf 15_000.
         assert_eq!(st.workspace_activity.get("lab"), Some(&15_000.0));
         assert_eq!(st.activity_label("lab", 25_000.0), "10s");
+    }
+
+    /// Two circles, only `lab` subscribed — the 0.12 global State shape.
+    fn global_state_event() -> GuiEvent {
+        serde_json::from_str(
+            r#"{"event":"state","panes":[
+                {"kind":"term","name":"w","slug":"w-1","workspace":"lab",
+                 "command":"bash","cwd":"/","tiled":true,"running":true,
+                 "title":null,"scratchpad":"/tmp/p"},
+                {"kind":"term","name":"r","slug":"r-1","workspace":"raid",
+                 "command":"bash","cwd":"/","tiled":true,"running":true,
+                 "title":null,"scratchpad":"/tmp/r"}],
+                "selected_workspace":"lab","focused_pane":"w-1",
+                "extra_workspaces":[],"workspace_order":["lab","raid"],
+                "asks":[],"statuses":[],"subscriptions":["lab"]}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn global_state_is_kept_whole_not_filtered_to_subscriptions() {
+        let mut st = ClientState::default();
+        st.apply_event(global_state_event(), 0.0);
+        // Both circles and both panes survive ingest — the split is a render
+        // concern now, not an ingest filter.
+        assert_eq!(st.panes.len(), 2);
+        assert_eq!(st.workspaces(), vec!["lab".to_string(), "raid".to_string()]);
+    }
+
+    #[test]
+    fn first_state_seeds_the_active_list_from_the_daemon_set() {
+        let mut st = ClientState::default();
+        st.apply_event(global_state_event(), 0.0);
+        assert!(st.subs_dirty, "seeding must be persisted");
+        assert_eq!(st.active_workspaces(), vec!["lab".to_string()]);
+        assert_eq!(st.parked_workspaces(), vec!["raid".to_string()]);
+        // Migration marks pre-existing circles seen: no retroactive `needs`.
+        assert_eq!(st.row_attention("raid"), None);
+        assert_eq!(st.parked_attention(), None);
+    }
+
+    /// `lab` only, subscribed — the pre-existing world before a ctl spawn.
+    fn lab_only_event() -> GuiEvent {
+        serde_json::from_str(
+            r#"{"event":"state","panes":[
+                {"kind":"term","name":"w","slug":"w-1","workspace":"lab",
+                 "command":"bash","cwd":"/","tiled":true,"running":true,
+                 "title":null,"scratchpad":"/tmp/p"}],
+                "selected_workspace":"lab","focused_pane":"w-1",
+                "extra_workspaces":[],"workspace_order":["lab"],
+                "asks":[],"statuses":[],"subscriptions":["lab"]}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ctl_spawned_circle_lands_parked_and_needs_human() {
+        let mut st = ClientState::default();
+        // Seed with `lab` alone…
+        st.apply_event(lab_only_event(), 0.0);
+        assert_eq!(st.parked_workspaces(), Vec::<String>::new());
+        // …then `raid` appears with nobody subscribed to it.
+        st.subs_dirty = false;
+        st.apply_event(global_state_event(), 0.0);
+        assert_eq!(st.parked_workspaces(), vec!["raid".to_string()]);
+        assert_eq!(st.row_attention("raid"), Some(Attention::NeedsHuman));
+        assert_eq!(st.parked_attention(), Some(Attention::NeedsHuman));
+        // First select acknowledges it.
+        st.subs.mark_seen("raid");
+        assert_eq!(st.row_attention("raid"), None);
+    }
+
+    #[test]
+    fn parking_moves_a_circle_between_the_two_lists() {
+        let mut st = ClientState::default();
+        st.apply_event(global_state_event(), 0.0);
+        st.subs.activate("raid");
+        assert_eq!(
+            st.active_workspaces(),
+            vec!["lab".to_string(), "raid".to_string()]
+        );
+        assert!(st.parked_workspaces().is_empty());
+        st.subs.park("lab");
+        assert_eq!(st.active_workspaces(), vec!["raid".to_string()]);
+        assert_eq!(st.parked_workspaces(), vec!["lab".to_string()]);
+    }
+
+    #[test]
+    fn both_lists_share_one_sort() {
+        let mut st = ClientState::default();
+        st.apply_event(global_state_event(), 0.0);
+        // Idle band sorts by most recent activity; park both so one call
+        // proves the parked list uses the same key as the active one.
+        st.subs.park("lab");
+        st.workspace_activity.insert("lab".into(), 100.0);
+        st.workspace_activity.insert("raid".into(), 900.0);
+        assert_eq!(
+            st.parked_workspaces(),
+            vec!["raid".to_string(), "lab".to_string()]
+        );
+        assert_eq!(st.parked_workspaces(), st.workspaces());
     }
 
     #[test]

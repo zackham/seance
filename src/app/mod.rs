@@ -160,9 +160,20 @@ pub struct SeanceApp {
     /// Live windows (multiplayer roster).
     windows: Vec<WindowInfo>,
     /// This window's subscription set, daemon order. State arrives GLOBAL
-    /// (every workspace, every pane) and is filtered to these at ingest —
-    /// the parked/active split is a later phase.
+    /// (every workspace, every pane) and is kept whole — the sidebar renders
+    /// the active/parked split locally.
     subscriptions: Vec<String>,
+    /// Persisted per-GUI presentation state: which workspaces sit in the
+    /// active band, and which this window has ever looked at (`seen`).
+    subs_pref: crate::subscriptions_pref::SubscriptionsPref,
+    /// A persisted list was found (or the first State already seeded one).
+    /// Until then, the first State's subscription set becomes the active list.
+    subs_seeded: bool,
+    /// Workspaces parked locally whose `Unsubscribe` may still be in flight —
+    /// a State composed before it landed must not re-activate them.
+    park_pending: std::collections::BTreeSet<String>,
+    /// Parked group expanded in the sidebar. Session-local by design.
+    parked_expanded: bool,
     /// Last activity timestamp (ms) per workspace — input/inject/status, not click.
     workspace_touch: std::collections::HashMap<String, u64>,
     /// Last observed pane output per workspace (ms) — sidebar shows "time
@@ -302,12 +313,23 @@ impl SeanceApp {
     }
 
     fn new_inner(window: &mut Window, cx: &mut Context<Self>, empty: bool) -> Self {
-        // Connect to the session daemon (PTYs live there).
+        // Connect to the session daemon (PTYs live there). The persisted
+        // active list must be read BEFORE connecting — it seeds `Attach`.
+        let pref = if empty {
+            None
+        } else {
+            crate::subscriptions_pref::load()
+        };
+        let seed: Option<Vec<String>> = pref.as_ref().map(|p| p.active.iter().cloned().collect());
         let (client, event_rx) = if empty {
             GuiClient::connect_empty().expect("gui client connect empty")
         } else {
-            GuiClient::connect().expect("gui client connect to daemon")
+            GuiClient::connect(seed).expect("gui client connect to daemon")
         };
+        // `connect()` decides blank-window on its own (second process /
+        // SEANCE_EMPTY_WINDOW); such a window must never persist a list.
+        let empty = empty || client.is_empty_window();
+        let subs_seeded = pref.is_some() && !empty;
         let remote_cache = Arc::new(crate::remote_cache::RemoteCache::new(Arc::clone(&client)));
 
         let mut app = SeanceApp {
@@ -345,6 +367,10 @@ impl SeanceApp {
             window_id: None,
             windows: Vec::new(),
             subscriptions: Vec::new(),
+            subs_pref: pref.unwrap_or_default(),
+            subs_seeded,
+            park_pending: std::collections::BTreeSet::new(),
+            parked_expanded: false,
             workspace_touch: std::collections::HashMap::new(),
             workspace_activity: std::collections::HashMap::new(),
             workspace_working_since: std::collections::HashMap::new(),
@@ -582,23 +608,18 @@ impl SeanceApp {
                 self.windows = windows;
                 self.subscriptions = subscriptions;
 
-                // State is global from 0.12; this window renders only what it
-                // subscribes to (today's look). `workspace_meta` stays global —
-                // it's the name/clock census the quicklaunch editor needs.
-                let subs: std::collections::HashSet<&str> =
-                    self.subscriptions.iter().map(|s| s.as_str()).collect();
-                let panes: Vec<PaneInfo> = panes
-                    .into_iter()
-                    .filter(|p| subs.contains(p.workspace.as_str()))
+                // State is global from 0.12 — every workspace, every pane. The
+                // active/parked split is presentation state this window owns,
+                // so nothing is dropped here; the sidebar renders the split.
+                let known: std::collections::BTreeSet<String> = panes
+                    .iter()
+                    .map(|p| p.workspace.clone())
+                    .chain(extra_workspaces.iter().cloned())
+                    .chain(workspace_order.iter().cloned())
+                    .chain(workspace_meta.iter().map(|m| m.workspace.clone()))
+                    .chain(selected_workspace.iter().cloned())
                     .collect();
-                let extra_workspaces: Vec<String> = extra_workspaces
-                    .into_iter()
-                    .filter(|w| subs.contains(w.as_str()))
-                    .collect();
-                let workspace_order: Vec<String> = workspace_order
-                    .into_iter()
-                    .filter(|w| subs.contains(w.as_str()))
-                    .collect();
+                self.reconcile_subscriptions(&known);
 
                 self.selected_workspace = selected_workspace;
                 self.active_slug = focused_pane;
@@ -606,12 +627,6 @@ impl SeanceApp {
                 self.workspace_order = workspace_order;
                 self.asks = asks
                     .into_iter()
-                    .filter(|a| {
-                        a.workspace
-                            .as_ref()
-                            .map(|w| subs.contains(w.as_str()))
-                            .unwrap_or(true)
-                    })
                     .map(|a| PendingAsk {
                         id: a.id,
                         from: a.from,
@@ -2245,6 +2260,13 @@ impl Render for SeanceApp {
             }))
             .on_action(cx.listener(|_this, act: &ActShareReplay, _, _cx| {
                 share_replay_open(&act.0);
+            }))
+            .on_action(cx.listener(|this, act: &ActParkWorkspace, window, cx| {
+                this.park_workspace(&act.0.clone(), window, cx);
+            }))
+            .on_action(cx.listener(|this, act: &ActActivateWorkspace, _, cx| {
+                this.activate_workspace(&act.0.clone());
+                cx.notify();
             }))
             .on_action(cx.listener(|this, act: &ActTouchWorkspace, _, cx| {
                 this.touch_workspace(&act.0);

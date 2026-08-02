@@ -50,6 +50,15 @@ pub trait Actions {
     fn quicklaunch(&self, name: &str, cwd: Option<String>, command: Option<String>);
     /// Bump a workspace's recency (context-menu "touch") + flight-recorder log.
     fn touch_workspace(&self, ws: &str);
+    /// Sidebar row menu "park": drop a circle out of the active list (and out
+    /// of the daemon subscription) into the parked group.
+    fn park_workspace(&self, ws: &str);
+    /// Parked row menu "add to active": subscribe + promote, without selecting.
+    fn activate_workspace(&self, ws: &str);
+    /// Repaint chrome on the next frame (client-only view state changed —
+    /// e.g. the parked accordion opened).
+    fn request_rebuild(&self);
+    /// Ctrl+PageUp/Down — ACTIVE circles only.
     fn cycle_workspace(&self, delta: i32);
     fn cycle_pane(&self, delta: i32);
     /// ctrl+shift+w semantics: kill active pane; last pane in the circle (or

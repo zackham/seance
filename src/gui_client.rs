@@ -28,6 +28,12 @@ pub struct GuiClient {
     tx: Mutex<Option<Sender<GuiRequest>>>,
     /// Shared with supervisor: once set, never open a new socket.
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Subscription seed for `Attach`, re-read on every (re)connect so a
+    /// daemon restart restores this window's active list rather than
+    /// re-subscribing everything. `None` = "give me everything" (migration).
+    subscription_seed: SubscriptionSeed,
+    /// This connection attached as a blank window (subscribes to nothing).
+    empty: bool,
     /// In-flight fs bridge calls awaiting their FsResult, keyed by id.
     fs_pending: FsPending,
     fs_next_id: std::sync::atomic::AtomicU64,
@@ -36,6 +42,8 @@ pub struct GuiClient {
 /// One fs result: (ok, data, error).
 type FsReply = (bool, Option<serde_json::Value>, Option<String>);
 type FsPending = Arc<Mutex<std::collections::HashMap<u64, Sender<FsReply>>>>;
+/// Shared `Attach` subscription seed (see [`GuiClient::subscription_seed`]).
+type SubscriptionSeed = Arc<Mutex<Option<Vec<String>>>>;
 
 impl GuiClient {
     /// Connect, spawn the connection supervisor, return client + event receiver.
@@ -44,20 +52,27 @@ impl GuiClient {
     /// no daemon is listening. After that the supervisor reconnects forever
     /// (daemon upgrade, brief socket blip, etc.) and re-sends `Attach` so the
     /// GUI re-syncs full state + grids.
-    pub fn connect() -> Result<(Arc<Self>, Receiver<GuiEvent>)> {
+    ///
+    /// `seed` is this GUI's persisted active list (`subscriptions.json`);
+    /// `None` means "no persisted list" → the daemon seeds every workspace and
+    /// the GUI adopts that as its first active list.
+    pub fn connect(seed: Option<Vec<String>>) -> Result<(Arc<Self>, Receiver<GuiEvent>)> {
         // Second process: `seance` while another GUI is up → empty window.
         // Same-process new window uses connect_empty().
         let empty = std::env::var("SEANCE_EMPTY_WINDOW").ok().as_deref() == Some("1")
             || other_gui_running();
-        Self::connect_opts(empty)
+        Self::connect_opts(empty, seed)
     }
 
     /// Attach as an empty window (subscribes to no workspaces).
     pub fn connect_empty() -> Result<(Arc<Self>, Receiver<GuiEvent>)> {
-        Self::connect_opts(true)
+        Self::connect_opts(true, None)
     }
 
-    fn connect_opts(empty: bool) -> Result<(Arc<Self>, Receiver<GuiEvent>)> {
+    fn connect_opts(
+        empty: bool,
+        seed: Option<Vec<String>>,
+    ) -> Result<(Arc<Self>, Receiver<GuiEvent>)> {
         let path = socket_path();
         // Probe: fail fast if nothing is listening.
         let probe = UnixStream::connect(&path)
@@ -70,19 +85,41 @@ impl GuiClient {
         let stop_sup = Arc::clone(&stop);
         let fs_pending: FsPending = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let fs_pending_sup = Arc::clone(&fs_pending);
+        // A blank window subscribes to nothing regardless of any persisted list.
+        let subscription_seed: SubscriptionSeed =
+            Arc::new(Mutex::new(if empty { Some(Vec::new()) } else { seed }));
+        let seed_sup = Arc::clone(&subscription_seed);
 
         thread::Builder::new()
             .name("seance-gui-conn".into())
-            .spawn(move || connection_supervisor(req_rx, ev_tx, empty, stop_sup, fs_pending_sup))
+            .spawn(move || connection_supervisor(req_rx, ev_tx, seed_sup, stop_sup, fs_pending_sup))
             .context("spawn gui connection supervisor")?;
 
         let client = Arc::new(Self {
             tx: Mutex::new(Some(req_tx)),
             stop,
+            subscription_seed,
+            empty,
             fs_pending,
             fs_next_id: std::sync::atomic::AtomicU64::new(1),
         });
         Ok((client, ev_rx))
+    }
+
+    /// This connection attached as a blank window — `connect()` decides that
+    /// on its own (second process / `SEANCE_EMPTY_WINDOW`), so the app asks
+    /// rather than assumes. Blank windows never persist an active list.
+    pub fn is_empty_window(&self) -> bool {
+        self.empty
+    }
+
+    /// Update the `Attach` seed used by every future reconnect. Blank windows
+    /// keep their empty seed.
+    pub fn set_subscription_seed(&self, subs: Vec<String>) {
+        if self.empty {
+            return;
+        }
+        *self.subscription_seed.lock().unwrap() = Some(subs);
     }
 
     /// Tell the daemon this window is gone, then kill the supervisor (no reconnect).
@@ -202,9 +239,6 @@ impl GuiClient {
     }
 
     /// Add a workspace to this window's subscription set ("add to active").
-    /// Protocol surface ahead of UI: the sidebar's active/parked split (phase
-    /// 2) is what calls this — wire or retire there, don't delete blind.
-    #[allow(dead_code)]
     pub fn subscribe(&self, workspace: &str) -> Result<()> {
         self.send(GuiRequest::Subscribe {
             workspace: workspace.to_string(),
@@ -212,8 +246,6 @@ impl GuiClient {
     }
 
     /// Drop a workspace from this window's subscription set ("park").
-    /// Same phase-2 pairing as [`Self::subscribe`].
-    #[allow(dead_code)]
     pub fn unsubscribe(&self, workspace: &str) -> Result<()> {
         self.send(GuiRequest::Unsubscribe {
             workspace: workspace.to_string(),
@@ -492,7 +524,7 @@ fn other_gui_running() -> bool {
 fn connection_supervisor(
     req_rx: Receiver<GuiRequest>,
     ev_tx: Sender<GuiEvent>,
-    empty: bool,
+    subscription_seed: SubscriptionSeed,
     stop: Arc<std::sync::atomic::AtomicBool>,
     fs_pending: FsPending,
 ) {
@@ -591,9 +623,10 @@ fn connection_supervisor(
             &GuiRequest::Attach {
                 selected_workspace: None,
                 focused_pane: None,
-                // Blank window → subscribe to nothing; otherwise seed with
-                // every workspace (today's sole-window behaviour).
-                subscriptions: if empty { Some(Vec::new()) } else { None },
+                // This window's persisted active list. Blank window → empty
+                // list; no persisted list yet → None, i.e. "everything", which
+                // the GUI then adopts and persists (migration).
+                subscriptions: subscription_seed.lock().unwrap().clone(),
             },
         )
         .is_err()

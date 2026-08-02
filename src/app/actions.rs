@@ -40,6 +40,17 @@ pub struct ActForkWorkspace(pub String);
 #[action(namespace = seance, no_json)]
 pub struct ActKillWorkspace(pub String);
 
+/// Move a circle out of this GUI's active band into the parked group
+/// (`Unsubscribe`) — nothing happens to any other GUI.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActParkWorkspace(pub String);
+
+/// The inverse: parked → active (`Subscribe`), without selecting it.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActActivateWorkspace(pub String);
+
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]
 pub struct ActRenamePane(pub String);

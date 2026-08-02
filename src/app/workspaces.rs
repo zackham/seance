@@ -67,6 +67,130 @@ impl SeanceApp {
             .collect()
     }
 
+    /// Fold a fresh `State` into this window's persisted active/seen sets.
+    ///
+    /// The daemon auto-subscribes on select / spawn / create / fork from this
+    /// window, so its subscription set *is* the auto-add signal (minus
+    /// anything we just parked, whose `Unsubscribe` may still be in flight).
+    /// With no persisted file the first State seeds the active list outright —
+    /// that's the migration from the ownership model.
+    pub(super) fn reconcile_subscriptions(&mut self, known: &std::collections::BTreeSet<String>) {
+        let subs = self.subscriptions.clone();
+        let mut changed = false;
+        if !self.subs_seeded {
+            self.subs_pref.seed_from_daemon(&subs, known);
+            self.subs_seeded = true;
+            changed = true;
+        } else {
+            changed |= self
+                .subs_pref
+                .adopt_daemon_subscriptions(&subs, &self.park_pending);
+        }
+        // The park landed once the daemon stops listing the workspace.
+        self.park_pending.retain(|w| subs.iter().any(|s| s == w));
+        // Selecting is looking: never badge the circle you're in as unseen.
+        if let Some(sel) = self.selected_workspace.clone() {
+            changed |= self.subs_pref.activate(&sel);
+        }
+        changed |= self.subs_pref.prune(known);
+        if changed {
+            self.save_subscriptions();
+        }
+        // Anything active the daemon isn't streaming (reconnect, rename) gets
+        // re-subscribed so its grids flow again.
+        let missing: Vec<String> = self
+            .subs_pref
+            .active
+            .iter()
+            .filter(|w| !subs.iter().any(|s| s == *w) && known.contains(*w))
+            .cloned()
+            .collect();
+        for ws in missing {
+            let _ = self.client.subscribe(&ws);
+        }
+    }
+
+    /// Persist the active/seen sets and refresh the reconnect `Attach` seed.
+    /// Blank windows own no arrangement — they must not clobber the file.
+    pub(super) fn save_subscriptions(&self) {
+        if self.empty_window {
+            return;
+        }
+        crate::subscriptions_pref::save(&self.subs_pref);
+        self.client
+            .set_subscription_seed(self.subs_pref.active.iter().cloned().collect());
+    }
+
+    /// Add a workspace to the active band (context menu "add to active", and
+    /// every select of a parked circle).
+    pub(super) fn activate_workspace(&mut self, ws: &str) {
+        self.park_pending.remove(ws);
+        if self.subs_pref.activate(ws) {
+            self.save_subscriptions();
+        }
+        if !self.subscriptions.iter().any(|s| s == ws) {
+            let _ = self.client.subscribe(ws);
+        }
+    }
+
+    /// Move a workspace to the parked group. Parking the circle you're looking
+    /// at moves the selection to the next active one first (the daemon would
+    /// otherwise pick for us on `Unsubscribe`).
+    pub(super) fn park_workspace(&mut self, ws: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_workspace.as_deref() == Some(ws) {
+            let order = self.active_workspaces(cx);
+            let next = order
+                .iter()
+                .position(|w| w == ws)
+                .and_then(|idx| {
+                    order
+                        .get(idx + 1)
+                        .or_else(|| idx.checked_sub(1).and_then(|j| order.get(j)))
+                })
+                .cloned();
+            if let Some(next) = next {
+                self.select_workspace(&next, window, cx);
+            }
+        }
+        self.subs_pref.park(ws);
+        self.park_pending.insert(ws.to_string());
+        self.save_subscriptions();
+        let _ = self.client.unsubscribe(ws);
+        cx.notify();
+    }
+
+    /// Workspaces in the active band, sidebar display order.
+    pub(super) fn active_workspaces(&self, cx: &gpui::App) -> Vec<String> {
+        crate::subscriptions_pref::partition(&self.workspaces(cx), &self.subs_pref.active).0
+    }
+
+    /// Workspaces in the collapsed parked group, same sort as active rows.
+    pub(super) fn parked_workspaces(&self, cx: &gpui::App) -> Vec<String> {
+        crate::subscriptions_pref::partition(&self.workspaces(cx), &self.subs_pref.active).1
+    }
+
+    /// Badge for a parked row: the normal live attention, or `needs` for a
+    /// circle this window has never looked at (ctl spawns land parked+needs).
+    pub(super) fn parked_attention(&self, ws: &str, cx: &gpui::App) -> Option<WorkspaceAttention> {
+        self.workspace_attention_cx(ws, cx).or({
+            if self.subs_pref.never_seen(ws) {
+                Some(WorkspaceAttention::NeedsHuman)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Collapsed parked header summary: (count, highest-priority attention).
+    pub(super) fn parked_summary(&self, cx: &gpui::App) -> (usize, Option<WorkspaceAttention>) {
+        let parked = self.parked_workspaces(cx);
+        let att = parked
+            .iter()
+            .filter_map(|ws| self.parked_attention(ws, cx))
+            .max_by_key(|a| a.priority());
+        (parked.len(), att)
+    }
+
     /// All workspaces in sidebar display order.
     ///
     /// 1. Circles with an actively working agent float to the top.
@@ -290,6 +414,8 @@ impl SeanceApp {
             n += 1;
         };
         let _ = self.client.create_workspace(&name);
+        // Born here → active here (the daemon subscribes us too).
+        self.activate_workspace(&name);
         if !self.extra_workspaces.contains(&name) {
             self.extra_workspaces.push(name.clone());
         }
@@ -312,6 +438,9 @@ impl SeanceApp {
         cx: &mut Context<Self>,
     ) {
         let changed = self.selected_workspace.as_deref() != Some(workspace);
+        // Selecting a parked circle promotes it: subscribe + into the active
+        // band + marked seen (the daemon auto-subscribes on SetFocus too).
+        self.activate_workspace(workspace);
         // Remember which pane was active in the circle we're leaving.
         if changed {
             if let (Some(old_ws), Some(slug)) =
@@ -330,7 +459,11 @@ impl SeanceApp {
         // Reveal the selection in the sidebar — ctrl+page cycling can land on
         // a row scrolled out of the rail. Row index = position in display
         // order (one child per workspace group in the list).
-        if let Some(idx) = self.workspaces(cx).iter().position(|w| w == workspace) {
+        if let Some(idx) = self
+            .active_workspaces(cx)
+            .iter()
+            .position(|w| w == workspace)
+        {
             self.sidebar_scroll.scroll_to_item(idx);
         }
         // Selecting a circle clears sticky "done/needs" unread — does NOT bump touch.
@@ -397,7 +530,9 @@ impl SeanceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let list = self.workspaces(cx);
+        // Parked circles are deliberately out of the rotation — that's the
+        // point of parking them.
+        let list = self.active_workspaces(cx);
         if list.is_empty() {
             return;
         }
@@ -477,7 +612,7 @@ impl SeanceApp {
         // last) in sidebar order — not the daemon's arbitrary first-pane
         // fallback — so the human lands somewhere predictable.
         if self.selected_workspace.as_deref() == Some(workspace) {
-            let order = self.workspaces(cx);
+            let order = self.active_workspaces(cx);
             if let Some(idx) = order.iter().position(|w| w == workspace) {
                 let neighbor = order
                     .get(idx + 1)

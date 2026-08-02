@@ -21,8 +21,8 @@
 //!   workspace rows only (glyph `◆` selected / `◈` idle / pulsing `◆` while
 //!   working, `needs`/`done` text badges in their colors, hover `×` banish,
 //!   pane count, full-bleed selected fill, double-click inline rename, per-row
-//!   context menu: touch / rename / fork ⑂ / send to «window» / collect all /
-//!   banish), empty-area context menu (collect all + pull «ws» from label),
+//!   context menu: touch / rename / fork ⑂ / share replay / park (or "add to
+//!   active" on a parked row) / banish), the collapsed parked group,
 //!   quicklaunch chip strip, host-accounts strip, footer (`+ summon` flex-1
 //!   flame · activity `≋` · help `?` violet).
 //! * **quicklaunch** — daemon-side `~/.config/seance/quicklaunch.json` over the
@@ -46,7 +46,9 @@
 //!    to the same list op).
 //! 3. **No window-targeted workspace moves.** Workspaces are global
 //!    subscriptions (0.12) — nothing is "sent" anywhere; the ✦ census popover
-//!    is the roster. The parked-group affordance lands in phase 2.
+//!    is the roster. The sidebar splits into the active list plus a collapsed
+//!    `parked (N)` group (row menus: "park" / "add to active"), persisted per
+//!    browser in `localStorage["seance_active"]`.
 //! 4. **Topbar.** Native has no topbar; the web client needs a permanent
 //!    connection indicator (native is always local) and the latency probe
 //!    toggle, so a slim `#topbar` carries those plus the selected circle's name.
@@ -297,6 +299,9 @@ pub struct Chrome {
     /// Last selected workspace we scrolled into view (avoid scroll-jacking on
     /// unrelated rebuilds).
     last_scrolled_ws: Option<String>,
+    /// Parked accordion open/closed. Session-local by design — collapsed on
+    /// every fresh page load, never persisted (contract).
+    parked_open: Rc<Cell<bool>>,
 
     /// `✦` popover (GUI census) is open. Shared with its own listeners (they
     /// close it) and survives a rebuild — the card is re-rendered under the
@@ -365,6 +370,7 @@ impl Chrome {
             kill_armed: Rc::new(RefCell::new(HashMap::new())),
             conn: ("connecting".to_string(), false),
             last_scrolled_ws: None,
+            parked_open: Rc::new(Cell::new(false)),
             gui_menu_open: Rc::new(Cell::new(false)),
             gui_menu_clicks: Rc::new(RefCell::new(Vec::new())),
             gui_menu_dismiss: Rc::new(RefCell::new(None)),
@@ -406,14 +412,15 @@ impl Chrome {
         self.ws_refs.clear();
         self.focused = state.focused_pane.clone();
 
-        let workspaces = state.workspaces();
+        let active = state.active_workspaces();
+        let parked = state.parked_workspaces();
         let selected = state
             .selected_workspace
             .clone()
-            .or_else(|| workspaces.first().cloned());
+            .or_else(|| active.first().cloned());
 
         self.build_topbar(selected.as_deref())?;
-        self.build_sidebar(state, &workspaces, selected.as_deref())?;
+        self.build_sidebar(state, &active, &parked, selected.as_deref())?;
         self.build_tiles(state, selected.as_deref())?;
         self.render_asks(state)?;
         self.apply_badges(state);
@@ -463,18 +470,20 @@ impl Chrome {
         &mut self,
         state: &ClientState,
         workspaces: &[String],
+        parked: &[String],
         selected: Option<&str>,
     ) -> Result<(), JsValue> {
         let doc = self.doc.clone();
         self.sidebar.set_inner_html("");
 
-        self.build_brand(state, workspaces)?;
+        // `◈+` / quicklaunch uniquify against EVERY known circle, parked too.
+        let all: Vec<String> = workspaces.iter().chain(parked.iter()).cloned().collect();
+        self.build_brand(state, &all)?;
 
         let list = mk(&doc, "div", "ws-list")?;
         self.sidebar.append_child(&list)?;
 
-        // Peer windows for "send to …" (native lists every window but this one).
-        if workspaces.is_empty() {
+        if workspaces.is_empty() && parked.is_empty() {
             let empty = mk(&doc, "div", "empty")?;
             empty.append_child(text_el(&doc, "div", "", "no workspaces here")?.unchecked_ref())?;
             {
@@ -487,12 +496,14 @@ impl Chrome {
         }
 
         for ws in workspaces {
-            self.build_ws_row(&list, state, ws, selected)?;
+            self.build_ws_row(&list, state, ws, selected, false)?;
         }
 
-        // Flex filler below the rows. The "elsewhere" rail and its
-        // pull/collect menu went with the ownership model; phase 2 puts the
-        // parked (unsubscribed) group here.
+        // The parked group replaces the old "elsewhere" rail: same rows, same
+        // sort, one collapsed accordion (host-strip pattern).
+        self.build_parked(&list, state, parked, selected)?;
+
+        // Flex filler below the rows.
         let hit = mk(&doc, "div", "side-empty-hit")?;
         list.append_child(&hit)?;
 
@@ -594,20 +605,21 @@ impl Chrome {
         state: &ClientState,
         ws: &str,
         selected: Option<&str>,
+        parked: bool,
     ) -> Result<(), JsValue> {
         let doc = self.doc.clone();
-        let is_selected = Some(ws) == selected;
+        let is_selected = Some(ws) == selected && !parked;
         let activity = state.activity_label(ws, self.now_ms());
-        let att = state.workspace_attention(ws);
+        let att = state.row_attention(ws);
         let working = matches!(att, Some(Attention::Working));
 
         let row = mk(
             &doc,
             "div",
-            if is_selected {
-                "ws-row selected"
-            } else {
-                "ws-row"
+            match (is_selected, parked) {
+                (true, _) => "ws-row selected",
+                (false, true) => "ws-row parked",
+                (false, false) => "ws-row",
             },
         )?;
         let main = mk(&doc, "div", "ws-main")?;
@@ -726,6 +738,16 @@ impl Chrome {
                 {
                     let a = actions.clone();
                     let w = ws.clone();
+                    entries.push(if parked {
+                        MenuEntry::item("add to active", move || a.activate_workspace(&w))
+                    } else {
+                        MenuEntry::item("park", move || a.park_workspace(&w))
+                    });
+                }
+                entries.push(MenuEntry::Separator);
+                {
+                    let a = actions.clone();
+                    let w = ws.clone();
                     entries.push(MenuEntry::danger(
                         "banish workspace (kill all panes)",
                         move || a.kill_workspace(&w),
@@ -752,6 +774,92 @@ impl Chrome {
             self.last_scrolled_ws = Some(ws.to_string());
             if let Some(refs) = self.ws_refs.get(ws) {
                 refs.row.scroll_into_view_with_bool(false);
+            }
+        }
+        Ok(())
+    }
+
+    /// The parked group: a collapsed accordion under the active rows. Header
+    /// `parked (N)` + caret; collapsed it carries the highest-priority
+    /// attention dot among its rows, so a `ctl` spawn or a finished agent still
+    /// pulls the eye. Expanded state is session-local (never persisted).
+    fn build_parked(
+        &mut self,
+        list: &Element,
+        state: &ClientState,
+        parked: &[String],
+        selected: Option<&str>,
+    ) -> Result<(), JsValue> {
+        if parked.is_empty() {
+            return Ok(());
+        }
+        let doc = self.doc.clone();
+        let open = self.parked_open.get();
+
+        let group = mk(&doc, "div", "parked-group")?;
+        group.set_id("parked-group");
+        let head = mk(
+            &doc,
+            "div",
+            if open {
+                "parked-head open"
+            } else {
+                "parked-head"
+            },
+        )?;
+        head.set_id("parked-head");
+        head.set_attribute(
+            "title",
+            if open {
+                "parked circles — click to collapse"
+            } else {
+                "parked circles (not subscribed) — click to expand"
+            },
+        )?;
+        head.append_child(
+            text_el(&doc, "span", "parked-caret", if open { "▾" } else { "▸" })?.unchecked_ref(),
+        )?;
+        head.append_child(
+            text_el(
+                &doc,
+                "span",
+                "parked-title",
+                &format!("parked ({})", parked.len()),
+            )?
+            .unchecked_ref(),
+        )?;
+        // Collapsed only: one dot for the loudest thing hiding in there.
+        let (dot_text, dot_class) = match (open, state.parked_attention()) {
+            (false, Some(att)) => (
+                "●",
+                match att {
+                    Attention::NeedsHuman => "parked-dot needs",
+                    Attention::Working => "parked-dot working",
+                    Attention::Done => "parked-dot done",
+                },
+            ),
+            _ => ("", "parked-dot"),
+        };
+        head.append_child(text_el(&doc, "span", dot_class, dot_text)?.unchecked_ref())?;
+        group.append_child(&head)?;
+        list.append_child(&group)?;
+
+        {
+            let open_cell = self.parked_open.clone();
+            let actions = self.actions.clone();
+            bind_click(&head, &mut self.structural, move |ev| {
+                ev.stop_propagation();
+                open_cell.set(!open_cell.get());
+                actions.request_rebuild();
+            })?;
+        }
+
+        if open {
+            let rows = mk(&doc, "div", "parked-list")?;
+            rows.set_id("parked-list");
+            group.append_child(&rows)?;
+            for ws in parked {
+                self.build_ws_row(&rows, state, ws, selected, true)?;
             }
         }
         Ok(())
@@ -1322,7 +1430,7 @@ impl Chrome {
         }
 
         for (ws, refs) in &self.ws_refs {
-            let att = state.workspace_attention(ws);
+            let att = state.row_attention(ws);
             let working = matches!(att, Some(Attention::Working));
             refs.glyph
                 .set_class_name(ws_glyph_class(working, refs.selected));

@@ -7,7 +7,6 @@ use gpui_component::{
     input::Input, menu::ContextMenuExt as _, Colorize as _, StyledExt as _, WindowExt as _,
 };
 
-use crate::pane::Pane;
 use crate::runtime::protocol::GuiRequest;
 use crate::theme::SeancePalette;
 
@@ -465,20 +464,294 @@ impl SeanceApp {
         .detach();
     }
 
+    /// The collapsed `parked (N)` accordion header — same caret/expand idiom as
+    /// the host account strip. Collapsed, it carries the highest-priority
+    /// attention dot among the circles it hides, so a parked agent asking for
+    /// help is still visible without expanding.
+    fn render_parked_header(&self, count: usize, cx: &Context<Self>) -> gpui::AnyElement {
+        let expanded = self.parked_expanded;
+        let caret = if expanded { "▾" } else { "▸" };
+        let att = if expanded {
+            None
+        } else {
+            self.parked_summary(cx).1
+        };
+        div()
+            .id("parked-header")
+            .px_2()
+            .py_1p5()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .hover(|s| s.bg(SeancePalette::surface()))
+            .tooltip(tip(if expanded {
+                "collapse parked circles"
+            } else {
+                "parked circles — click to expand (out of ctrl+page rotation)"
+            }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.parked_expanded = !this.parked_expanded;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(SeancePalette::text_faint())
+                    .child(format!("{caret} parked ({count})")),
+            )
+            .children(att.map(|a| {
+                div().flex_none().text_xs().text_color(a.color()).child(
+                    if matches!(a, WorkspaceAttention::Working) {
+                        working_spinner_glyph()
+                    } else {
+                        "●"
+                    },
+                )
+            }))
+            .into_any_element()
+    }
+
+    /// One sidebar workspace group. Parked rows use the same builder, sort and
+    /// badges as active ones — only muted, and with a different menu verb.
+    fn render_workspace_group(
+        &self,
+        workspace: String,
+        parked: bool,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let selected = self.selected_workspace.as_deref() == Some(workspace.as_str());
+        let ws_for_click = workspace.clone();
+        let ws_for_group_drop = workspace.clone();
+        let ws_for_pane_drop = workspace.clone();
+        let ws_for_menu = workspace.clone();
+        let renaming_this_ws = matches!(
+            &self.renaming,
+            Some((RenameTarget::Workspace(w), _)) if *w == workspace
+        );
+        let rename_input = self.renaming.as_ref().map(|(_, i)| i.clone());
+        // Attention: parked rows additionally badge `needs` until first looked at.
+        let attention = if parked {
+            self.parked_attention(&workspace, cx)
+        } else {
+            self.workspace_attention_cx(&workspace, cx)
+        };
+        let header: gpui::AnyElement = if renaming_this_ws {
+            div()
+                .px_2()
+                .py_1p5()
+                .children(rename_input.map(|i| Input::new(&i)))
+                .into_any_element()
+        } else {
+            div()
+                .id(SharedString::from(format!("ws-{workspace}")))
+                .group(SharedString::from(format!("wsgrp-{workspace}")))
+                .px_2()
+                .py_1p5()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .cursor_pointer()
+                .when(selected, |d| d.bg(selected_row_fill()))
+                .hover(|s| {
+                    if selected {
+                        s.bg(selected_row_fill().lighten(0.04))
+                    } else {
+                        s.bg(SeancePalette::surface())
+                    }
+                })
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|_this, _, window, cx| {
+                        sidebar_press_no_select(window, cx);
+                    }),
+                )
+                // Drop a pane onto the header → move into this circle.
+                // Workspace-vs-workspace drag-reorder is intentionally gone;
+                // order is auto (working agents, then last human touch).
+                .drag_over::<DraggedPane>(|style, _, _, _| style.bg(SeancePalette::violet_dim()))
+                .on_drop(cx.listener(move |this, drag: &DraggedPane, _, cx| {
+                    ui_debug(&format!(
+                        "drop pane '{}' on workspace header '{}'",
+                        drag.slug, ws_for_pane_drop
+                    ));
+                    this.reorder_pane(&drag.slug, &ws_for_pane_drop, None, cx);
+                }))
+                .on_click(
+                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        if event.click_count() == 2 {
+                            this.start_rename(
+                                RenameTarget::Workspace(ws_for_click.clone()),
+                                &ws_for_click.clone(),
+                                window,
+                                cx,
+                            );
+                        } else {
+                            // Selecting a parked circle promotes it to active.
+                            this.select_workspace(&ws_for_click, window, cx);
+                        }
+                    }),
+                )
+                .context_menu({
+                    let ws_m = ws_for_menu.clone();
+                    move |menu, _, _| {
+                        let m = menu
+                            .menu(
+                                "touch (bump recency)",
+                                Box::new(ActTouchWorkspace(ws_m.clone())),
+                            )
+                            .menu(
+                                "rename workspace",
+                                Box::new(ActRenameWorkspace(ws_m.clone())),
+                            )
+                            .menu("fork workspace ⑂", Box::new(ActForkWorkspace(ws_m.clone())))
+                            .menu("share replay…", Box::new(ActShareReplay(ws_m.clone())));
+                        let m = if parked {
+                            m.menu(
+                                "add to active",
+                                Box::new(ActActivateWorkspace(ws_m.clone())),
+                            )
+                        } else {
+                            m.menu("park circle", Box::new(ActParkWorkspace(ws_m.clone())))
+                        };
+                        m.separator().menu(
+                            "banish workspace (kill all panes)",
+                            Box::new(ActKillWorkspace(ws_m.clone())),
+                        )
+                    }
+                })
+                .child({
+                    // Working → spinner in the icon slot (no "working"
+                    // text badge), so more of the workspace name shows.
+                    let working = matches!(attention, Some(WorkspaceAttention::Working));
+                    let (glyph, color) = if working {
+                        (working_spinner_glyph(), SeancePalette::flame())
+                    } else if selected {
+                        ("◆", SeancePalette::flame())
+                    } else {
+                        ("◈", SeancePalette::text_faint())
+                    };
+                    div().flex_none().text_sm().text_color(color).child(glyph)
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .font_weight(if selected {
+                            gpui::FontWeight::SEMIBOLD
+                        } else {
+                            gpui::FontWeight::NORMAL
+                        })
+                        .text_color(if selected {
+                            SeancePalette::text()
+                        } else {
+                            SeancePalette::text_dim()
+                        })
+                        .child(workspace.clone()),
+                )
+                .children({
+                    // Text badges only for needs/done — working is
+                    // the left-side spinner above.
+                    let att = if selected {
+                        None
+                    } else {
+                        attention.filter(|a| !matches!(a, WorkspaceAttention::Working))
+                    };
+                    att.map(|a| {
+                        div()
+                            .flex_none()
+                            .px_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .text_color(a.color())
+                            .child(a.label())
+                    })
+                })
+                .child(
+                    // Banish ×: revealed only while the row is hovered
+                    // (group-hover), so idle rows stay quiet.
+                    div()
+                        .id(SharedString::from(format!("ws-banish-{workspace}")))
+                        .flex_none()
+                        .px_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(gpui::transparent_black())
+                        .group_hover(SharedString::from(format!("wsgrp-{workspace}")), |s| {
+                            s.text_color(SeancePalette::text_faint())
+                        })
+                        .hover(|s| {
+                            s.text_color(SeancePalette::danger())
+                                .bg(SeancePalette::surface())
+                        })
+                        .cursor_pointer()
+                        .on_click({
+                            let ws = workspace.clone();
+                            cx.listener(move |this, _, window, cx| {
+                                this.kill_workspace(&ws, window, cx);
+                            })
+                        })
+                        .tooltip(tip("banish workspace (kill all panes)"))
+                        .child("×"),
+                )
+                .children({
+                    // Time since last output (was: pane count).
+                    self.workspace_activity_label(&workspace, cx).map(|label| {
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(if selected {
+                                SeancePalette::text_dim()
+                            } else {
+                                SeancePalette::text_faint()
+                            })
+                            .child(label)
+                    })
+                })
+                .into_any_element()
+        };
+        div()
+            .id(SharedString::from(format!("wsgroup-{workspace}")))
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .mb_0p5()
+            // Parked rows read as a quieter band without a second palette.
+            .when(parked, |d| d.opacity(0.72))
+            .drag_over::<DraggedPane>(|style, _, _, _| style.bg(SeancePalette::surface()))
+            .on_drop(cx.listener(move |this, drag: &DraggedPane, _, cx| {
+                ui_debug(&format!(
+                    "drop pane '{}' on workspace group '{}'",
+                    drag.slug, ws_for_group_drop
+                ));
+                this.reorder_pane(&drag.slug, &ws_for_group_drop, None, cx);
+            }))
+            .child(header)
+            .into_any_element()
+    }
+
     pub(super) fn render_sidebar(
         &self,
         window_active: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         // Ordered groups, INCLUDING empty workspaces (they render with 0 panes).
+        // State is global now: the active band renders as it always did, and
+        // everything else lands in the collapsed parked group below it.
         let ordered = self.workspaces(cx);
-        let by_workspace: Vec<(String, Vec<&Pane>)> = ordered
-            .into_iter()
-            .map(|ws| {
-                let panes: Vec<&Pane> = self.panes.iter().filter(|p| p.workspace == ws).collect();
-                (ws, panes)
-            })
-            .collect();
+        let (active, parked) =
+            crate::subscriptions_pref::partition(&ordered, &self.subs_pref.active);
+        let parked_n = parked.len();
+        let parked_rows: Vec<String> = if self.parked_expanded {
+            parked
+        } else {
+            Vec::new()
+        };
 
         let _ = window_active; // focus chrome reserved for future empty-window dimming
 
@@ -560,222 +833,20 @@ impl SeanceApp {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .children(by_workspace.into_iter().map(|(workspace, panes)| {
-                        let selected = self.selected_workspace.as_deref() == Some(workspace.as_str());
-                        let _pane_n = panes.len();
-                        let ws_for_click = workspace.clone();
-                        let ws_for_group_drop = workspace.clone();
-                        let ws_for_pane_drop = workspace.clone();
-                        let ws_for_menu = workspace.clone();
-                        let renaming_this_ws = matches!(
-                            &self.renaming,
-                            Some((RenameTarget::Workspace(w), _)) if *w == workspace
-                        );
-                        let rename_input = self.renaming.as_ref().map(|(_, i)| i.clone());
-                        // Collapsed workspaces: header only (no pane rows).
-                        let header: gpui::AnyElement = if renaming_this_ws {
-                            div()
-                                .px_2()
-                                .py_1p5()
-                                .children(rename_input.map(|i| Input::new(&i)))
-                                .into_any_element()
-                        } else {
-                            div()
-                                .id(SharedString::from(format!("ws-{workspace}")))
-                                .group(SharedString::from(format!("wsgrp-{workspace}")))
-                                .px_2()
-                                .py_1p5()
-                                .flex()
-                                .items_center()
-                                .gap_1p5()
-                                .cursor_pointer()
-                                .when(selected, |d| d.bg(selected_row_fill()))
-                                .hover(|s| {
-                                    if selected {
-                                        s.bg(selected_row_fill().lighten(0.04))
-                                    } else {
-                                        s.bg(SeancePalette::surface())
-                                    }
-                                })
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(|_this, _, window, cx| {
-                                        sidebar_press_no_select(window, cx);
-                                    }),
-                                )
-                                // Drop a pane onto the header → move into this circle.
-                                // Workspace-vs-workspace drag-reorder is intentionally gone;
-                                // order is auto (working agents, then last human touch).
-                                .drag_over::<DraggedPane>(|style, _, _, _| {
-                                    style.bg(SeancePalette::violet_dim())
-                                })
-                                .on_drop(cx.listener(move |this, drag: &DraggedPane, _, cx| {
-                                    ui_debug(&format!(
-                                        "drop pane '{}' on workspace header '{}'",
-                                        drag.slug, ws_for_pane_drop
-                                    ));
-                                    this.reorder_pane(&drag.slug, &ws_for_pane_drop, None, cx);
-                                }))
-                                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                                    if event.click_count() == 2 {
-                                        this.start_rename(
-                                            RenameTarget::Workspace(ws_for_click.clone()),
-                                            &ws_for_click.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    } else {
-                                        this.select_workspace(&ws_for_click, window, cx);
-                                    }
-                                }))
-                                .context_menu({
-                                    let ws_m = ws_for_menu.clone();
-                                    move |menu, _, _| {
-                                        let m = menu
-                                            .menu(
-                                                "touch (bump recency)",
-                                                Box::new(ActTouchWorkspace(ws_m.clone())),
-                                            )
-                                            .menu(
-                                                "rename workspace",
-                                                Box::new(ActRenameWorkspace(ws_m.clone())),
-                                            )
-                                            .menu(
-                                                "fork workspace ⑂",
-                                                Box::new(ActForkWorkspace(ws_m.clone())),
-                                            )
-                                            .menu(
-                                                "share replay…",
-                                                Box::new(ActShareReplay(ws_m.clone())),
-                                            )
-                                            .separator()
-                                            .menu(
-                                                "banish workspace (kill all panes)",
-                                                Box::new(ActKillWorkspace(ws_m.clone())),
-                                            );
-                                        m
-                                    }
-                                })
-                                .child({
-                                    // Working → spinner in the icon slot (no "working"
-                                    // text badge), so more of the workspace name shows.
-                                    let att = self.workspace_attention_cx(&workspace, cx);
-                                    let working =
-                                        matches!(att, Some(WorkspaceAttention::Working));
-                                    let (glyph, color) = if working {
-                                        (working_spinner_glyph(), SeancePalette::flame())
-                                    } else if selected {
-                                        ("◆", SeancePalette::flame())
-                                    } else {
-                                        ("◈", SeancePalette::text_faint())
-                                    };
-                                    div()
-                                        .flex_none()
-                                        .text_sm()
-                                        .text_color(color)
-                                        .child(glyph)
-                                })
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .font_weight(if selected {
-                                            gpui::FontWeight::SEMIBOLD
-                                        } else {
-                                            gpui::FontWeight::NORMAL
-                                        })
-                                        .text_color(if selected {
-                                            SeancePalette::text()
-                                        } else {
-                                            SeancePalette::text_dim()
-                                        })
-                                        .child(workspace.clone()),
-                                )
-                                .children({
-                                    // Text badges only for needs/done — working is
-                                    // the left-side spinner above.
-                                    let att = if selected {
-                                        None
-                                    } else {
-                                        self.workspace_attention_cx(&workspace, cx)
-                                            .filter(|a| {
-                                                !matches!(a, WorkspaceAttention::Working)
-                                            })
-                                    };
-                                    att.map(|a| {
-                                        div()
-                                            .flex_none()
-                                            .px_1()
-                                            .rounded_sm()
-                                            .text_xs()
-                                            .text_color(a.color())
-                                            .child(a.label())
-                                    })
-                                })
-                                .child(
-                                    // Banish ×: revealed only while the row is hovered
-                                    // (group-hover), so idle rows stay quiet.
-                                    div()
-                                        .id(SharedString::from(format!("ws-banish-{workspace}")))
-                                        .flex_none()
-                                        .px_1()
-                                        .rounded_sm()
-                                        .text_xs()
-                                        .text_color(gpui::transparent_black())
-                                        .group_hover(
-                                            SharedString::from(format!("wsgrp-{workspace}")),
-                                            |s| s.text_color(SeancePalette::text_faint()),
-                                        )
-                                        .hover(|s| {
-                                            s.text_color(SeancePalette::danger())
-                                                .bg(SeancePalette::surface())
-                                        })
-                                        .cursor_pointer()
-                                        .on_click({
-                                            let ws = workspace.clone();
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.kill_workspace(&ws, window, cx);
-                                            })
-                                        })
-                                        .tooltip(tip("banish workspace (kill all panes)"))
-                                        .child("×"),
-                                )
-                                .children({
-                                    // Time since last output (was: pane count).
-                                    self.workspace_activity_label(&workspace, cx).map(|label| {
-                                        div()
-                                            .flex_none()
-                                            .text_xs()
-                                            .text_color(if selected {
-                                                SeancePalette::text_dim()
-                                            } else {
-                                                SeancePalette::text_faint()
-                                            })
-                                            .child(label)
-                                    })
-                                })
-                                .into_any_element()
-                        };
-                        div()
-                            .id(SharedString::from(format!("wsgroup-{workspace}")))
-                            .flex()
-                            .flex_col()
-                            .gap_0p5()
-                            .mb_0p5()
-                            .drag_over::<DraggedPane>(|style, _, _, _| {
-                                style.bg(SeancePalette::surface())
-                            })
-                            .on_drop(cx.listener(move |this, drag: &DraggedPane, _, cx| {
-                                ui_debug(&format!(
-                                    "drop pane '{}' on workspace group '{}'",
-                                    drag.slug, ws_for_group_drop
-                                ));
-                                this.reorder_pane(&drag.slug, &ws_for_group_drop, None, cx);
-                            }))
-                            .child(header)
-                    }))
+                    .children(
+                        active
+                            .into_iter()
+                            .map(|ws| self.render_workspace_group(ws, false, cx)),
+                    )
+                    // Parked group: one collapsed accordion under the active
+                    // band. Expanded state is session-local by design.
+                    .when(parked_n > 0, |d| {
+                        d.child(self.render_parked_header(parked_n, cx)).children(
+                            parked_rows
+                                .into_iter()
+                                .map(|ws| self.render_workspace_group(ws, true, cx)),
+                        )
+                    })
                     // Flex filler below the rows. The parked/subscribe menu
                     // that used to live here (pull / collect) went with the
                     // ownership model; phase 2 puts the parked group here.
