@@ -21,22 +21,6 @@ pub(super) fn rel_label(delta_ms: u64) -> String {
 }
 use super::{RenameTarget, SeanceApp};
 
-/// Ring for one ctrl+page burst: reuse the burst's snapshot while it lives
-/// (so a mid-burst resort can't reshuffle the rotation), else snapshot the
-/// current DISPLAY order. Returns `(ring, took_new_snapshot)`. Pure — the
-/// burst-liveness clock stays with the caller.
-pub(super) fn cycle_burst_ring(
-    snapshot: &[String],
-    burst_live: bool,
-    display: &[String],
-) -> (Vec<String>, bool) {
-    if burst_live && !snapshot.is_empty() {
-        (snapshot.to_vec(), false)
-    } else {
-        (display.to_vec(), true)
-    }
-}
-
 /// Badge on an *inactive* workspace header in the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WorkspaceAttention {
@@ -559,20 +543,11 @@ impl SeanceApp {
         cx: &mut Context<Self>,
     ) {
         // Parked circles are deliberately out of the rotation — that's the
-        // point of parking them. Cycle in the DISPLAYED sidebar order (a
-        // creation-order ring made "next" land somewhere visually random),
-        // but snapshot that order for the duration of a cycling burst so a
-        // mid-burst working-band resort can't make the ring non-monotonic.
-        let now = std::time::Instant::now();
-        let burst_live = self
-            .cycle_ring_at
-            .is_some_and(|at| now.duration_since(at) < std::time::Duration::from_millis(2000));
-        let (list, took_new) =
-            cycle_burst_ring(&self.cycle_ring, burst_live, &self.active_workspaces(cx));
-        if took_new {
-            self.cycle_ring = list.clone();
-        }
-        self.cycle_ring_at = Some(now);
+        // point of parking them. Cycle EXACTLY the list the sidebar shows,
+        // read live at each press (owner decision 2026-08-02: pageup/down
+        // must always correspond to what the left sidebar displays — no
+        // snapshots, no alternate orders).
+        let list = self.active_workspaces(cx);
         if list.is_empty() {
             return;
         }
@@ -671,41 +646,3 @@ impl SeanceApp {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::cycle_burst_ring;
-
-    fn v(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn fresh_burst_snapshots_the_display_order() {
-        let (ring, took) = cycle_burst_ring(&[], false, &v(&["c", "a", "b"]));
-        assert!(took);
-        assert_eq!(ring, v(&["c", "a", "b"]));
-    }
-
-    #[test]
-    fn live_burst_keeps_its_snapshot_across_a_resort() {
-        let snap = v(&["c", "a", "b"]);
-        let (ring, took) = cycle_burst_ring(&snap, true, &v(&["a", "b", "c"]));
-        assert!(!took);
-        assert_eq!(ring, snap);
-    }
-
-    #[test]
-    fn expired_burst_resnapshots() {
-        let snap = v(&["c", "a", "b"]);
-        let (ring, took) = cycle_burst_ring(&snap, false, &v(&["a", "b", "c"]));
-        assert!(took);
-        assert_eq!(ring, v(&["a", "b", "c"]));
-    }
-
-    #[test]
-    fn empty_snapshot_resnapshots_even_mid_burst() {
-        let (ring, took) = cycle_burst_ring(&[], true, &v(&["a"]));
-        assert!(took);
-        assert_eq!(ring, v(&["a"]));
-    }
-}

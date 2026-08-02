@@ -375,23 +375,14 @@ impl ClientState {
         done.then_some(Attention::Done)
     }
 
-    /// Ctrl+PageUp/Down ring for one cycling BURST: reuse the burst's
-    /// snapshot while it lives, else snapshot the DISPLAYED active order.
-    /// A daemon-creation-order ring made "next" land somewhere visually
-    /// random; the display order is what next/prev means to a human, and the
-    /// burst snapshot keeps the rotation monotonic across mid-burst resorts.
-    /// Returns `(ring, took_new_snapshot)`; the burst clock stays with the
-    /// caller. Native mirrors this (`cycle_burst_ring`).
-    pub fn cycle_burst_ring(&self, snapshot: &[String], burst_live: bool) -> (Vec<String>, bool) {
-        if burst_live && !snapshot.is_empty() {
-            return (snapshot.to_vec(), false);
-        }
-        let display: Vec<String> = self
-            .workspaces()
+    /// Ctrl+PageUp/Down walks EXACTLY the active list the sidebar displays,
+    /// read live at each press — pageup/down must always correspond to what
+    /// the left sidebar shows (owner decision 2026-08-02; native mirrors).
+    pub fn displayed_active_ring(&self) -> Vec<String> {
+        self.workspaces()
             .into_iter()
             .filter(|w| self.subs.is_active(w))
-            .collect();
-        (display, true)
+            .collect()
     }
 
     /// Bump recency (human typing here / context-menu touch / fresh spawn).
@@ -983,26 +974,21 @@ mod tests {
     }
 
     #[test]
-    fn cycle_burst_ring_follows_display_order_and_freezes_per_burst() {
+    fn displayed_active_ring_is_the_sidebar_order_live() {
         let mut st = ClientState::default();
         st.apply_event(pr_state_event("needs"), 0.0);
         st.subs.activate("lab");
         st.touch_workspace("raid", 100.0);
-        let display = vec!["raid".to_string(), "lab".to_string()];
-        assert_eq!(st.active_workspaces(), display);
-        // Fresh burst snapshots the DISPLAYED order.
-        let (ring, took) = st.cycle_burst_ring(&[], false);
-        assert!(took);
-        assert_eq!(ring, display);
-        // Mid-burst resort: the snapshot wins.
+        assert_eq!(
+            st.displayed_active_ring(),
+            vec!["raid".to_string(), "lab".to_string()]
+        );
+        // A resort is reflected immediately — the ring IS the display.
         st.touch_workspace("lab", 200.0);
-        let (ring2, took2) = st.cycle_burst_ring(&ring, true);
-        assert!(!took2);
-        assert_eq!(ring2, display);
-        // Burst expired: re-snapshot picks up the new display order.
-        let (ring3, took3) = st.cycle_burst_ring(&ring, false);
-        assert!(took3);
-        assert_eq!(ring3, vec!["lab".to_string(), "raid".to_string()]);
+        assert_eq!(
+            st.displayed_active_ring(),
+            vec!["lab".to_string(), "raid".to_string()]
+        );
     }
 
     #[test]
