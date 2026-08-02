@@ -387,7 +387,11 @@ impl SeanceApp {
     fn render_pr_section(&self, section: BoardSection, cx: &Context<Self>) -> gpui::AnyElement {
         let ws = section.workspace.clone();
         let ws_click = ws.clone();
-        let rows: Vec<gpui::AnyElement> = section.rows.into_iter().map(render_row).collect();
+        let rows: Vec<gpui::AnyElement> = section
+            .rows
+            .into_iter()
+            .map(|r| render_row(r, &ws, cx))
+            .collect();
         div()
             .flex_none()
             .flex()
@@ -458,8 +462,11 @@ fn cell(text: String, color: gpui::Hsla) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn render_row(row: BoardRow) -> gpui::AnyElement {
+fn render_row(row: BoardRow, ws: &str, cx: &Context<SeanceApp>) -> gpui::AnyElement {
     let target = row.url.clone();
+    let drop_url = row.url.clone();
+    let ws_for_drop = ws.to_string();
+    let group = SharedString::from(format!("pr-board-grp-{}", row.url));
     let color = row_color(&row);
     let mut cells: Vec<gpui::AnyElement> = vec![cell(row.reference.clone(), color)];
     if row.is_draft {
@@ -500,8 +507,32 @@ fn render_row(row: BoardRow) -> gpui::AnyElement {
             SeancePalette::text_faint(),
         ));
     }
+    // Per-row remove ✕, revealed on hover (sidebar banish pattern).
+    cells.push(
+        div()
+            .id(SharedString::from(format!("pr-board-x-{}", row.url)))
+            .flex_none()
+            .px_1()
+            .rounded_sm()
+            .text_xs()
+            .text_color(gpui::transparent_black())
+            .group_hover(group.clone(), |s| s.text_color(SeancePalette::text_faint()))
+            .hover(|s| {
+                s.text_color(SeancePalette::danger())
+                    .bg(SeancePalette::bg_elevated())
+            })
+            .cursor_pointer()
+            .tooltip(tip(super::prlinks::PR_REMOVE_TIP))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.remove_pr_link(&ws_for_drop, &drop_url, cx);
+                cx.stop_propagation();
+            }))
+            .child("✕")
+            .into_any_element(),
+    );
     div()
         .id(SharedString::from(format!("pr-board-row-{}", row.url)))
+        .group(group)
         .flex()
         .items_center()
         .gap_2()

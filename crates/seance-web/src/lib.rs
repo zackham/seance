@@ -15,6 +15,7 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
+use seance_core::control::ControlRequest;
 use seance_core::input::{key_to_bytes, TermModes};
 use seance_core::protocol::{GuiEvent, GuiRequest};
 
@@ -82,6 +83,9 @@ pub struct App {
     dirty_grids: RefCell<HashSet<String>>,
     need_rebuild: Cell<bool>,
     badges_dirty: Cell<bool>,
+    /// Ctrl+page cycling burst: display-order snapshot + last press (ms).
+    cycle_ring: RefCell<Vec<String>>,
+    cycle_ring_at: Cell<f64>,
     structure_rev_bound: Cell<u64>,
     /// Selection: (pane, anchor cell idx, point cell idx, dragging).
     selection: RefCell<Option<(String, usize, usize, bool)>>,
@@ -143,6 +147,8 @@ impl App {
             dirty_grids: RefCell::new(HashSet::new()),
             need_rebuild: Cell::new(false),
             badges_dirty: Cell::new(false),
+            cycle_ring: RefCell::new(Vec::new()),
+            cycle_ring_at: Cell::new(0.0),
             structure_rev_bound: Cell::new(0),
             selection: RefCell::new(None),
             wheel_accum: RefCell::new(HashMap::new()),
@@ -602,10 +608,20 @@ impl App {
     /// Ctrl+PageUp/Down. Parked circles are deliberately out of the rotation —
     /// that is the point of parking them.
     fn cycle_workspace(self: &Rc<Self>, dir: i32) {
+        // Displayed order, snapshotted per 2s cycling burst (see
+        // ClientState::cycle_burst_ring for the reasoning).
+        let now = js_sys::Date::now();
+        let burst_live = {
+            let at = self.cycle_ring_at.get();
+            at > 0.0 && now - at < 2000.0
+        };
         let st = self.state.borrow();
-        // Stable ring (0.13): daemon order, not the recency-sorted sidebar.
-        let wss = st.cycle_ring();
+        let (wss, took_new) = st.cycle_burst_ring(&self.cycle_ring.borrow(), burst_live);
         drop(st);
+        if took_new {
+            *self.cycle_ring.borrow_mut() = wss.clone();
+        }
+        self.cycle_ring_at.set(now);
         if wss.is_empty() {
             return;
         }
@@ -1037,6 +1053,21 @@ impl Actions for AppActions {
         let actions: Rc<dyn Actions> = Rc::new(AppActions(Rc::clone(&self.0)));
         let st = self.0.state.borrow();
         pr_board::toggle(&st, now_unix_ms(&st), actions);
+    }
+
+    fn remove_pr_link(&self, ws: &str, url: &str) {
+        self.0.send(&GuiRequest::Ctl(ControlRequest::PrLinkClear {
+            url: Some(url.to_string()),
+            workspace: Some(ws.to_string()),
+            scope: None,
+            from: Some("web".into()),
+        }));
+        let changed = self.0.state.borrow_mut().remove_pr_link(ws, url);
+        if changed {
+            self.0.need_rebuild.set(true);
+            let st = self.0.state.borrow();
+            pr_board::refresh(&st, now_unix_ms(&st));
+        }
     }
 
     fn fs_call(

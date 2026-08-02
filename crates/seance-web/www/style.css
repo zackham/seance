@@ -1436,6 +1436,20 @@ input:focus {
   min-width: 28px;
   text-align: right;
 }
+.prb-x {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  opacity: 0;
+  padding: 0 2px;
+  border-radius: var(--r-sm);
+}
+.prb-row:hover .prb-x {
+  opacity: 0.6;
+}
+.prb-x:hover {
+  opacity: 1;
+  color: var(--danger, #e06c6c);
+}
 .prb-empty {
   padding: 16px 14px;
   color: var(--text-faint);

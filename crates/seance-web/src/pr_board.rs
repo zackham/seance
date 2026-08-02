@@ -373,14 +373,14 @@ pub fn board_html(board: &Board) -> String {
         out.push_str(if sec.parked { "parked" } else { "active" });
         out.push_str("</span></div>");
         for row in &sec.rows {
-            out.push_str(&row_html(row));
+            out.push_str(&row_html(row, &sec.circle));
         }
         out.push_str("</div>");
     }
     out
 }
 
-fn row_html(row: &BoardRow) -> String {
+fn row_html(row: &BoardRow, circle: &str) -> String {
     let mut cls = String::from("prb-row");
     match row.attention.as_deref() {
         Some("needs") => cls.push_str(" prb-needs"),
@@ -394,9 +394,10 @@ fn row_html(row: &BoardRow) -> String {
         cls.push_str(" prb-stale");
     }
     let mut out = format!(
-        r#"<div class="{}" data-url="{}" title="{}"><span class="prb-head">{}</span>"#,
+        r#"<div class="{}" data-url="{}" data-ws="{}" title="{}"><span class="prb-head">{}</span>"#,
         cls,
         esc(&row.url),
+        esc(circle),
         esc(&row.url),
         esc(&row.head)
     );
@@ -451,6 +452,11 @@ fn row_html(row: &BoardRow) -> String {
             esc(&row.age)
         ));
     }
+    // Per-row remove: engine-side single-url clear also sticky-dismisses, so
+    // the scraper won't re-add this PR (a fresh `pr-link add` un-dismisses).
+    out.push_str(
+        r#"<span class="prb-x" title="remove this PR ref (stays removed; new links still tracked)">✕</span>"#,
+    );
     out.push_str("</div>");
     out
 }
@@ -590,7 +596,19 @@ fn build() {
                 return;
             }
             if let Some(row) = hit(".prb-row") {
-                if let Some(url) = row.get_attribute("data-url") {
+                let url = row.get_attribute("data-url");
+                if hit(".prb-x").is_some() {
+                    // Remove beats open: the row's url is dropped + sticky
+                    // dismissed; the board re-renders off the local mirror.
+                    ev.stop_propagation();
+                    if let (Some(url), Some(ws), Some(a)) =
+                        (url, row.get_attribute("data-ws"), actions.borrow().as_ref())
+                    {
+                        a.remove_pr_link(&ws, &url);
+                    }
+                    return;
+                }
+                if let Some(url) = url {
                     ev.stop_propagation();
                     crate::ui::open_url(&url);
                 }
@@ -846,6 +864,32 @@ mod tests {
         assert!(!html.contains("<script>"));
         assert!(html.contains(r#"data-ws="raid""#));
         assert!(html.contains(r#"data-url="https://github.com/o/r/pull/1""#));
+    }
+
+    #[test]
+    fn every_row_carries_a_remove_affordance_and_its_circle() {
+        let st = state_with(&[(
+            "raid",
+            vec![
+                link("https://github.com/o/r/pull/1", open_pr(1.0)),
+                link("https://github.com/o/r/pull/2", open_pr(2.0)),
+            ],
+        )]);
+        let html = board_html(&Board::build(&st, NOW));
+        assert_eq!(html.matches(r#"class="prb-x""#).count(), 2);
+        // Row-level `data-ws` is what the click handler clears against.
+        assert_eq!(html.matches(r#"data-ws="raid""#).count(), 3); // head + 2 rows
+    }
+
+    #[test]
+    fn removing_the_last_link_empties_the_board() {
+        let mut st = state_with(&[(
+            "raid",
+            vec![link("https://github.com/o/r/pull/1", open_pr(1.0))],
+        )]);
+        assert!(st.remove_pr_link("raid", "https://github.com/o/r/pull/1"));
+        assert!(Board::build(&st, NOW).is_empty());
+        assert!(st.latest_pr_link("raid").is_none());
     }
 
     #[test]

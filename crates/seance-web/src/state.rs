@@ -338,6 +338,24 @@ impl ClientState {
             .unwrap_or(&[])
     }
 
+    /// Drop ONE PR link from a workspace — the optimistic mirror of a
+    /// single-url `pr-link clear` (engine-side that also sticky-dismisses the
+    /// url, so the scraper won't re-add it). Returns true when a link went
+    /// away; an emptied list drops its key, matching the State-fold shape
+    /// (only non-empty lists are inserted there).
+    pub fn remove_pr_link(&mut self, workspace: &str, url: &str) -> bool {
+        let Some(list) = self.workspace_pr_links.get_mut(workspace) else {
+            return false;
+        };
+        let before = list.len();
+        list.retain(|l| l.url != url);
+        let removed = list.len() != before;
+        if list.is_empty() {
+            self.workspace_pr_links.remove(workspace);
+        }
+        removed
+    }
+
     /// The chip's link: the most recently seen one.
     pub fn latest_pr_link(&self, workspace: &str) -> Option<&PrLink> {
         self.pr_links(workspace).last()
@@ -357,24 +375,23 @@ impl ClientState {
         done.then_some(Attention::Done)
     }
 
-    /// Stable ctrl+PageUp/Down ring: the ACTIVE set in daemon
-    /// `workspace_order` (alpha for anything not in it), NOT the
-    /// recency-sorted sidebar list — selection bumps made that ring
-    /// non-monotonic. Display sort is unchanged.
-    pub fn cycle_ring(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
+    /// Ctrl+PageUp/Down ring for one cycling BURST: reuse the burst's
+    /// snapshot while it lives, else snapshot the DISPLAYED active order.
+    /// A daemon-creation-order ring made "next" land somewhere visually
+    /// random; the display order is what next/prev means to a human, and the
+    /// burst snapshot keeps the rotation monotonic across mid-burst resorts.
+    /// Returns `(ring, took_new_snapshot)`; the burst clock stays with the
+    /// caller. Native mirrors this (`cycle_burst_ring`).
+    pub fn cycle_burst_ring(&self, snapshot: &[String], burst_live: bool) -> (Vec<String>, bool) {
+        if burst_live && !snapshot.is_empty() {
+            return (snapshot.to_vec(), false);
+        }
+        let display: Vec<String> = self
             .workspaces()
             .into_iter()
             .filter(|w| self.subs.is_active(w))
             .collect();
-        let rank = |ws: &str| {
-            self.workspace_order
-                .iter()
-                .position(|o| o == ws)
-                .unwrap_or(usize::MAX)
-        };
-        out.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
-        out
+        (display, true)
     }
 
     /// Bump recency (human typing here / context-menu touch / fresh spawn).
@@ -966,26 +983,26 @@ mod tests {
     }
 
     #[test]
-    fn cycle_ring_is_stable_daemon_order_not_display_order() {
+    fn cycle_burst_ring_follows_display_order_and_freezes_per_burst() {
         let mut st = ClientState::default();
         st.apply_event(pr_state_event("needs"), 0.0);
         st.subs.activate("lab");
-        // Display sort is recency-driven: touching `raid` floats it up…
         st.touch_workspace("raid", 100.0);
-        assert_eq!(
-            st.active_workspaces(),
-            vec!["raid".to_string(), "lab".to_string()]
-        );
-        // …while the cycle ring stays in workspace_order.
-        assert_eq!(st.cycle_ring(), vec!["lab".to_string(), "raid".to_string()]);
-        // Unordered circles fall back to alpha, after the ordered ones.
-        st.extra_workspaces.push("aaa".into());
-        st.subs.activate("aaa");
-        st.workspace_order = vec!["raid".into()];
-        assert_eq!(
-            st.cycle_ring(),
-            vec!["raid".to_string(), "aaa".to_string(), "lab".to_string()]
-        );
+        let display = vec!["raid".to_string(), "lab".to_string()];
+        assert_eq!(st.active_workspaces(), display);
+        // Fresh burst snapshots the DISPLAYED order.
+        let (ring, took) = st.cycle_burst_ring(&[], false);
+        assert!(took);
+        assert_eq!(ring, display);
+        // Mid-burst resort: the snapshot wins.
+        st.touch_workspace("lab", 200.0);
+        let (ring2, took2) = st.cycle_burst_ring(&ring, true);
+        assert!(!took2);
+        assert_eq!(ring2, display);
+        // Burst expired: re-snapshot picks up the new display order.
+        let (ring3, took3) = st.cycle_burst_ring(&ring, false);
+        assert!(took3);
+        assert_eq!(ring3, vec!["lab".to_string(), "raid".to_string()]);
     }
 
     #[test]
@@ -1079,5 +1096,29 @@ mod tests {
         st.grids.insert("w-1".into(), GridSnapshot::empty("w-1"));
         st.apply_event(GuiEvent::PaneKilled { slug: "w-1".into() }, 0.0);
         assert!(st.panes.is_empty() && st.grids.is_empty());
+    }
+
+    #[test]
+    fn remove_pr_link_drops_one_and_prunes_empty_lists() {
+        let mut st = ClientState::default();
+        let mk = |u: &str| PrLink {
+            url: u.to_string(),
+            status: None,
+            seen_ms: 0,
+        };
+        st.workspace_pr_links.insert(
+            "lab".into(),
+            vec![mk("https://x/pull/1"), mk("https://x/pull/2")],
+        );
+        assert!(st.remove_pr_link("lab", "https://x/pull/1"));
+        assert_eq!(st.pr_links("lab").len(), 1);
+        // Unknown url / unknown circle are no-ops.
+        assert!(!st.remove_pr_link("lab", "https://x/pull/9"));
+        assert!(!st.remove_pr_link("nope", "https://x/pull/2"));
+        // Last one out prunes the key, so the chip disappears entirely.
+        assert!(st.remove_pr_link("lab", "https://x/pull/2"));
+        assert!(st.pr_links("lab").is_empty());
+        assert!(!st.workspace_pr_links.contains_key("lab"));
+        assert!(st.latest_pr_link("lab").is_none());
     }
 }

@@ -13,9 +13,19 @@ use seance_core::protocol::PrLink;
 use crate::runtime::protocol::GuiRequest;
 use crate::theme::SeancePalette;
 
-use super::util::tip_s;
+use super::util::{tip, tip_s};
 use super::workspaces::WorkspaceAttention;
 use super::SeanceApp;
+
+/// Tooltip on every per-row remove ✕ (popover and board share it).
+pub(super) const PR_REMOVE_TIP: &str =
+    "remove this PR ref (stays removed; new links still tracked)";
+
+/// The mirror after dropping one URL. Pure so the optimistic local update is
+/// testable without a daemon.
+pub(super) fn without_url(links: &[PrLink], url: &str) -> Vec<PrLink> {
+    links.iter().filter(|l| l.url != url).cloned().collect()
+}
 
 /// PR number out of a canonical `…/pull/N` URL (trailing `/files`, `#anchor`
 /// and `?query` tolerated). None when the URL isn't a PR link.
@@ -154,6 +164,9 @@ impl SeanceApp {
             .rev()
             .map(|l| {
                 let target = l.url.clone();
+                let drop_url = l.url.clone();
+                let ws_for_drop = ws.clone();
+                let group = SharedString::from(format!("pr-item-grp-{}", l.url));
                 let state = l
                     .status
                     .as_ref()
@@ -161,9 +174,14 @@ impl SeanceApp {
                     .unwrap_or_default();
                 div()
                     .id(SharedString::from(format!("pr-item-{}", l.url)))
+                    .group(group.clone())
                     .px_2()
                     .py_0p5()
                     .rounded_md()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
                     .text_xs()
                     .text_color(link_color(l))
                     .cursor_pointer()
@@ -172,11 +190,39 @@ impl SeanceApp {
                     .on_click(cx.listener(move |_this, _, _, _| {
                         crate::sysopen::open_detached(&target);
                     }))
-                    .child(if state.is_empty() {
-                        chip_label(l, with_org)
-                    } else {
-                        format!("{} · {state}", chip_label(l, with_org))
-                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(if state.is_empty() {
+                                chip_label(l, with_org)
+                            } else {
+                                format!("{} · {state}", chip_label(l, with_org))
+                            }),
+                    )
+                    .child(
+                        // Per-row remove ✕, revealed on row hover like the
+                        // sidebar banish ×.
+                        div()
+                            .id(SharedString::from(format!("pr-item-x-{}", l.url)))
+                            .flex_none()
+                            .px_1()
+                            .rounded_sm()
+                            .text_color(gpui::transparent_black())
+                            .group_hover(group, |s| s.text_color(SeancePalette::text_faint()))
+                            .hover(|s| {
+                                s.text_color(SeancePalette::danger())
+                                    .bg(SeancePalette::surface())
+                            })
+                            .cursor_pointer()
+                            .tooltip(tip(PR_REMOVE_TIP))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_pr_link(&ws_for_drop, &drop_url, cx);
+                                cx.stop_propagation();
+                            }))
+                            .child("✕"),
+                    )
                     .into_any_element()
             })
             .chain(std::iter::once(
@@ -221,6 +267,29 @@ impl SeanceApp {
                     .children(rows),
             )
             .into_any_element()
+    }
+
+    /// Drop one PR ref from one circle: single-URL `pr-link clear`, which the
+    /// daemon treats as a sticky dismissal (the scraper won't re-add it), plus
+    /// the optimistic local mirror update. When the circle's last link goes,
+    /// the mirror entry goes with it — chip and popover simply stop rendering.
+    pub(super) fn remove_pr_link(&mut self, ws: &str, url: &str, cx: &mut Context<Self>) {
+        let _ = self.client.send(GuiRequest::Ctl(
+            seance_core::control::ControlRequest::PrLinkClear {
+                url: Some(url.to_string()),
+                workspace: Some(ws.to_string()),
+                scope: None,
+                from: Some("gui".into()),
+            },
+        ));
+        let left = without_url(self.pr_links_for(ws), url);
+        if left.is_empty() {
+            self.pr_links.remove(ws);
+            self.pr_menu_open = false;
+        } else {
+            self.pr_links.insert(ws.to_string(), left);
+        }
+        cx.notify();
     }
 
     /// `pr-link clear <workspace>` over the GUI's ctl seam. The daemon persists
@@ -290,6 +359,22 @@ mod tests {
             Some(WorkspaceAttention::NeedsHuman)
         );
         assert_eq!(pr_attention(&[link("u/pull/1", Some("weird"))]), None);
+    }
+
+    #[test]
+    fn without_url_drops_only_the_named_link() {
+        let links = vec![
+            link("https://github.com/o/r/pull/1", None),
+            link("https://github.com/o/r/pull/2", Some("needs")),
+        ];
+        let left = without_url(&links, "https://github.com/o/r/pull/1");
+        assert_eq!(
+            left.iter().map(|l| l.url.as_str()).collect::<Vec<_>>(),
+            vec!["https://github.com/o/r/pull/2"]
+        );
+        // Unknown URL is a no-op; removing the last one empties the mirror.
+        assert_eq!(without_url(&links, "nope").len(), 2);
+        assert!(without_url(&left, "https://github.com/o/r/pull/2").is_empty());
     }
 
     #[test]

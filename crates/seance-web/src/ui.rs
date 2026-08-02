@@ -2434,9 +2434,16 @@ fn open_pr_menu(
     // Most recent first in the list (the chip's link on top).
     for link in links.iter().rev() {
         let url = link.url.clone();
-        entries.push(MenuEntry::item(pr_chip_text(link, show_org), move || {
-            open_url(&url)
-        }));
+        let rm_url = link.url.clone();
+        let rm_actions = actions.clone();
+        let rm_ws = ws.to_string();
+        entries.push(
+            MenuEntry::item(pr_chip_text(link, show_org), move || open_url(&url)).with_trailing(
+                "pr-rm",
+                "remove this PR ref (stays removed; new links still tracked)",
+                move || rm_actions.remove_pr_link(&rm_ws, &rm_url),
+            ),
+        );
     }
     entries.push(MenuEntry::Separator);
     {

@@ -69,6 +69,10 @@ pub trait Actions {
     fn toggle_activity(&self);
     /// Toggle the PR board sweep overlay (`PRs (N)` in the sidebar footer).
     fn toggle_pr_board(&self);
+    /// Drop ONE PR link from a circle: `pr-link clear` for that url (engine
+    /// removes AND sticky-dismisses it) plus the optimistic local mirror, so
+    /// chip / popover / board reflect it before the daemon state lands.
+    fn remove_pr_link(&self, ws: &str, url: &str);
     /// Daemon fs-bridge call (quicklaunch config, host select, …). Callback
     /// may never fire if the socket drops mid-flight — tolerate silence.
     fn fs_call(

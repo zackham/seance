@@ -9,11 +9,17 @@ use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 
+/// A row's trailing affordance: (css class, tooltip, action).
+type Trailing = (String, String, Box<dyn FnOnce()>);
+
 pub enum MenuEntry {
     Item {
         label: String,
         danger: bool,
         action: Box<dyn FnOnce()>,
+        /// Optional trailing affordance (class, title, action) — a second hit
+        /// target on the same row that runs instead of the row action.
+        trailing: Option<Trailing>,
     },
     Separator,
 }
@@ -24,6 +30,7 @@ impl MenuEntry {
             label: label.into(),
             danger: false,
             action: Box::new(action),
+            trailing: None,
         }
     }
     pub fn danger(label: impl Into<String>, action: impl FnOnce() + 'static) -> Self {
@@ -31,7 +38,22 @@ impl MenuEntry {
             label: label.into(),
             danger: true,
             action: Box::new(action),
+            trailing: None,
         }
+    }
+
+    /// Attach a trailing `✕`-style button to an item row (no-op on a
+    /// separator). The row's own action does NOT fire when it is clicked.
+    pub fn with_trailing(
+        mut self,
+        class: impl Into<String>,
+        title: impl Into<String>,
+        action: impl FnOnce() + 'static,
+    ) -> Self {
+        if let Self::Item { trailing, .. } = &mut self {
+            *trailing = Some((class.into(), title.into(), Box::new(action)));
+        }
+        self
     }
 }
 
@@ -92,6 +114,7 @@ pub fn open_menu(x: f64, y: f64, entries: Vec<MenuEntry>) {
                 label,
                 danger,
                 action,
+                trailing,
             } => {
                 let Ok(item) = doc.create_element("div") else {
                     continue;
@@ -101,7 +124,45 @@ pub fn open_menu(x: f64, y: f64, entries: Vec<MenuEntry>) {
                 } else {
                     "ctx-item"
                 });
-                item.set_text_content(Some(&label));
+                if trailing.is_none() {
+                    item.set_text_content(Some(&label));
+                } else {
+                    item.set_class_name(if danger {
+                        "ctx-item danger has-trailing"
+                    } else {
+                        "ctx-item has-trailing"
+                    });
+                    if let Ok(text) = doc.create_element("span") {
+                        text.set_class_name("ctx-label");
+                        text.set_text_content(Some(&label));
+                        let _ = item.append_child(&text);
+                    }
+                }
+                if let Some((class, title, act)) = trailing {
+                    if let Ok(btn) = doc.create_element("span") {
+                        btn.set_class_name(&class);
+                        btn.set_text_content(Some("✕"));
+                        let _ = btn.set_attribute("title", &title);
+                        let slot = Rc::new(RefCell::new(Some(act)));
+                        let cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(
+                            move |ev: web_sys::MouseEvent| {
+                                // Beats the row action: the row's own listener
+                                // never sees this mousedown.
+                                ev.stop_propagation();
+                                close_menu();
+                                if let Some(f) = slot.borrow_mut().take() {
+                                    f();
+                                }
+                            },
+                        );
+                        let _ = btn.add_event_listener_with_callback(
+                            "mousedown",
+                            cb.as_ref().unchecked_ref(),
+                        );
+                        closures.push(cb);
+                        let _ = item.append_child(&btn);
+                    }
+                }
                 let slot = Rc::new(RefCell::new(Some(action)));
                 let cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(
                     move |ev: web_sys::MouseEvent| {
@@ -191,6 +252,13 @@ user-select:none;}
 cursor:pointer;white-space:nowrap;}
 .ctx-item:hover{background:var(--surface,#211C1D);color:var(--text,#EBE3DB);}
 .ctx-item.danger:hover{color:var(--danger,#D0675D);}
+.ctx-item.has-trailing{display:flex;align-items:center;gap:10px;}
+.ctx-item.has-trailing .ctx-label{flex:1 1 auto;}
+.ctx-item.has-trailing>span:last-child{flex:0 0 auto;opacity:0;
+color:var(--text-faint,#7A6E68);padding:0 2px;border-radius:3px;}
+.ctx-item.has-trailing:hover>span:last-child{opacity:.65;}
+.ctx-item.has-trailing>span:last-child:hover{opacity:1;
+color:var(--danger,#D0675D);}
 .ctx-sep{height:1px;margin:4px 6px;background:var(--border,#352C2E);}"#,
     ));
     if let Some(head) = doc.head() {
