@@ -221,7 +221,9 @@ fn pad(s: &str, w: usize) -> String {
 /// are numbers we format ourselves, but pane ids are caller-supplied and the
 /// counter row interpolates strings, so escape on principle.
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +383,13 @@ impl Probe {
         let paint_hot = paint_p95.map(|v| v > PAINT_BUDGET_MS).unwrap_or(false);
 
         let mut html = String::with_capacity(512);
-        html.push_str(&stat_row("echo", echo_p50, echo_p95, echo_hot, self.echo.len()));
+        html.push_str(&stat_row(
+            "echo",
+            echo_p50,
+            echo_p95,
+            echo_hot,
+            self.echo.len(),
+        ));
         html.push_str(&stat_row(
             "paint",
             paint_p50,
@@ -390,7 +398,11 @@ impl Probe {
             self.paint.len(),
         ));
         html.push_str(&plain_row("rtt", &fmt_ms(self.rtt_ms), "ms"));
-        html.push_str(&plain_row("rx", &fmt_kib(self.rx.bytes_per_sec(now)), "KiB/s"));
+        html.push_str(&plain_row(
+            "rx",
+            &fmt_kib(self.rx.bytes_per_sec(now)),
+            "KiB/s",
+        ));
         html.push_str(&plain_row("frames", &self.frames.to_string(), ""));
         if self.unpaired > 0 {
             html.push_str(&plain_row("unpaired", &self.unpaired.to_string(), ""));
@@ -445,7 +457,10 @@ fn build_root(doc: &Document) -> Option<HtmlElement> {
         ("pointer-events", "none"),
         ("padding", "6px 8px"),
         ("border-radius", "4px"),
-        ("font", "11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"),
+        (
+            "font",
+            "11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+        ),
         ("white-space", "pre"),
         ("background", BG_ELEVATED),
         ("opacity", "0.92"),

@@ -34,8 +34,8 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use seance_core::replay::{
-    encode_record, extract_chapters, records, Chapter, Manifest, PaneMeta, ReplayEvent, KIND_DAMAGE,
-    KIND_EVENT, KIND_FULL, MAGIC,
+    encode_record, extract_chapters, records, Chapter, Manifest, PaneMeta, ReplayEvent,
+    KIND_DAMAGE, KIND_EVENT, KIND_FULL, MAGIC,
 };
 
 /// One ring segment covers exactly this many ms (its filename is `t_ms / this`).
@@ -112,8 +112,8 @@ fn segments_for(root: &Path, slug: &str) -> Result<Vec<Segment>> {
 }
 
 fn read_segment(seg: &Segment) -> Result<Vec<u8>> {
-    let raw =
-        std::fs::read(&seg.path).with_context(|| format!("reading segment {}", seg.path.display()))?;
+    let raw = std::fs::read(&seg.path)
+        .with_context(|| format!("reading segment {}", seg.path.display()))?;
     if !seg.gz {
         return Ok(raw);
     }
@@ -171,7 +171,11 @@ fn collect_records(
         // must not lose the whole recording.
         let Some(iter) = records(&buf) else { continue };
         for r in iter {
-            out.push(OwnedRec { kind: r.kind, t_ms: r.t_ms, payload: r.payload.to_vec() });
+            out.push(OwnedRec {
+                kind: r.kind,
+                t_ms: r.t_ms,
+                payload: r.payload.to_vec(),
+            });
         }
     }
     out.sort_by_key(|r| r.t_ms);
@@ -195,7 +199,10 @@ fn slice_start(recs: &[OwnedRec], from_ms: u64) -> Option<usize> {
     }
     // Fallback: the first keyframe at-or-after it (earlier DAMAGE is
     // unappliable and the caller drops it).
-    if let Some(i) = recs.iter().position(|r| r.kind == KIND_FULL && r.t_ms >= from_ms) {
+    if let Some(i) = recs
+        .iter()
+        .position(|r| r.kind == KIND_FULL && r.t_ms >= from_ms)
+    {
         return Some(i);
     }
     // No keyframe at all — events only.
@@ -207,7 +214,12 @@ fn slice_start(recs: &[OwnedRec], from_ms: u64) -> Option<usize> {
 ///
 /// A pane with no records in range yields a magic-only stream — a valid empty
 /// recording, not an error.
-pub fn slice_pane(state_replay_root: &Path, slug: &str, from_ms: u64, to_ms: u64) -> Result<Vec<u8>> {
+pub fn slice_pane(
+    state_replay_root: &Path,
+    slug: &str,
+    from_ms: u64,
+    to_ms: u64,
+) -> Result<Vec<u8>> {
     let recs = collect_records(state_replay_root, slug, from_ms, to_ms, true)?;
     let mut out = MAGIC.to_vec();
     let Some(start) = slice_start(&recs, from_ms) else {
@@ -234,7 +246,12 @@ pub fn slice_pane(state_replay_root: &Path, slug: &str, from_ms: u64, to_ms: u64
 ///
 /// Unlike [`slice_pane`] this never walks back a segment: events carry no
 /// state, so the window is exactly the window.
-pub fn pane_events(root: &Path, slug: &str, from_ms: u64, to_ms: u64) -> Result<Vec<(u64, ReplayEvent)>> {
+pub fn pane_events(
+    root: &Path,
+    slug: &str,
+    from_ms: u64,
+    to_ms: u64,
+) -> Result<Vec<(u64, ReplayEvent)>> {
     let recs = collect_records(root, slug, from_ms, to_ms, false)?;
     let mut out = Vec::new();
     for r in recs {
@@ -311,9 +328,14 @@ pub fn workspace_panes(workspace: &str) -> Result<Vec<(String, String)>> {
     };
     let resp = crate::ctl::send_request(&req).map_err(|_| anyhow!("daemon unreachable"))?;
     if !resp.ok {
-        bail!("ctl list failed: {}", resp.error.unwrap_or_else(|| "unknown error".into()));
+        bail!(
+            "ctl list failed: {}",
+            resp.error.unwrap_or_else(|| "unknown error".into())
+        );
     }
-    let data = resp.data.ok_or_else(|| anyhow!("ctl list returned no data"))?;
+    let data = resp
+        .data
+        .ok_or_else(|| anyhow!("ctl list returned no data"))?;
     let panes = data
         .get("panes")
         .and_then(|p| p.as_array())
@@ -322,7 +344,11 @@ pub fn workspace_panes(workspace: &str) -> Result<Vec<(String, String)>> {
         .iter()
         .filter_map(|p| {
             let slug = p.get("slug")?.as_str()?.to_string();
-            let name = p.get("name").and_then(|n| n.as_str()).unwrap_or(&slug).to_string();
+            let name = p
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or(&slug)
+                .to_string();
             Some((slug, name))
         })
         .collect())
@@ -350,12 +376,17 @@ pub fn resolve_panes(
         members.extend(list.iter().map(|(slug, _)| slug.clone()));
     }
     for slug in &recorded {
-        if !members.contains(slug) && ring_pane_workspace(root, slug, to_ms) == Some(workspace.to_string()) {
+        if !members.contains(slug)
+            && ring_pane_workspace(root, slug, to_ms) == Some(workspace.to_string())
+        {
             members.push(slug.clone());
         }
     }
     if !members.is_empty() {
-        return Ok(recorded.into_iter().filter(|s| members.contains(s)).collect());
+        return Ok(recorded
+            .into_iter()
+            .filter(|s| members.contains(s))
+            .collect());
     }
     match daemon {
         Ok(_) => Ok(Vec::new()),
@@ -373,15 +404,10 @@ pub fn resolve_panes(
 /// before `at_ms` in its ring — recordings outlive the daemon's memory.
 fn ring_pane_workspace(root: &Path, slug: &str, at_ms: u64) -> Option<String> {
     let events = pane_events(root, slug, 0, at_ms).ok()?;
-    events
-        .iter()
-        .rev()
-        .find_map(|(_, ev)| match ev {
-            seance_core::replay::ReplayEvent::Spawned { workspace, .. } => {
-                Some(workspace.clone())
-            }
-            _ => None,
-        })
+    events.iter().rev().find_map(|(_, ev)| match ev {
+        seance_core::replay::ReplayEvent::Spawned { workspace, .. } => Some(workspace.clone()),
+        _ => None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -442,7 +468,11 @@ pub fn build_manifest(root: &Path, spec: &ExportSpec) -> Result<Manifest> {
 ///
 /// Layout: `index.html`, `recording/manifest.json`, `recording/<slug>.srr.gz`
 /// — plus the player files at the root when `assets_url` is `None`.
-pub fn export_bundle(spec: &ExportSpec, out_dir: &Path, assets_url: Option<&str>) -> Result<PathBuf> {
+pub fn export_bundle(
+    spec: &ExportSpec,
+    out_dir: &Path,
+    assets_url: Option<&str>,
+) -> Result<PathBuf> {
     if spec.panes.is_empty() {
         bail!("nothing to export: no panes with recordings in the requested range");
     }
@@ -471,7 +501,8 @@ pub fn export_bundle(spec: &ExportSpec, out_dir: &Path, assets_url: Option<&str>
     }
     let html = index_html(spec.title.as_deref(), assets_url);
     let ipath = out_dir.join("index.html");
-    std::fs::write(&ipath, html.as_bytes()).with_context(|| format!("writing {}", ipath.display()))?;
+    std::fs::write(&ipath, html.as_bytes())
+        .with_context(|| format!("writing {}", ipath.display()))?;
 
     Ok(out_dir.to_path_buf())
 }
@@ -579,7 +610,11 @@ pub fn load_publish_config() -> Result<PublishConfig> {
 /// creds, rsync aliases) with the bundle dir passed as a real argv element —
 /// `$1`, with no quoting for us to get wrong.
 pub fn publish(bundle_dir: &Path, cfg: &PublishConfig) -> Result<String> {
-    let Some(cmd) = cfg.publish_command.as_deref().filter(|c| !c.trim().is_empty()) else {
+    let Some(cmd) = cfg
+        .publish_command
+        .as_deref()
+        .filter(|c| !c.trim().is_empty())
+    else {
         bail!(
             "no publish_command configured — set one in {}, e.g. \
              {{\"publish_command\": \"rsync -a \\\"$1\\\"/ host:/srv/replays/$(basename \\\"$1\\\") \
@@ -624,7 +659,9 @@ pub fn parse_time(s: &str, now: u64) -> Result<u64> {
         return Ok(now);
     }
     if let Some(rest) = s.strip_prefix('-') {
-        let split = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let split = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
         let (num, unit) = rest.split_at(split);
         let n: u64 = num
             .parse()
@@ -667,7 +704,11 @@ pub fn parse_rfc3339_ms(s: &str) -> Result<u64> {
         if digits.is_empty() {
             return Err(bad());
         }
-        let ms: String = digits.chars().chain(std::iter::repeat('0')).take(3).collect();
+        let ms: String = digits
+            .chars()
+            .chain(std::iter::repeat('0'))
+            .take(3)
+            .collect();
         millis = ms.parse::<i64>().map_err(|_| bad())?;
         rest = &rest[1 + digits.len()..];
     }
@@ -764,7 +805,9 @@ pub fn run_cli(args: &[String]) -> Result<()> {
             println!("{USAGE}");
             Ok(())
         }
-        Some(other) => Err(anyhow!("unknown `seance replay` command: {other}\n\n{USAGE}")),
+        Some(other) => Err(anyhow!(
+            "unknown `seance replay` command: {other}\n\n{USAGE}"
+        )),
     }
 }
 
@@ -849,7 +892,12 @@ fn cmd_list() -> Result<()> {
         return Ok(());
     }
     for c in cov {
-        println!("{:<24} {} → {}", c.slug, format_ms(c.from_ms), format_ms(c.to_ms));
+        println!(
+            "{:<24} {} → {}",
+            c.slug,
+            format_ms(c.from_ms),
+            format_ms(c.to_ms)
+        );
     }
     Ok(())
 }
@@ -885,7 +933,11 @@ mod tests {
     use super::*;
 
     fn rec(kind: u8, t: u64, payload: &[u8]) -> OwnedRec {
-        OwnedRec { kind, t_ms: t, payload: payload.to_vec() }
+        OwnedRec {
+            kind,
+            t_ms: t,
+            payload: payload.to_vec(),
+        }
     }
 
     /// A scratch dir unique to this process + call (no tempfile dep).
@@ -941,11 +993,23 @@ mod tests {
     #[test]
     fn parses_rfc3339_with_offsets_and_fractions() {
         assert_eq!(parse_rfc3339_ms("1970-01-01T00:00:00Z").unwrap(), 0);
-        assert_eq!(parse_rfc3339_ms("2023-11-14T22:13:20Z").unwrap(), 1_700_000_000_000);
-        assert_eq!(parse_rfc3339_ms("2023-11-14T22:13:20.250Z").unwrap(), 1_700_000_000_250);
-        assert_eq!(parse_rfc3339_ms("2023-11-14T22:13:20.25Z").unwrap(), 1_700_000_000_250);
+        assert_eq!(
+            parse_rfc3339_ms("2023-11-14T22:13:20Z").unwrap(),
+            1_700_000_000_000
+        );
+        assert_eq!(
+            parse_rfc3339_ms("2023-11-14T22:13:20.250Z").unwrap(),
+            1_700_000_000_250
+        );
+        assert_eq!(
+            parse_rfc3339_ms("2023-11-14T22:13:20.25Z").unwrap(),
+            1_700_000_000_250
+        );
         // -08:00 is eight hours *later* in UTC.
-        assert_eq!(parse_rfc3339_ms("2023-11-14T14:13:20-08:00").unwrap(), 1_700_000_000_000);
+        assert_eq!(
+            parse_rfc3339_ms("2023-11-14T14:13:20-08:00").unwrap(),
+            1_700_000_000_000
+        );
     }
 
     #[test]
@@ -1003,7 +1067,10 @@ mod tests {
             &root,
             "w-1",
             1,
-            &[(KIND_FULL, SEGMENT_MS, b"full-h1"), (KIND_DAMAGE, SEGMENT_MS + 10, b"d1")],
+            &[
+                (KIND_FULL, SEGMENT_MS, b"full-h1"),
+                (KIND_DAMAGE, SEGMENT_MS + 10, b"d1"),
+            ],
             true,
         );
         // hour 2: damage only — the keyframe lives one segment back.
@@ -1011,7 +1078,10 @@ mod tests {
             &root,
             "w-1",
             2,
-            &[(KIND_DAMAGE, 2 * SEGMENT_MS + 5, b"d2"), (KIND_EVENT, 2 * SEGMENT_MS + 6, b"{}")],
+            &[
+                (KIND_DAMAGE, 2 * SEGMENT_MS + 5, b"d2"),
+                (KIND_EVENT, 2 * SEGMENT_MS + 6, b"{}"),
+            ],
             false,
         );
 
@@ -1084,7 +1154,11 @@ mod tests {
             &root,
             "w-1",
             0,
-            &[(KIND_FULL, 5, b"grid"), (KIND_EVENT, 10, &a), (KIND_EVENT, 900, &b)],
+            &[
+                (KIND_FULL, 5, b"grid"),
+                (KIND_EVENT, 10, &a),
+                (KIND_EVENT, 900, &b),
+            ],
             false,
         );
         let got = pane_events(&root, "w-1", 0, 100).unwrap();
@@ -1101,7 +1175,11 @@ mod tests {
         write_segment(&root, "w-1", 5, &[(KIND_FULL, 1, b"x")], false);
         assert_eq!(
             coverage(&root).unwrap(),
-            vec![Coverage { slug: "w-1".into(), from_ms: 3 * SEGMENT_MS, to_ms: 6 * SEGMENT_MS }]
+            vec![Coverage {
+                slug: "w-1".into(),
+                from_ms: 3 * SEGMENT_MS,
+                to_ms: 6 * SEGMENT_MS
+            }]
         );
         assert_eq!(
             panes_with_records(&root, 4 * SEGMENT_MS, 4 * SEGMENT_MS + 1).unwrap(),
@@ -1147,7 +1225,9 @@ mod tests {
     #[test]
     fn publish_without_a_command_names_the_config_path() {
         let dir = scratch("publish");
-        let err = publish(&dir, &PublishConfig::default()).unwrap_err().to_string();
+        let err = publish(&dir, &PublishConfig::default())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("publish.json"), "unhelpful error: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1162,7 +1242,13 @@ mod tests {
             ),
         };
         let url = publish(&dir, &cfg).unwrap();
-        assert_eq!(url, format!("https://share/{}", dir.file_name().unwrap().to_str().unwrap()));
+        assert_eq!(
+            url,
+            format!(
+                "https://share/{}",
+                dir.file_name().unwrap().to_str().unwrap()
+            )
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1173,7 +1259,10 @@ mod tests {
             assets_url: None,
             publish_command: Some("echo nope >&2; exit 3".into()),
         };
-        assert!(publish(&dir, &cfg).unwrap_err().to_string().contains("nope"));
+        assert!(publish(&dir, &cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("nope"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1182,6 +1271,9 @@ mod tests {
         let cfg: PublishConfig = serde_json::from_str(r#"{"assets_url":"https://x/y"}"#).unwrap();
         assert_eq!(cfg.assets_url.as_deref(), Some("https://x/y"));
         assert!(cfg.publish_command.is_none());
-        assert!(serde_json::from_str::<PublishConfig>("{}").unwrap().assets_url.is_none());
+        assert!(serde_json::from_str::<PublishConfig>("{}")
+            .unwrap()
+            .assets_url
+            .is_none());
     }
 }

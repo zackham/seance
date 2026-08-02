@@ -37,7 +37,8 @@ use conn::{Conn, ConnStatus};
 use renderer::{RenderOpts, TermRenderer};
 use state::{Applied, ClientState};
 
-const FONT_FAMILY: &str = "ui-monospace, 'Cascadia Mono', 'CaskaydiaMono Nerd Font Mono', 'JetBrains Mono', monospace";
+const FONT_FAMILY: &str =
+    "ui-monospace, 'Cascadia Mono', 'CaskaydiaMono Nerd Font Mono', 'JetBrains Mono', monospace";
 const FONT_PX: f32 = 14.0;
 /// Cursor blink half-period (ms). Typing resets the phase (solid while typing).
 const BLINK_MS: f64 = 530.0;
@@ -51,10 +52,7 @@ fn document() -> web_sys::Document {
 }
 
 fn now_ms() -> f64 {
-    window()
-        .performance()
-        .map(|p| p.now())
-        .unwrap_or(0.0)
+    window().performance().map(|p| p.now()).unwrap_or(0.0)
 }
 
 /// One pane's client-side render context.
@@ -248,11 +246,7 @@ impl App {
         }
         let had_sel = self.selection.borrow().is_some();
         if had_sel {
-            let pane = self
-                .selection
-                .borrow_mut()
-                .take()
-                .map(|(p, _, _, _)| p);
+            let pane = self.selection.borrow_mut().take().map(|(p, _, _, _)| p);
             if let Some(p) = pane {
                 self.dirty_grids.borrow_mut().insert(p);
             }
@@ -725,7 +719,13 @@ impl Actions for AppActions {
     fn select_workspace(&self, ws: &str) {
         self.0.select_workspace(ws);
     }
-    fn spawn_pane(&self, name: &str, cwd: Option<String>, command: Option<String>, workspace: Option<String>) {
+    fn spawn_pane(
+        &self,
+        name: &str,
+        cwd: Option<String>,
+        command: Option<String>,
+        workspace: Option<String>,
+    ) {
         self.0.send(&GuiRequest::Spawn {
             name: name.to_string(),
             cwd,
@@ -739,34 +739,55 @@ impl Actions for AppActions {
         self.0.send(&GuiRequest::Kill { pane: slug.into() });
     }
     fn rename_pane(&self, slug: &str, name: &str) {
-        self.0.send(&GuiRequest::RenamePane { pane: slug.into(), name: name.into() });
+        self.0.send(&GuiRequest::RenamePane {
+            pane: slug.into(),
+            name: name.into(),
+        });
     }
     fn create_workspace(&self, name: &str) {
-        self.0.send(&GuiRequest::CreateWorkspace { name: name.into() });
+        self.0
+            .send(&GuiRequest::CreateWorkspace { name: name.into() });
     }
     fn rename_workspace(&self, old: &str, new: &str) {
-        self.0.send(&GuiRequest::RenameWorkspace { old: old.into(), new: new.into() });
+        self.0.send(&GuiRequest::RenameWorkspace {
+            old: old.into(),
+            new: new.into(),
+        });
     }
     fn kill_workspace(&self, ws: &str) {
         self.0.kill_workspace_selecting_neighbor(ws);
     }
     fn answer_ask(&self, id: &str, answer: &str) {
-        self.0.send(&GuiRequest::AnswerAsk { id: id.into(), answer: answer.into() });
+        self.0.send(&GuiRequest::AnswerAsk {
+            id: id.into(),
+            answer: answer.into(),
+        });
     }
     fn inject(&self, pane: &str, text: &str, submit: bool) {
-        self.0.send(&GuiRequest::Inject { pane: pane.into(), text: text.into(), submit });
+        self.0.send(&GuiRequest::Inject {
+            pane: pane.into(),
+            text: text.into(),
+            submit,
+        });
     }
     fn input_bytes(&self, pane: &str, bytes: &[u8]) {
         self.0.pty_input(pane, bytes);
     }
     fn scroll(&self, pane: &str, delta: i32) {
-        self.0.send(&GuiRequest::Scroll { pane: pane.into(), delta });
+        self.0.send(&GuiRequest::Scroll {
+            pane: pane.into(),
+            delta,
+        });
     }
     fn scroll_bottom(&self, pane: &str) {
         self.0.send(&GuiRequest::ScrollBottom { pane: pane.into() });
     }
     fn resize(&self, pane: &str, cols: u16, rows: u16) {
-        self.0.send(&GuiRequest::Resize { pane: pane.into(), cols, rows });
+        self.0.send(&GuiRequest::Resize {
+            pane: pane.into(),
+            cols,
+            rows,
+        });
     }
     fn refresh_grid(&self, pane: &str) {
         self.0.send(&GuiRequest::RefreshGrid { pane: pane.into() });
@@ -798,8 +819,11 @@ impl Actions for AppActions {
     fn quicklaunch(&self, name: &str, cwd: Option<String>, command: Option<String>) {
         let ws = {
             let st = self.0.state.borrow();
+            // Uniquify against EVERY known circle, not just subscribed ones —
+            // the daemon-owned clock census carries them all.
             let mut taken: Vec<String> = st.workspaces();
-            taken.extend(st.foreign_workspaces.iter().map(|f| f.workspace.clone()));
+            taken.extend(st.workspace_activity.keys().cloned());
+            taken.extend(st.workspace_touch.keys().cloned());
             let refs: Vec<&str> = taken.iter().map(|s| s.as_str()).collect();
             seance_core::util::unique_slug(name, &refs)
         };
@@ -1029,10 +1053,7 @@ fn initial_token() -> Option<String> {
     for sep in ["?token=", "#token="] {
         if let Some(i) = href.find(sep) {
             let tail = &href[i + sep.len()..];
-            let tok: String = tail
-                .chars()
-                .take_while(|c| c.is_ascii_hexdigit())
-                .collect();
+            let tok: String = tail.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
             if !tok.is_empty() {
                 let _ = storage_set("seance_token", &tok);
                 // Strip the token from the address bar + history.
@@ -1134,9 +1155,7 @@ pub fn start() -> Result<(), JsValue> {
             let _ = window().request_animation_frame(cb.as_ref().unchecked_ref());
         }
     }));
-    window().request_animation_frame(
-        raf.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
-    )?;
+    window().request_animation_frame(raf.borrow().as_ref().unwrap().as_ref().unchecked_ref())?;
     // The rAF closure cycle keeps itself alive for the page lifetime.
     std::mem::forget(raf);
 

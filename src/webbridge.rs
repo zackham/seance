@@ -77,7 +77,10 @@ pub fn run(args: &[String]) -> Result<()> {
 
     if opts.regen_token {
         let tok = mint_token()?;
-        eprintln!("seance web: regenerated token at {}", token_path()?.display());
+        eprintln!(
+            "seance web: regenerated token at {}",
+            token_path()?.display()
+        );
         if opts.print_token {
             print_token_and_url(&tok, &opts.bind);
             return Ok(());
@@ -93,8 +96,8 @@ pub fn run(args: &[String]) -> Result<()> {
     }
 
     let dist = resolve_dist(opts.dist.clone())?;
-    let listener = TcpListener::bind(&opts.bind)
-        .with_context(|| format!("binding {}", opts.bind))?;
+    let listener =
+        TcpListener::bind(&opts.bind).with_context(|| format!("binding {}", opts.bind))?;
     let local = listener
         .local_addr()
         .map(|a| a.to_string())
@@ -113,7 +116,10 @@ pub fn run(args: &[String]) -> Result<()> {
             sock.display()
         );
     }
-    eprintln!("seance web: token in {} (`seance web --print-token` to read it)", token_path()?.display());
+    eprintln!(
+        "seance web: token in {} (`seance web --print-token` to read it)",
+        token_path()?.display()
+    );
 
     let mut n: u64 = 0;
     for stream in listener.incoming() {
@@ -192,7 +198,9 @@ impl Options {
             match args[i].as_str() {
                 "--bind" => {
                     i += 1;
-                    let v = args.get(i).ok_or_else(|| anyhow!("--bind needs <addr:port>"))?;
+                    let v = args
+                        .get(i)
+                        .ok_or_else(|| anyhow!("--bind needs <addr:port>"))?;
                     o.bind = v.clone();
                 }
                 "--dist" => {
@@ -252,8 +260,12 @@ fn token_path() -> Result<PathBuf> {
 /// the one that works right now.
 pub(crate) fn read_token() -> Result<String> {
     let path = token_path()?;
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {} (start `seance web` once to mint it)", path.display()))?;
+    let raw = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "reading {} (start `seance web` once to mint it)",
+            path.display()
+        )
+    })?;
     let t = raw.trim().to_string();
     if !seance_core::auth::token_well_formed(&t) {
         return Err(anyhow!(
@@ -271,10 +283,7 @@ fn load_or_mint_token() -> Result<String> {
         if seance_core::auth::token_well_formed(&t) {
             return Ok(t);
         }
-        eprintln!(
-            "seance web: {} is malformed — reminting",
-            path.display()
-        );
+        eprintln!("seance web: {} is malformed — reminting", path.display());
     }
     mint_token()
 }
@@ -363,7 +372,10 @@ fn parse_request_line(line: &str) -> Option<RequestLine> {
     if method.is_empty() || !target.starts_with('/') || !version.starts_with("HTTP/") {
         return None;
     }
-    Some(RequestLine { method: method.to_string(), target: target.to_string() })
+    Some(RequestLine {
+        method: method.to_string(),
+        target: target.to_string(),
+    })
 }
 
 fn percent_decode(s: &str) -> String {
@@ -412,9 +424,14 @@ fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
 }
 
 fn is_websocket_upgrade(head: &str) -> bool {
-    let up = header(head, "Upgrade").map(|v| v.eq_ignore_ascii_case("websocket")).unwrap_or(false);
+    let up = header(head, "Upgrade")
+        .map(|v| v.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false);
     let conn = header(head, "Connection")
-        .map(|v| v.split(',').any(|p| p.trim().eq_ignore_ascii_case("upgrade")))
+        .map(|v| {
+            v.split(',')
+                .any(|p| p.trim().eq_ignore_ascii_case("upgrade"))
+        })
         .unwrap_or(false);
     up && conn
 }
@@ -432,7 +449,11 @@ fn sanitize_path(url_path: &str) -> Option<PathBuf> {
         return None;
     }
     let trimmed = url_path.trim_start_matches('/');
-    let trimmed = if trimmed.is_empty() { "index.html" } else { trimmed };
+    let trimmed = if trimmed.is_empty() {
+        "index.html"
+    } else {
+        trimmed
+    };
     let mut out = PathBuf::new();
     for seg in trimmed.split('/') {
         if seg.is_empty() || seg == "." {
@@ -473,7 +494,11 @@ fn content_type(path: &Path) -> &'static str {
 /// `.html`/`.js` are the dev-iteration surfaces — never let a browser pin them.
 fn no_cache(path: &Path) -> bool {
     matches!(
-        path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str(),
+        path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
         "html" | "htm" | "js" | "mjs" | "wasm" | "css"
     )
 }
@@ -485,8 +510,8 @@ fn no_cache(path: &Path) -> bool {
 fn serve_conn(stream: TcpStream, peer: &str, token: &str, dist: &Path) -> Result<()> {
     let _ = stream.set_nodelay(true);
 
-    let (head, head_len) = peek_headers(&stream)
-        .with_context(|| format!("[{peer}] reading request headers"))?;
+    let (head, head_len) =
+        peek_headers(&stream).with_context(|| format!("[{peer}] reading request headers"))?;
     let req = parse_request_line(head.lines().next().unwrap_or(""))
         .ok_or_else(|| anyhow!("[{peer}] malformed request line"))?;
 
@@ -574,13 +599,19 @@ fn write_response(
     no_store: bool,
     body: &[u8],
 ) -> Result<()> {
-    let cache = if no_store { "Cache-Control: no-cache\r\n" } else { "" };
+    let cache = if no_store {
+        "Cache-Control: no-cache\r\n"
+    } else {
+        ""
+    };
     let head = format!(
         "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n\
          Connection: close\r\n{cache}\r\n",
         body.len()
     );
-    stream.write_all(head.as_bytes()).context("writing response head")?;
+    stream
+        .write_all(head.as_bytes())
+        .context("writing response head")?;
     stream.write_all(body).context("writing response body")?;
     stream.flush().context("flushing response")
 }
@@ -636,7 +667,9 @@ fn read_body(stream: &TcpStream, head: &str, cap: usize) -> Result<Vec<u8>> {
         None => 0,
     };
     if len > cap {
-        return Err(anyhow!("request body of {len} bytes exceeds the {cap}-byte cap"));
+        return Err(anyhow!(
+            "request body of {len} bytes exceeds the {cap}-byte cap"
+        ));
     }
     let mut buf = vec![0u8; len];
     if len > 0 {
@@ -660,7 +693,14 @@ fn json_ok(stream: &mut TcpStream, body: &[u8]) -> Result<()> {
 
 fn json_err(stream: &mut TcpStream, code: u16, reason: &str, msg: &str) -> Result<()> {
     let body = serde_json::json!({ "error": msg }).to_string();
-    write_response(stream, code, reason, "application/json", true, body.as_bytes())
+    write_response(
+        stream,
+        code,
+        reason,
+        "application/json",
+        true,
+        body.as_bytes(),
+    )
 }
 
 /// Required unsigned query param.
@@ -723,18 +763,16 @@ fn serve_replay_get(
             match replayexport::slice_pane(&root, &slug, from, to)
                 .and_then(|s| replayexport::gzip(&s))
             {
-                Ok(gz) => write_response(
-                    stream,
-                    200,
-                    "OK",
-                    "application/octet-stream",
-                    true,
-                    &gz,
-                ),
+                Ok(gz) => write_response(stream, 200, "OK", "application/octet-stream", true, &gz),
                 Err(e) => json_err(stream, 500, "Internal Server Error", &e.to_string()),
             }
         }
-        other => json_err(stream, 404, "Not Found", &format!("no replay route {other}")),
+        other => json_err(
+            stream,
+            404,
+            "Not Found",
+            &format!("no replay route {other}"),
+        ),
     }
 }
 
@@ -794,13 +832,26 @@ fn serve_replay_publish(
     };
     let parsed: PublishReq = match serde_json::from_slice(&body) {
         Ok(p) => p,
-        Err(e) => return json_err(stream, 400, "Bad Request", &format!("bad publish body: {e}")),
+        Err(e) => {
+            return json_err(
+                stream,
+                400,
+                "Bad Request",
+                &format!("bad publish body: {e}"),
+            )
+        }
     };
 
     let root = replayexport::ring_root();
     let panes = match parsed.panes.filter(|p| !p.is_empty()) {
         Some(p) => p,
-        None => match replayexport::resolve_panes(&root, &parsed.workspace, parsed.from_ms, parsed.to_ms, true) {
+        None => match replayexport::resolve_panes(
+            &root,
+            &parsed.workspace,
+            parsed.from_ms,
+            parsed.to_ms,
+            true,
+        ) {
             Ok(p) => p,
             Err(e) => return json_err(stream, 400, "Bad Request", &e.to_string()),
         },
@@ -822,7 +873,10 @@ fn serve_replay_publish(
     match result {
         Ok(url) => {
             eprintln!("seance web: [{peer}] published replay → {url}");
-            json_ok(stream, serde_json::json!({ "url": url }).to_string().as_bytes())
+            json_ok(
+                stream,
+                serde_json::json!({ "url": url }).to_string().as_bytes(),
+            )
         }
         Err(e) => {
             eprintln!("seance web: [{peer}] replay publish failed: {e}");
@@ -863,7 +917,10 @@ fn serve_ws(stream: TcpStream, peer: &str, req: &RequestLine, token: &str) -> Re
     let unix = match UnixStream::connect(&sock) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("seance web: [{peer}] daemon socket {} unreachable: {e}", sock.display());
+            eprintln!(
+                "seance web: [{peer}] daemon socket {} unreachable: {e}",
+                sock.display()
+            );
             let _ = ws.close(Some(CloseFrame {
                 code: CloseCode::Away,
                 reason: "daemon unavailable".into(),
@@ -874,7 +931,9 @@ fn serve_ws(stream: TcpStream, peer: &str, req: &RequestLine, token: &str) -> Re
     };
     eprintln!("seance web: [{peer}] ws open → {}", sock.display());
 
-    let mut unix_w = unix.try_clone().context("cloning daemon socket for write half")?;
+    let mut unix_w = unix
+        .try_clone()
+        .context("cloning daemon socket for write half")?;
     let unix_r = unix;
 
     // unix → ws: a dedicated thread owns the read half and ships whole lines
@@ -945,8 +1004,9 @@ fn proxy_loop(
                     e.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) => {}
-            Err(tungstenite::Error::ConnectionClosed)
-            | Err(tungstenite::Error::AlreadyClosed) => return "client gone".into(),
+            Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::AlreadyClosed) => {
+                return "client gone".into()
+            }
             Err(e) => {
                 eprintln!("seance web: [{peer}] ws read error: {e}");
                 return "ws error".into();
@@ -1031,7 +1091,10 @@ mod tests {
     fn sanitize_maps_root_to_index() {
         assert_eq!(sanitize_path("/"), Some(PathBuf::from("index.html")));
         assert_eq!(sanitize_path("/app.js"), Some(PathBuf::from("app.js")));
-        assert_eq!(sanitize_path("/a/b/c.wasm"), Some(PathBuf::from("a/b/c.wasm")));
+        assert_eq!(
+            sanitize_path("/a/b/c.wasm"),
+            Some(PathBuf::from("a/b/c.wasm"))
+        );
         assert_eq!(sanitize_path("/a//b.css"), Some(PathBuf::from("a/b.css")));
     }
 
@@ -1046,15 +1109,24 @@ mod tests {
 
     #[test]
     fn content_types_cover_the_web_client() {
-        assert_eq!(content_type(Path::new("i.html")), "text/html; charset=utf-8");
+        assert_eq!(
+            content_type(Path::new("i.html")),
+            "text/html; charset=utf-8"
+        );
         assert_eq!(content_type(Path::new("a.css")), "text/css; charset=utf-8");
-        assert_eq!(content_type(Path::new("a.js")), "text/javascript; charset=utf-8");
+        assert_eq!(
+            content_type(Path::new("a.js")),
+            "text/javascript; charset=utf-8"
+        );
         assert_eq!(content_type(Path::new("a.wasm")), "application/wasm");
         assert_eq!(content_type(Path::new("a.js.map")), "application/json");
         assert_eq!(content_type(Path::new("a.svg")), "image/svg+xml");
         assert_eq!(content_type(Path::new("a.png")), "image/png");
         assert_eq!(content_type(Path::new("a.ico")), "image/x-icon");
-        assert_eq!(content_type(Path::new("a.txt")), "text/plain; charset=utf-8");
+        assert_eq!(
+            content_type(Path::new("a.txt")),
+            "text/plain; charset=utf-8"
+        );
         assert_eq!(content_type(Path::new("a.bin")), "application/octet-stream");
         assert_eq!(content_type(Path::new("noext")), "application/octet-stream");
     }
@@ -1069,7 +1141,8 @@ mod tests {
 
     #[test]
     fn detects_websocket_upgrade() {
-        let head = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade";
+        let head =
+            "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade";
         assert!(is_websocket_upgrade(head));
         let plain = "GET / HTTP/1.1\r\nHost: x";
         assert!(!is_websocket_upgrade(plain));
@@ -1123,7 +1196,10 @@ mod tests {
         assert!(replay_auth_ok(&with(&good), &good));
         assert!(!replay_auth_ok(&with("short"), &good));
         assert!(!replay_auth_ok(&with(&hex(&[8u8; 32])), &good));
-        assert!(!replay_auth_ok(&parse_request_line("GET /replay/list HTTP/1.1").unwrap(), &good));
+        assert!(!replay_auth_ok(
+            &parse_request_line("GET /replay/list HTTP/1.1").unwrap(),
+            &good
+        ));
     }
 
     #[test]

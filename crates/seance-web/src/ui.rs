@@ -44,10 +44,9 @@
 //!    ("move to → ws", the submenu flattened); quicklaunch chips reorder via
 //!    right-click "move up"/"move down" (the native insert-before drop reduces
 //!    to the same list op).
-//! 3. **No "send to new window".** A browser tab can't spawn a peer GUI window,
-//!    so the workspace menu lists only *existing* peers. The foreign
-//!    ("elsewhere") sidebar section with its `pull` button stays as the web
-//!    inverse, and pull is offered on the empty-area menu too, for parity.
+//! 3. **No window-targeted workspace moves.** Workspaces are global
+//!    subscriptions (0.12) — nothing is "sent" anywhere; the ✦ census popover
+//!    is the roster. The parked-group affordance lands in phase 2.
 //! 4. **Topbar.** Native has no topbar; the web client needs a permanent
 //!    connection indicator (native is always local) and the latency probe
 //!    toggle, so a slim `#topbar` carries those plus the selected circle's name.
@@ -475,17 +474,10 @@ impl Chrome {
         self.sidebar.append_child(&list)?;
 
         // Peer windows for "send to …" (native lists every window but this one).
-        let peers: Vec<(String, String)> = state
-            .windows
-            .iter()
-            .filter(|w| Some(w.id.as_str()) != state.window_id.as_deref())
-            .map(|w| (w.id.clone(), w.label.clone()))
-            .collect();
-
         if workspaces.is_empty() {
             let empty = mk(&doc, "div", "empty")?;
             empty.append_child(text_el(&doc, "div", "", "no workspaces here")?.unchecked_ref())?;
-            if state.foreign_workspaces.is_empty() {
+            {
                 let hint = mk(&doc, "div", "empty-hint")?;
                 hint.append_child(text_el(&doc, "span", "", "run ")?.unchecked_ref())?;
                 hint.append_child(text_el(&doc, "code", "", "seance ctl new")?.unchecked_ref())?;
@@ -495,52 +487,14 @@ impl Chrome {
         }
 
         for ws in workspaces {
-            self.build_ws_row(&list, state, ws, selected, &peers)?;
+            self.build_ws_row(&list, state, ws, selected)?;
         }
 
-        self.build_foreign(&list, state)?;
-
-        // Flex filler: only *blank* sidebar area gets the pull/collect menu
-        // (rows carry their own menus — don't nest them on the scroller).
+        // Flex filler below the rows. The "elsewhere" rail and its
+        // pull/collect menu went with the ownership model; phase 2 puts the
+        // parked (unsubscribed) group here.
         let hit = mk(&doc, "div", "side-empty-hit")?;
         list.append_child(&hit)?;
-        {
-            let actions = self.actions.clone();
-            let foreign: Vec<(String, String)> = state
-                .foreign_workspaces
-                .iter()
-                .map(|f| (f.workspace.clone(), f.window_label.clone()))
-                .collect();
-            let my_window = state.window_id.clone();
-            bind_ctx(&hit, &mut self.structural, move |ev| {
-                ev.prevent_default();
-                let mut entries = Vec::new();
-                let a = actions.clone();
-                entries.push(MenuEntry::item("collect all windows here", move || {
-                    a.send(GuiRequest::CollectAll)
-                }));
-                if let Some(to_window) = my_window.clone() {
-                    if !foreign.is_empty() {
-                        entries.push(MenuEntry::Separator);
-                        for (ws, label) in &foreign {
-                            let a = actions.clone();
-                            let ws = ws.clone();
-                            let to = to_window.clone();
-                            entries.push(MenuEntry::item(
-                                format!("pull «{ws}» from {label}"),
-                                move || {
-                                    a.send(GuiRequest::TransferWorkspace {
-                                        workspace: ws,
-                                        to_window: to,
-                                    })
-                                },
-                            ));
-                        }
-                    }
-                }
-                open_menu(ev.client_x() as f64, ev.client_y() as f64, entries);
-            })?;
-        }
 
         self.build_quicklaunch()?;
         self.build_host()?;
@@ -640,7 +594,6 @@ impl Chrome {
         state: &ClientState,
         ws: &str,
         selected: Option<&str>,
-        peers: &[(String, String)],
     ) -> Result<(), JsValue> {
         let doc = self.doc.clone();
         let is_selected = Some(ws) == selected;
@@ -651,7 +604,11 @@ impl Chrome {
         let row = mk(
             &doc,
             "div",
-            if is_selected { "ws-row selected" } else { "ws-row" },
+            if is_selected {
+                "ws-row selected"
+            } else {
+                "ws-row"
+            },
         )?;
         let main = mk(&doc, "div", "ws-main")?;
 
@@ -693,13 +650,7 @@ impl Chrome {
             let ws = ws.to_string();
             bind(&row, "dblclick", &mut self.structural, move |ev| {
                 ev.prevent_default();
-                open_rename(
-                    &rn,
-                    &row2,
-                    &main2,
-                    &ws,
-                    RenameKind::Workspace(ws.clone()),
-                );
+                open_rename(&rn, &row2, &main2, &ws, RenameKind::Workspace(ws.clone()));
             })?;
         }
         // WEB DIVERGENCE #5: two-click arm on the banish ×.
@@ -729,7 +680,6 @@ impl Chrome {
             let rn = self.rename.clone();
             let (row2, main2) = (row.clone(), main.clone());
             let ws = ws.to_string();
-            let peers = peers.to_vec();
             bind_ctx(&row, &mut self.structural, move |ev| {
                 ev.prevent_default();
                 ev.stop_propagation();
@@ -772,28 +722,6 @@ impl Chrome {
                         }
                     }));
                 }
-                // WEB DIVERGENCE #3: no "send to new window" — a tab can't
-                // spawn a peer GUI window. Existing peers only.
-                if !peers.is_empty() {
-                    entries.push(MenuEntry::Separator);
-                    for (id, label) in &peers {
-                        let a = actions.clone();
-                        let w = ws.clone();
-                        let to = id.clone();
-                        entries.push(MenuEntry::item(format!("send to {label}"), move || {
-                            a.send(GuiRequest::TransferWorkspace {
-                                workspace: w,
-                                to_window: to,
-                            })
-                        }));
-                    }
-                }
-                {
-                    let a = actions.clone();
-                    entries.push(MenuEntry::item("collect all windows here", move || {
-                        a.send(GuiRequest::CollectAll)
-                    }));
-                }
                 entries.push(MenuEntry::Separator);
                 {
                     let a = actions.clone();
@@ -825,66 +753,6 @@ impl Chrome {
             if let Some(refs) = self.ws_refs.get(ws) {
                 refs.row.scroll_into_view_with_bool(false);
             }
-        }
-        Ok(())
-    }
-
-    /// Workspaces living on other windows (the native GUI, usually): list them
-    /// with a pull affordance — TransferWorkspace moves ownership here. This
-    /// is THE affordance for "seance from anywhere": attach from a browser,
-    /// pull the workspace you need, work, and the daemon keeps it durable.
-    fn build_foreign(&mut self, list: &Element, state: &ClientState) -> Result<(), JsValue> {
-        if state.foreign_workspaces.is_empty() {
-            return Ok(());
-        }
-        let doc = self.doc.clone();
-        list.append_child(text_el(&doc, "div", "side-head", "── elsewhere ──")?.unchecked_ref())?;
-        let Some(my_window) = state.window_id.clone() else {
-            return Ok(());
-        };
-        // Same ordering rule as the local rail: most recent output first.
-        let mut foreign: Vec<_> = state.foreign_workspaces.iter().collect();
-        foreign.sort_by(|a, b| {
-            let at = |w: &str| state.workspace_activity.get(w).copied().unwrap_or(f64::MIN);
-            at(&b.workspace)
-                .partial_cmp(&at(&a.workspace))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.workspace.cmp(&b.workspace))
-        });
-        for fw in foreign {
-            let row = mk(&doc, "div", "ws-row foreign")?;
-            let main = mk(&doc, "div", "ws-main")?;
-            main.append_child(text_el(&doc, "span", "ws-glyph idle", "◈")?.unchecked_ref())?;
-            main.append_child(text_el(&doc, "span", "ws-name", &fw.workspace)?.unchecked_ref())?;
-            // Same activity clock as the local rail. The window label used to
-            // live here, but every row carried the SAME wide string ("education
-            // +42") and crushed the workspace name — the window is already
-            // named by the ✦ census popover.
-            main.append_child(
-                text_el(
-                    &doc,
-                    "span",
-                    "ws-count",
-                    &state.activity_label(&fw.workspace, self.now_ms()),
-                )?
-                .unchecked_ref(),
-            )?;
-            let pull = text_el(&doc, "button", "pull-btn", "pull")?;
-            pull.set_attribute("title", &format!("pull «{}» here", fw.workspace))?;
-            main.append_child(pull.unchecked_ref())?;
-            row.append_child(&main)?;
-            list.append_child(&row)?;
-
-            let actions = self.actions.clone();
-            let ws = fw.workspace.clone();
-            let to_window = my_window.clone();
-            bind_click(&pull, &mut self.structural, move |ev| {
-                ev.stop_propagation();
-                actions.send(GuiRequest::TransferWorkspace {
-                    workspace: ws.clone(),
-                    to_window: to_window.clone(),
-                });
-            })?;
         }
         Ok(())
     }
@@ -1224,7 +1092,9 @@ impl Chrome {
         for target in [&header, &canvas] {
             let actions = self.actions.clone();
             let s = slug.clone();
-            bind_click(target, &mut self.structural, move |_| actions.focus_pane(&s))?;
+            bind_click(target, &mut self.structural, move |_| {
+                actions.focus_pane(&s)
+            })?;
         }
         // Double-click the header = inline rename (mirrors the workspace row).
         {
@@ -1329,9 +1199,14 @@ impl Chrome {
                 e.stop_propagation();
                 let a = actions.clone();
                 let s2 = s.clone();
-                arm_or_fire(&win, &armed, &format!("pane:{s}"), &btn, "kill", move || {
-                    a.kill_pane(&s2)
-                });
+                arm_or_fire(
+                    &win,
+                    &armed,
+                    &format!("pane:{s}"),
+                    &btn,
+                    "kill",
+                    move || a.kill_pane(&s2),
+                );
             })?;
         }
 
@@ -1406,7 +1281,9 @@ impl Chrome {
         let focused = state.focused_pane.clone().or_else(|| self.focused.clone());
 
         for (slug, refs) in &self.tile_refs {
-            let Some(pane) = state.pane(slug) else { continue };
+            let Some(pane) = state.pane(slug) else {
+                continue;
+            };
             let status = state.statuses.get(slug).map(|s| s.state.as_str());
             let exited = pane.exited
                 || state.agency.get(slug).map(|a| a.exited).unwrap_or(false)
@@ -1555,9 +1432,16 @@ impl Chrome {
 
     fn toast_inner(&mut self, message: &str) -> Result<(), JsValue> {
         let lower = message.to_lowercase();
-        let is_err = ["error", "failed", "fail:", "disconnect", "refused", "denied"]
-            .iter()
-            .any(|k| lower.contains(k));
+        let is_err = [
+            "error",
+            "failed",
+            "fail:",
+            "disconnect",
+            "refused",
+            "denied",
+        ]
+        .iter()
+        .any(|k| lower.contains(k));
         let el = text_el(
             &self.doc,
             "div",
@@ -1844,7 +1728,9 @@ fn ql_save(actions: &Rc<dyn Actions>, ql: &QuickLaunch) {
         },
         Box::new(move |res| {
             if let Ok(v) = res {
-                mtime.set(Some(v.get("mtime_ms").and_then(|m| m.as_u64()).unwrap_or(0)));
+                mtime.set(Some(
+                    v.get("mtime_ms").and_then(|m| m.as_u64()).unwrap_or(0),
+                ));
             }
         }),
     );
@@ -2275,9 +2161,7 @@ fn gui_menu_render(
             let dismiss2 = dismiss.clone();
             bind_click(&kill, &mut clicks.borrow_mut(), move |ev| {
                 ev.stop_propagation();
-                actions.send(GuiRequest::CloseWindow {
-                    window: id.clone(),
-                });
+                actions.send(GuiRequest::CloseWindow { window: id.clone() });
                 gui_menu_close(&open, &clicks2, &dismiss2);
             })?;
         }

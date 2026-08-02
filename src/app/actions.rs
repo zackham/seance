@@ -93,29 +93,6 @@ pub struct ActShareReplay(pub String);
 #[action(namespace = seance, no_json)]
 pub struct ActTouchWorkspace(pub String);
 
-/// Move a workspace to another GUI window (multi-window).
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActTransferWorkspace {
-    pub workspace: String,
-    pub to_window: String,
-}
-
-/// Open a new empty OS window and transfer this workspace there.
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActTransferWorkspaceNewWindow(pub String);
-
-/// Pull every workspace into this window.
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActCollectAllWindows;
-
-/// Pull a foreign workspace into this window.
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActPullWorkspace(pub String);
-
 /// Open the quicklaunch editor pre-filled for the named entry (context menu).
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]

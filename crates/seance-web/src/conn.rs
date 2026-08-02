@@ -106,7 +106,10 @@ pub fn connect(
             fs_pending: HashMap::new(),
             fs_next_id: 1,
         }),
-        handlers: RefCell::new(Handlers { on_event, on_status }),
+        handlers: RefCell::new(Handlers {
+            on_event,
+            on_status,
+        }),
     });
     conn.start_ping_timer();
     conn.open();
@@ -287,7 +290,9 @@ impl Conn {
         self.send(&GuiRequest::Attach {
             selected_workspace: None,
             focused_pane: None,
-            empty: false,
+            // No stored set yet (phase 2 persists one in localStorage) — seed
+            // with every workspace, matching today's behaviour.
+            subscriptions: None,
         });
         // Queued requests replay only after the re-attach above.
         let queued: Vec<String> = {

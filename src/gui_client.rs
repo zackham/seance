@@ -52,7 +52,7 @@ impl GuiClient {
         Self::connect_opts(empty)
     }
 
-    /// Attach as an empty window (claims no existing workspaces).
+    /// Attach as an empty window (subscribes to no workspaces).
     pub fn connect_empty() -> Result<(Arc<Self>, Receiver<GuiEvent>)> {
         Self::connect_opts(true)
     }
@@ -201,15 +201,23 @@ impl GuiClient {
         })
     }
 
-    pub fn transfer_workspace(&self, workspace: &str, to_window: &str) -> Result<()> {
-        self.send(GuiRequest::TransferWorkspace {
+    /// Add a workspace to this window's subscription set ("add to active").
+    /// Protocol surface ahead of UI: the sidebar's active/parked split (phase
+    /// 2) is what calls this — wire or retire there, don't delete blind.
+    #[allow(dead_code)]
+    pub fn subscribe(&self, workspace: &str) -> Result<()> {
+        self.send(GuiRequest::Subscribe {
             workspace: workspace.to_string(),
-            to_window: to_window.to_string(),
         })
     }
 
-    pub fn collect_all(&self) -> Result<()> {
-        self.send(GuiRequest::CollectAll)
+    /// Drop a workspace from this window's subscription set ("park").
+    /// Same phase-2 pairing as [`Self::subscribe`].
+    #[allow(dead_code)]
+    pub fn unsubscribe(&self, workspace: &str) -> Result<()> {
+        self.send(GuiRequest::Unsubscribe {
+            workspace: workspace.to_string(),
+        })
     }
 
     pub fn kill_workspace(&self, workspace: &str) -> Result<()> {
@@ -583,7 +591,9 @@ fn connection_supervisor(
             &GuiRequest::Attach {
                 selected_workspace: None,
                 focused_pane: None,
-                empty,
+                // Blank window → subscribe to nothing; otherwise seed with
+                // every workspace (today's sole-window behaviour).
+                subscriptions: if empty { Some(Vec::new()) } else { None },
             },
         )
         .is_err()

@@ -1290,9 +1290,11 @@ impl Player {
         let frac = (elapsed as f64 / total as f64).clamp(0.0, 1.0);
         set_style(&self.dom.played, "width", &format!("{:.4}%", frac * 100.0));
         set_style(&self.dom.playhead, "left", &format!("{:.4}%", frac * 100.0));
-        self.dom
-            .time_label
-            .set_text_content(Some(&format!("{} / {}", fmt_mmss(elapsed), fmt_mmss(total))));
+        self.dom.time_label.set_text_content(Some(&format!(
+            "{} / {}",
+            fmt_mmss(elapsed),
+            fmt_mmss(total)
+        )));
         // The wall suffix only earns its pixels when the recording is mostly
         // dead air; at parity it would be noise.
         let wall_total = self.duration();
@@ -1426,7 +1428,11 @@ impl Player {
                 continue;
             };
             gap.set_class_name("rp-gap");
-            set_style(&gap, "left", &format!("{:.4}%", self.frac_of(wall_mid) * 100.0));
+            set_style(
+                &gap,
+                "left",
+                &format!("{:.4}%", self.frac_of(wall_mid) * 100.0),
+            );
             let _ = gap.set_attribute("data-skipped", &skipped.to_string());
             append(&self.dom.ticks, &gap);
         }
@@ -1438,7 +1444,11 @@ impl Player {
                 continue;
             };
             tick.set_class_name("rp-tick");
-            set_style(&tick, "left", &format!("{:.4}%", self.frac_of(ch.t_ms) * 100.0));
+            set_style(
+                &tick,
+                "left",
+                &format!("{:.4}%", self.frac_of(ch.t_ms) * 100.0),
+            );
             let _ = tick.set_attribute("data-idx", &i.to_string());
             append(&self.dom.ticks, &tick);
         }
@@ -1497,11 +1507,7 @@ impl Player {
             None => fmt_mmss(at_comp),
         };
         self.dom.tooltip.set_text_content(Some(&text));
-        set_style(
-            &self.dom.tooltip,
-            "left",
-            &format!("{:.4}%", frac * 100.0),
-        );
+        set_style(&self.dom.tooltip, "left", &format!("{:.4}%", frac * 100.0));
         let _ = self.dom.tooltip.set_attribute("data-show", "1");
     }
 
@@ -1525,7 +1531,11 @@ impl Player {
         self.to_ms = m.to_ms.max(self.from_ms + 1).max(last);
         // Idle compression is a property of the *recording*, so the map spans
         // the whole loaded window and survives every later trim.
-        let mut merged: Vec<u64> = self.panes.iter().flat_map(|p| p.times.iter().copied()).collect();
+        let mut merged: Vec<u64> = self
+            .panes
+            .iter()
+            .flat_map(|p| p.times.iter().copied())
+            .collect();
         merged.sort_unstable();
         self.map = build_time_map(&merged, self.from_ms, self.to_ms);
         self.build_tiles();
@@ -1686,7 +1696,9 @@ fn fetch_bytes(url: &str, done: Rc<RefCell<Option<Box<dyn FnOnce(Result<Vec<u8>,
     );
 }
 
-fn once(f: impl FnOnce(Result<Vec<u8>, String>) + 'static) -> Rc<RefCell<Option<Box<dyn FnOnce(Result<Vec<u8>, String>)>>>> {
+fn once(
+    f: impl FnOnce(Result<Vec<u8>, String>) + 'static,
+) -> Rc<RefCell<Option<Box<dyn FnOnce(Result<Vec<u8>, String>)>>>> {
     Rc::new(RefCell::new(Some(
         Box::new(f) as Box<dyn FnOnce(Result<Vec<u8>, String>)>
     )))
@@ -1753,9 +1765,7 @@ fn on_manifest(player: &Rc<RefCell<Player>>, m: Manifest) {
         fetch_bytes(
             &url,
             once(move |res| {
-                let parsed = res
-                    .and_then(decompress)
-                    .and_then(|raw| parse_records(&raw));
+                let parsed = res.and_then(decompress).and_then(|raw| parse_records(&raw));
                 let mut p = pl.borrow_mut();
                 match parsed {
                     Ok(recs) => p.panes.push(PaneTrack::new(slug.clone(), name, recs)),
@@ -2121,7 +2131,8 @@ fn wire_controls(player: &Rc<RefCell<Player>>) {
                 let _ = p.dom.tooltip.set_attribute("data-show", "0");
             }
         });
-        let _ = timeline.add_event_listener_with_callback("mouseleave", cb.as_ref().unchecked_ref());
+        let _ =
+            timeline.add_event_listener_with_callback("mouseleave", cb.as_ref().unchecked_ref());
         cb.forget();
     }
     if let Some(doc) = document() {
@@ -2525,7 +2536,10 @@ mod tests {
             manifest_url: "/b/manifest?tok=z&from=1&to=2".into(),
             pane_url_template: "/b/pane/{slug}?tok=z&from=1&to=2".into(),
         };
-        assert_eq!(s.pane_url("w-7", "ignored"), "/b/pane/w-7?tok=z&from=1&to=2");
+        assert_eq!(
+            s.pane_url("w-7", "ignored"),
+            "/b/pane/w-7?tok=z&from=1&to=2"
+        );
     }
 
     #[test]
@@ -2655,16 +2669,10 @@ mod tests {
     fn natural_layout_sums_column_and_row_extents() {
         // 2×2 of identical tiles: two gaps' worth of chrome, no more.
         let t = [(100.0, 50.0); 4];
-        assert_eq!(
-            natural_layout(&t, 2),
-            (200.0 + TILE_GAP, 100.0 + TILE_GAP)
-        );
+        assert_eq!(natural_layout(&t, 2), (200.0 + TILE_GAP, 100.0 + TILE_GAP));
         // Ragged geometry: each column takes its widest, each row its tallest.
         let t = [(100.0, 50.0), (300.0, 20.0), (80.0, 90.0)];
-        assert_eq!(
-            natural_layout(&t, 2),
-            (400.0 + TILE_GAP, 140.0 + TILE_GAP)
-        );
+        assert_eq!(natural_layout(&t, 2), (400.0 + TILE_GAP, 140.0 + TILE_GAP));
         // Single tile: exactly the recording, no gap.
         assert_eq!(natural_layout(&[(640.0, 384.0)], 1), (640.0, 384.0));
         assert_eq!(natural_layout(&[], 2), (0.0, 0.0));
@@ -2825,8 +2833,7 @@ mod tests {
         let mut gz = Vec::new();
         {
             use std::io::Write;
-            let mut enc =
-                flate2::write::GzEncoder::new(&mut gz, flate2::Compression::fast());
+            let mut enc = flate2::write::GzEncoder::new(&mut gz, flate2::Compression::fast());
             enc.write_all(&raw).unwrap();
             enc.finish().unwrap();
         }

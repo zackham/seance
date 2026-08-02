@@ -59,10 +59,8 @@ pub fn close_menu() -> bool {
                 "mousedown",
                 open._dismiss.as_ref().unchecked_ref(),
             );
-            let _ = doc.remove_event_listener_with_callback(
-                "keydown",
-                open._key.as_ref().unchecked_ref(),
-            );
+            let _ = doc
+                .remove_event_listener_with_callback("keydown", open._key.as_ref().unchecked_ref());
         }
         true
     })
@@ -98,18 +96,24 @@ pub fn open_menu(x: f64, y: f64, entries: Vec<MenuEntry>) {
                 let Ok(item) = doc.create_element("div") else {
                     continue;
                 };
-                item.set_class_name(if danger { "ctx-item danger" } else { "ctx-item" });
+                item.set_class_name(if danger {
+                    "ctx-item danger"
+                } else {
+                    "ctx-item"
+                });
                 item.set_text_content(Some(&label));
                 let slot = Rc::new(RefCell::new(Some(action)));
-                let cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
-                    ev.stop_propagation();
-                    close_menu();
-                    if let Some(f) = slot.borrow_mut().take() {
-                        f();
-                    }
-                });
-                let _ = item
-                    .add_event_listener_with_callback("mousedown", cb.as_ref().unchecked_ref());
+                let cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(
+                    move |ev: web_sys::MouseEvent| {
+                        ev.stop_propagation();
+                        close_menu();
+                        if let Some(f) = slot.borrow_mut().take() {
+                            f();
+                        }
+                    },
+                );
+                let _ =
+                    item.add_event_listener_with_callback("mousedown", cb.as_ref().unchecked_ref());
                 closures.push(cb);
                 let _ = root.append_child(&item);
             }
@@ -125,7 +129,11 @@ pub fn open_menu(x: f64, y: f64, entries: Vec<MenuEntry>) {
     let _ = el.style().set_property("top", "-9999px");
     let _ = body.append_child(&root);
     let rect = root.get_bounding_client_rect();
-    let vw = win.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1e9);
+    let vw = win
+        .inner_width()
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1e9);
     let vh = win
         .inner_height()
         .ok()
@@ -147,11 +155,12 @@ pub fn open_menu(x: f64, y: f64, entries: Vec<MenuEntry>) {
             close_menu();
         }
     });
-    let key = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
-        if ev.key() == "Escape" {
-            close_menu();
-        }
-    });
+    let key =
+        Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
+            if ev.key() == "Escape" {
+                close_menu();
+            }
+        });
     let _ = doc.add_event_listener_with_callback("mousedown", dismiss.as_ref().unchecked_ref());
     let _ = doc.add_event_listener_with_callback("keydown", key.as_ref().unchecked_ref());
 

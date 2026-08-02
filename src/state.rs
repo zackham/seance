@@ -438,8 +438,14 @@ mod tests {
 
         state.save().expect("save should succeed");
         let loaded = AppState::load();
-        assert_eq!(loaded.workspace_output, vec![("main".to_string(), 1_700_000_000_000)]);
-        assert_eq!(loaded.workspace_touch_ms, vec![("main".to_string(), 1_700_000_000_500)]);
+        assert_eq!(
+            loaded.workspace_output,
+            vec![("main".to_string(), 1_700_000_000_000)]
+        );
+        assert_eq!(
+            loaded.workspace_touch_ms,
+            vec![("main".to_string(), 1_700_000_000_500)]
+        );
 
         assert_eq!(loaded.panes.len(), 2);
         assert_eq!(loaded.panes[0].name, "Vita");

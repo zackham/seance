@@ -21,7 +21,6 @@
 //! lives in the **daemon** (`src/daemon` + `Engine::handle_control`); the older
 //! in-GUI server was retired in the daemon split.
 
-
 /// A request from a control client (the CLI or a master pane) to the app.
 ///
 /// Tagged on the wire by an `"op"` field with snake_case variant names, e.g.

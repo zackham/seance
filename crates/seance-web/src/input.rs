@@ -123,7 +123,11 @@ pub fn keyboard_to_keyinput(ev: &web_sys::KeyboardEvent) -> Option<KeyInput> {
 /// trackpad pixels accumulate in `acc` across calls, otherwise slow scrolls
 /// never move at all.
 pub fn wheel_rows(delta_y: f64, delta_mode: u32, cell_h_css: f32, acc: &mut f64) -> i32 {
-    let cell_h = if cell_h_css > 0.0 { cell_h_css as f64 } else { 1.0 };
+    let cell_h = if cell_h_css > 0.0 {
+        cell_h_css as f64
+    } else {
+        1.0
+    };
     let rows_f = match delta_mode {
         web_sys::WheelEvent::DOM_DELTA_LINE => delta_y,
         web_sys::WheelEvent::DOM_DELTA_PAGE => delta_y * ROWS_PER_PAGE,
@@ -237,14 +241,26 @@ mod tests {
 
     #[test]
     fn bare_modifiers_and_ime_placeholders_are_dropped() {
-        for k in ["Shift", "Control", "Alt", "Meta", "CapsLock", "Dead", "Process"] {
-            assert!(key_input_from_parts(k, Modifiers::default()).is_none(), "{k}");
+        for k in [
+            "Shift", "Control", "Alt", "Meta", "CapsLock", "Dead", "Process",
+        ] {
+            assert!(
+                key_input_from_parts(k, Modifiers::default()).is_none(),
+                "{k}"
+            );
         }
     }
 
     #[test]
     fn char_keys_lowercase_key_and_keep_typed_char() {
-        let k = key_input_from_parts("A", Modifiers { shift: true, ..Default::default() }).unwrap();
+        let k = key_input_from_parts(
+            "A",
+            Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(k.key, "a");
         assert_eq!(k.key_char.as_deref(), Some("A"));
     }
@@ -256,13 +272,19 @@ mod tests {
         assert!(k.key_char.is_none());
         assert_eq!(key_to_bytes(&k, TermModes::default()).unwrap(), vec![3]);
 
-        let meta = Modifiers { platform: true, ..Default::default() };
+        let meta = Modifiers {
+            platform: true,
+            ..Default::default()
+        };
         assert!(key_input_from_parts("v", meta).unwrap().key_char.is_none());
     }
 
     #[test]
     fn alt_char_still_carries_key_char() {
-        let alt = Modifiers { alt: true, ..Default::default() };
+        let alt = Modifiers {
+            alt: true,
+            ..Default::default()
+        };
         let k = key_input_from_parts("b", alt).unwrap();
         assert_eq!(k.key_char.as_deref(), Some("b"));
         assert_eq!(key_to_bytes(&k, TermModes::default()).unwrap(), b"\x1bb");

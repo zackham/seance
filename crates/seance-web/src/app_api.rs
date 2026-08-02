@@ -13,7 +13,13 @@ pub trait Actions {
 
     fn focus_pane(&self, slug: &str);
     fn select_workspace(&self, ws: &str);
-    fn spawn_pane(&self, name: &str, cwd: Option<String>, command: Option<String>, workspace: Option<String>);
+    fn spawn_pane(
+        &self,
+        name: &str,
+        cwd: Option<String>,
+        command: Option<String>,
+        workspace: Option<String>,
+    );
     fn kill_pane(&self, slug: &str);
     fn rename_pane(&self, slug: &str, name: &str);
     fn create_workspace(&self, name: &str);

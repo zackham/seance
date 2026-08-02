@@ -352,10 +352,7 @@ pub fn open(
 
     // Player: one Bridge load over the full window. `{slug}` in the pane
     // template is substituted by the player per pane.
-    let origin = win
-        .location()
-        .origin()
-        .unwrap_or_else(|_| String::from(""));
+    let origin = win.location().origin().unwrap_or_else(|_| String::from(""));
     let manifest_url = format!(
         "{origin}/replay/manifest?token={}&workspace={}&from_ms={lo_ms}&to_ms={hi_ms}",
         enc(&token),
@@ -641,7 +638,9 @@ fn wire_events(editor: &Rc<RefCell<Editor>>) {
                         e.rows.get(i).map(|r| r.t_ms).zip(e.player.clone())
                     };
                     if let Some((t, p)) = seek {
-                        if let Ok(mut pb) = p.try_borrow_mut() { pb.seek_ms(t); }
+                        if let Ok(mut pb) = p.try_borrow_mut() {
+                            pb.seek_ms(t);
+                        }
                     }
                 }
             }
@@ -652,8 +651,8 @@ fn wire_events(editor: &Rc<RefCell<Editor>>) {
     }
     {
         // Enter commits an inline edit (and never inserts a newline).
-        let cb = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
-            move |ev: web_sys::KeyboardEvent| {
+        let cb =
+            Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
                 if ev.key() != "Enter" {
                     return;
                 }
@@ -670,8 +669,7 @@ fn wire_events(editor: &Rc<RefCell<Editor>>) {
                 if let Some(el) = target.dyn_ref::<web_sys::HtmlElement>() {
                     let _ = el.blur(); // → focusout → commit
                 }
-            },
-        );
+            });
         let panel = editor.borrow().dom.chapters.clone();
         let _ = panel.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
         keep.push(KeepAlive::Key(cb));
@@ -796,7 +794,9 @@ fn push_range(editor: &Rc<RefCell<Editor>>) {
         (ed.player.clone(), ed.from_ms, ed.to_ms)
     };
     if let Some(p) = player {
-        if let Ok(mut pb) = p.try_borrow_mut() { pb.set_range(from, to); }
+        if let Ok(mut pb) = p.try_borrow_mut() {
+            pb.set_range(from, to);
+        }
     }
 }
 
@@ -812,7 +812,8 @@ fn defer_apply(editor: &Rc<RefCell<Editor>>) {
         push_range(&ed);
         apply_chapters(&ed);
     });
-    let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), 0);
+    let _ =
+        win.set_timeout_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), 0);
     editor.borrow_mut()._keep.push(KeepAlive::Tick(cb));
 }
 
@@ -825,7 +826,9 @@ fn apply_chapters(editor: &Rc<RefCell<Editor>>) {
         )
     };
     if let Some(p) = player {
-        if let Ok(mut pb) = p.try_borrow_mut() { pb.set_chapters(chapters); }
+        if let Ok(mut pb) = p.try_borrow_mut() {
+            pb.set_chapters(chapters);
+        }
     }
 }
 
@@ -842,7 +845,9 @@ fn review_pass(editor: &Rc<RefCell<Editor>>) {
         )
     };
     let Some(p) = player else { return };
-    let Ok(mut p) = p.try_borrow_mut() else { return };
+    let Ok(mut p) = p.try_borrow_mut() else {
+        return;
+    };
     p.seek_ms(start);
     p.pause();
 }
@@ -878,7 +883,11 @@ fn render_trim(ed: &Editor) {
         .h_from
         .style()
         .set_property("left", &format!("{a:.3}%"));
-    let _ = ed.dom.h_to.style().set_property("left", &format!("{b:.3}%"));
+    let _ = ed
+        .dom
+        .h_to
+        .style()
+        .set_property("left", &format!("{b:.3}%"));
     ed.dom.duration.set_text_content(Some(&format!(
         "{} selected",
         fmt_duration(ed.to_ms.saturating_sub(ed.from_ms))
@@ -926,9 +935,9 @@ fn render_chapters(editor: &Rc<RefCell<Editor>>) {
         // Static skeleton only — the untrusted text goes in via text_content.
         el.set_inner_html(CHAPTER_HTML);
 
-        if let Some(cb) = q(&el, ".rpe-ch-box").and_then(|e| {
-            e.dyn_into::<web_sys::HtmlInputElement>().ok()
-        }) {
+        if let Some(cb) =
+            q(&el, ".rpe-ch-box").and_then(|e| e.dyn_into::<web_sys::HtmlInputElement>().ok())
+        {
             cb.set_checked(row.included && inside);
             if !inside {
                 let _ = cb.set_attribute("disabled", "disabled");
@@ -1198,11 +1207,9 @@ fn hide_pub(ed: &Editor) {
 /// publish-command hint is attached there because a missing publisher config
 /// is by far the most common cause and the fix lives in one file.
 fn show_pub_message(ed: &Editor, msg: &str, danger: bool) {
-    ed.dom.pub_body.set_inner_html(if danger {
-        ERROR_HTML
-    } else {
-        NOTE_HTML
-    });
+    ed.dom
+        .pub_body
+        .set_inner_html(if danger { ERROR_HTML } else { NOTE_HTML });
     if let Some(line) = q(&ed.dom.pub_body, "#rpe-pub-msg") {
         line.set_text_content(Some(msg));
     }
@@ -1498,7 +1505,10 @@ mod tests {
         let ts = [lo + 600_000, lo + 900_000];
         assert_eq!(
             active_extent(&ts, lo, hi),
-            (lo + 600_000 - ACTIVITY_PAD_MS, lo + 900_000 + ACTIVITY_PAD_MS)
+            (
+                lo + 600_000 - ACTIVITY_PAD_MS,
+                lo + 900_000 + ACTIVITY_PAD_MS
+            )
         );
         // Padding never escapes the loaded window.
         let ts = [lo + 1_000, hi - 1_000];
@@ -1510,7 +1520,13 @@ mod tests {
         assert_eq!(active_extent(&[], lo, hi), (lo, hi));
         // One chapter still yields a usable span, not a zero-width trim.
         let (f, t) = active_extent(&[lo + 500_000], lo, hi);
-        assert_eq!((f, t), (lo + 500_000 - ACTIVITY_PAD_MS, lo + 500_000 + ACTIVITY_PAD_MS));
+        assert_eq!(
+            (f, t),
+            (
+                lo + 500_000 - ACTIVITY_PAD_MS,
+                lo + 500_000 + ACTIVITY_PAD_MS
+            )
+        );
         assert!(t - f >= MIN_SPAN_MS);
     }
 

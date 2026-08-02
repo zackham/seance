@@ -21,7 +21,7 @@ use crate::{
     pane::{Pane, PaneBody, SpawnRequest},
     remote_term::RemoteTerminal,
     remote_term_view::RemoteTerminalView,
-    runtime::protocol::{ForeignWorkspace, GuiEvent, PaneInfo, WindowInfo},
+    runtime::protocol::{GuiEvent, PaneInfo, WindowInfo},
     runtime::snapshot::GridSnapshot,
     scratchpad::ScratchpadDrawer,
     theme::SeancePalette,
@@ -157,10 +157,12 @@ pub struct SeanceApp {
     host_expanded: std::collections::HashSet<String>,
     /// This GUI connection's window id (from daemon State).
     window_id: Option<String>,
-    /// Live windows for transfer menus.
+    /// Live windows (multiplayer roster).
     windows: Vec<WindowInfo>,
-    /// Workspaces owned by other windows (empty-sidebar pull menu).
-    foreign_workspaces: Vec<ForeignWorkspace>,
+    /// This window's subscription set, daemon order. State arrives GLOBAL
+    /// (every workspace, every pane) and is filtered to these at ingest —
+    /// the parked/active split is a later phase.
+    subscriptions: Vec<String>,
     /// Last activity timestamp (ms) per workspace — input/inject/status, not click.
     workspace_touch: std::collections::HashMap<String, u64>,
     /// Last observed pane output per workspace (ms) — sidebar shows "time
@@ -176,9 +178,7 @@ pub struct SeanceApp {
     workspace_unread: std::collections::HashMap<String, WorkspaceAttention>,
     /// Full-window live overview (ctrl+shift+space).
     overview: bool,
-    /// Workspace waiting to move into a newly-opened empty window.
-    pending_transfer: Option<String>,
-    /// This window attached as empty (second process / new-window transfer target).
+    /// This window attached with an empty subscription set (second process).
     empty_window: bool,
     /// Quicklaunch strip entries (~/.config/seance/quicklaunch.json).
     quicklaunch: Vec<QuickLaunchEntry>,
@@ -292,7 +292,11 @@ impl SeanceApp {
         Self::new_inner(window, cx, false)
     }
 
-    /// Empty window: claims no workspaces until pull/transfer (multi-window).
+    /// Empty window: subscribes to no workspaces until one is selected.
+    /// A second OS window that subscribes to nothing. Its only caller
+    /// ("send to new window") went with the ownership model; phase 2's
+    /// active/parked sidebar re-wires it as "open a window here".
+    #[allow(dead_code)]
     pub fn new_empty_window(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_inner(window, cx, true)
     }
@@ -340,14 +344,13 @@ impl SeanceApp {
             host_expanded: std::collections::HashSet::new(),
             window_id: None,
             windows: Vec::new(),
-            foreign_workspaces: Vec::new(),
+            subscriptions: Vec::new(),
             workspace_touch: std::collections::HashMap::new(),
             workspace_activity: std::collections::HashMap::new(),
             workspace_working_since: std::collections::HashMap::new(),
             workspace_was_working: std::collections::HashSet::new(),
             workspace_unread: std::collections::HashMap::new(),
             overview: false,
-            pending_transfer: None,
             empty_window: empty,
             quicklaunch: Vec::new(),
             quicklaunch_mtime: None,
@@ -569,30 +572,33 @@ impl SeanceApp {
                 statuses,
                 window_id,
                 windows,
-                foreign_workspaces,
+                subscriptions,
                 workspace_meta,
             } => {
-                // Multi-window identity + peer list.
-                let prev_windows: std::collections::HashSet<String> =
-                    self.windows.iter().map(|w| w.id.clone()).collect();
+                // Multi-window identity + peer roster.
                 if let Some(id) = window_id {
                     self.window_id = Some(id);
                 }
                 self.windows = windows;
-                self.foreign_workspaces = foreign_workspaces;
+                self.subscriptions = subscriptions;
 
-                // Complete "send to new window": transfer once the empty peer appears.
-                if let Some(ws) = self.pending_transfer.clone() {
-                    let self_id = self.window_id.clone();
-                    let peer = self.windows.iter().find(|w| {
-                        Some(w.id.as_str()) != self_id.as_deref() && !prev_windows.contains(&w.id)
-                    });
-                    if let Some(peer) = peer {
-                        let to = peer.id.clone();
-                        let _ = self.client.transfer_workspace(&ws, &to);
-                        self.pending_transfer = None;
-                    }
-                }
+                // State is global from 0.12; this window renders only what it
+                // subscribes to (today's look). `workspace_meta` stays global —
+                // it's the name/clock census the quicklaunch editor needs.
+                let subs: std::collections::HashSet<&str> =
+                    self.subscriptions.iter().map(|s| s.as_str()).collect();
+                let panes: Vec<PaneInfo> = panes
+                    .into_iter()
+                    .filter(|p| subs.contains(p.workspace.as_str()))
+                    .collect();
+                let extra_workspaces: Vec<String> = extra_workspaces
+                    .into_iter()
+                    .filter(|w| subs.contains(w.as_str()))
+                    .collect();
+                let workspace_order: Vec<String> = workspace_order
+                    .into_iter()
+                    .filter(|w| subs.contains(w.as_str()))
+                    .collect();
 
                 self.selected_workspace = selected_workspace;
                 self.active_slug = focused_pane;
@@ -600,6 +606,12 @@ impl SeanceApp {
                 self.workspace_order = workspace_order;
                 self.asks = asks
                     .into_iter()
+                    .filter(|a| {
+                        a.workspace
+                            .as_ref()
+                            .map(|w| subs.contains(w.as_str()))
+                            .unwrap_or(true)
+                    })
                     .map(|a| PendingAsk {
                         id: a.id,
                         from: a.from,
@@ -609,8 +621,11 @@ impl SeanceApp {
                         answer: a.answer,
                     })
                     .collect();
+                let pane_slugs: std::collections::HashSet<String> =
+                    panes.iter().map(|p| p.slug.clone()).collect();
                 self.statuses = statuses
                     .into_iter()
+                    .filter(|s| pane_slugs.contains(&s.slug))
                     .map(|s| {
                         (
                             s.slug,
@@ -890,7 +905,11 @@ impl SeanceApp {
             } => {
                 // Daemon says this circle produced real output. Max-merge:
                 // a local stamp from a frame we just painted may be newer.
-                let cur = self.workspace_activity.get(&workspace).copied().unwrap_or(0);
+                let cur = self
+                    .workspace_activity
+                    .get(&workspace)
+                    .copied()
+                    .unwrap_or(0);
                 if last_output_ms > cur {
                     self.workspace_activity.insert(workspace, last_output_ms);
                     cx.notify();
@@ -963,7 +982,8 @@ impl SeanceApp {
                 .find(|p| p.slug == slug)
                 .map(|p| p.workspace.clone())
             {
-                self.workspace_activity.insert(ws, crate::app::util::now_ms());
+                self.workspace_activity
+                    .insert(ws, crate::app::util::now_ms());
             }
         }
         if !self.overview {
@@ -1422,6 +1442,8 @@ impl SeanceApp {
     }
 
     /// Open an empty OS window (same process) for multi-window transfers.
+    /// Paired with [`Self::new_empty_window`] — unwired until phase 2.
+    #[allow(dead_code)]
     fn open_empty_os_window(&mut self, cx: &mut Context<Self>) {
         let bounds = gpui::Bounds::centered(None, gpui::size(px(1280.), px(800.)), cx);
         let _ = cx.open_window(
@@ -1445,11 +1467,6 @@ impl SeanceApp {
                 cx.new(|cx| gpui_component::Root::new(view, window, cx))
             },
         );
-    }
-
-    fn send_workspace_to_new_window(&mut self, workspace: &str, cx: &mut Context<Self>) {
-        self.pending_transfer = Some(workspace.to_string());
-        self.open_empty_os_window(cx);
     }
 
     // ---- inline rename ----
@@ -2233,24 +2250,6 @@ impl Render for SeanceApp {
                 this.touch_workspace(&act.0);
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, act: &ActTransferWorkspace, _, _cx| {
-                let _ = this
-                    .client
-                    .transfer_workspace(&act.workspace, &act.to_window);
-            }))
-            .on_action(
-                cx.listener(|this, act: &ActTransferWorkspaceNewWindow, _, cx| {
-                    this.send_workspace_to_new_window(&act.0, cx);
-                }),
-            )
-            .on_action(cx.listener(|this, _: &ActCollectAllWindows, _, _cx| {
-                let _ = this.client.collect_all();
-            }))
-            .on_action(cx.listener(|this, act: &ActPullWorkspace, _, _cx| {
-                if let Some(wid) = this.window_id.clone() {
-                    let _ = this.client.transfer_workspace(&act.0, &wid);
-                }
-            }))
             .on_action(cx.listener(|this, act: &ActQuickLaunchEdit, window, cx| {
                 this.open_quicklaunch_editor(Some(&act.0.clone()), window, cx);
             }))
@@ -2421,8 +2420,6 @@ fn share_replay_open(workspace: &str) {
             std::thread::sleep(std::time::Duration::from_millis(600));
         }
     }
-    let url = format!(
-        "http://127.0.0.1:9666/?token={token}#replay-edit?workspace={workspace}"
-    );
+    let url = format!("http://127.0.0.1:9666/?token={token}#replay-edit?workspace={workspace}");
     crate::sysopen::open_detached(&url);
 }

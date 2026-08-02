@@ -132,12 +132,7 @@ impl SeanceApp {
                                         .into_any_element()
                                 })
                         }))
-                        .child(
-                            div()
-                                .my_1()
-                                .h(px(1.))
-                                .bg(SeancePalette::border()),
-                        )
+                        .child(div().my_1().h(px(1.)).bg(SeancePalette::border()))
                         .child(
                             div()
                                 .px_1()
@@ -635,14 +630,8 @@ impl SeanceApp {
                                 }))
                                 .context_menu({
                                     let ws_m = ws_for_menu.clone();
-                                    let peers: Vec<(String, String)> = self
-                                        .windows
-                                        .iter()
-                                        .filter(|w| Some(w.id.as_str()) != self.window_id.as_deref())
-                                        .map(|w| (w.id.clone(), w.label.clone()))
-                                        .collect();
                                     move |menu, _, _| {
-                                        let mut m = menu
+                                        let m = menu
                                             .menu(
                                                 "touch (bump recency)",
                                                 Box::new(ActTouchWorkspace(ws_m.clone())),
@@ -658,27 +647,6 @@ impl SeanceApp {
                                             .menu(
                                                 "share replay…",
                                                 Box::new(ActShareReplay(ws_m.clone())),
-                                            )
-                                            .separator()
-                                            .menu(
-                                                "send to new window",
-                                                Box::new(ActTransferWorkspaceNewWindow(
-                                                    ws_m.clone(),
-                                                )),
-                                            );
-                                        for (id, label) in &peers {
-                                            m = m.menu(
-                                                format!("send to {label}"),
-                                                Box::new(ActTransferWorkspace {
-                                                    workspace: ws_m.clone(),
-                                                    to_window: id.clone(),
-                                                }),
-                                            );
-                                        }
-                                        m = m
-                                            .menu(
-                                                "collect all windows here",
-                                                Box::new(ActCollectAllWindows),
                                             )
                                             .separator()
                                             .menu(
@@ -808,35 +776,10 @@ impl SeanceApp {
                             }))
                             .child(header)
                     }))
-                    // Flex filler: only *blank* sidebar area gets pull/collect menu
-                    // (workspace rows have their own menus — don't nest on the scroller).
-                    .child({
-                        let foreign = self.foreign_workspaces.clone();
-                        div()
-                            .id("sidebar-empty-hit")
-                            .flex_1()
-                            .min_h(px(48.))
-                            .w_full()
-                            .context_menu(move |menu, _, _| {
-                                let mut m = menu.menu(
-                                    "collect all windows here",
-                                    Box::new(ActCollectAllWindows),
-                                );
-                                if !foreign.is_empty() {
-                                    m = m.separator();
-                                    for f in &foreign {
-                                        m = m.menu(
-                                            format!(
-                                                "pull «{}» from {}",
-                                                f.workspace, f.window_label
-                                            ),
-                                            Box::new(ActPullWorkspace(f.workspace.clone())),
-                                        );
-                                    }
-                                }
-                                m
-                            })
-                    })
+                    // Flex filler below the rows. The parked/subscribe menu
+                    // that used to live here (pull / collect) went with the
+                    // ownership model; phase 2 puts the parked group here.
+                    .child(div().id("sidebar-empty-hit").flex_1().min_h(px(48.)).w_full())
             })
             .child(self.render_quicklaunch(cx))
             .child(self.render_host_sidebar(cx))

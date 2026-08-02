@@ -113,7 +113,11 @@ impl<'a> Iterator for RecordIter<'a> {
         }
         let payload = &self.data[13..13 + len];
         self.data = &self.data[13 + len..];
-        Some(Record { kind, t_ms, payload })
+        Some(Record {
+            kind,
+            t_ms,
+            payload,
+        })
     }
 }
 
@@ -348,7 +352,10 @@ mod tests {
 
         let got: Vec<_> = records(&stream).unwrap().collect();
         assert_eq!(got.len(), 2);
-        assert_eq!((got[0].kind, got[0].t_ms, got[0].payload), (KIND_FULL, 1000, b"frameA".as_slice()));
+        assert_eq!(
+            (got[0].kind, got[0].t_ms, got[0].payload),
+            (KIND_FULL, 1000, b"frameA".as_slice())
+        );
         assert_eq!(got[1].kind, KIND_EVENT);
     }
 
@@ -365,9 +372,9 @@ mod tests {
         };
         let events = vec![
             (10, ev(b"fix the bugg")),
-            (20, ev(b"\x7f")),        // backspace
-            (30, ev(b"\r")),          // submit
-            (40, ev(b"\x1b[A")),      // arrow — ignored
+            (20, ev(b"\x7f")),   // backspace
+            (30, ev(b"\r")),     // submit
+            (40, ev(b"\x1b[A")), // arrow — ignored
             (50, ev(b"ls\r")),
         ];
         let ch = extract_chapters("p1", &events);

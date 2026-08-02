@@ -76,9 +76,22 @@ pub fn now_ms() -> u64 {
 /// thread never has to guess when something actually happened (and so tests can
 /// inject time).
 pub(crate) enum Msg {
-    Grid { t_ms: u64, snap: Box<GridSnapshot> },
-    Event { t_ms: u64, pane: String, ev: Box<ReplayEvent> },
-    PaneClosed { t_ms: u64, pane: String },
+    Grid {
+        t_ms: u64,
+        snap: Box<GridSnapshot>,
+    },
+    Event {
+        t_ms: u64,
+        pane: String,
+        ev: Box<ReplayEvent>,
+    },
+    PaneClosed {
+        t_ms: u64,
+        pane: String,
+    },
+    // Constructed by `shutdown()` — tests + `spawn_with_join` callers only;
+    // the live daemon lets the ring flush on process exit.
+    #[allow(dead_code)]
     Stop,
 }
 
@@ -117,6 +130,7 @@ impl RecorderHandle {
 
     /// Flush everything and stop the thread. Used by `spawn_with_join` callers
     /// (tests, daemon shutdown); after this the handle is inert.
+    #[allow(dead_code)] // exercised by recorder tests; no live shutdown caller
     pub fn shutdown(&self) {
         self.send(Msg::Stop);
     }
@@ -485,11 +499,7 @@ impl Recorder {
         }
         let path = self.pane(slug).dir.join(format!("{hour}.srr"));
         let existed = path.exists();
-        match fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
+        match fs::OpenOptions::new().create(true).append(true).open(&path) {
             Ok(f) => {
                 let mut w = BufWriter::new(f);
                 if !existed {
@@ -721,7 +731,13 @@ mod tests {
 
     /// Recorder + a note receiver. Most tests ignore the notes, but the
     /// receiver must stay alive so the throttle path is exercised for real.
-    fn spawn_rec(root: PathBuf) -> (RecorderHandle, std::thread::JoinHandle<()>, Receiver<ActivityNote>) {
+    fn spawn_rec(
+        root: PathBuf,
+    ) -> (
+        RecorderHandle,
+        std::thread::JoinHandle<()>,
+        Receiver<ActivityNote>,
+    ) {
         let (ntx, nrx) = mpsc::channel();
         let (h, join) = spawn_with_join(root, ntx);
         (h, join, nrx)
@@ -927,10 +943,13 @@ mod tests {
         join.join().unwrap();
 
         let got: Vec<ActivityNote> = notes.try_iter().collect();
-        assert_eq!(got, vec![
-            ("p1".to_string(), T0 + 100),
-            ("p1".to_string(), T0 + NOTE_EVERY_MS + 200),
-        ]);
+        assert_eq!(
+            got,
+            vec![
+                ("p1".to_string(), T0 + 100),
+                ("p1".to_string(), T0 + NOTE_EVERY_MS + 200),
+            ]
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -986,7 +1005,8 @@ mod tests {
         send_grid(&h, T0, grid("p1", 1, 'a'));
         send_grid(&h, T0 + 100, grid("p1", 2, 'b'));
         h.shutdown();
-        join.join().expect("recorder must survive a dead notes receiver");
+        join.join()
+            .expect("recorder must survive a dead notes receiver");
 
         // Records still landed — recording is independent of the note channel.
         let data = read_segment(&root, "p1", 1_000);

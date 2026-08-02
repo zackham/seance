@@ -20,12 +20,17 @@ use crate::runtime::snapshot::{
 use crate::state::slugify;
 
 /// One GUI window connection.
+///
+/// Workspaces are global and unowned (0.12): a connection holds a
+/// *subscription set* — the workspaces it wants grid streams for — plus its own
+/// selection/focus. Two windows may subscribe to the same workspace.
 pub(super) struct GuiConn {
     id: String,
     tx: Sender<GuiEvent>,
     selected_workspace: Option<String>,
     focused_pane: Option<String>,
     overview: bool,
+    subscriptions: HashSet<String>,
 }
 
 /// Cached last broadcast for damage detection (Arc so we don't clone every push).
@@ -50,8 +55,15 @@ impl Engine {
             selected_workspace: None,
             focused_pane: None,
             overview: false,
+            subscriptions: HashSet::new(),
         });
         id
+    }
+
+    /// Test-only: this window's subscription set, ordered like the wire.
+    #[cfg(test)]
+    pub(super) fn subscriptions_of(&self, window_id: &str) -> Vec<String> {
+        self.workspaces_for_window(window_id)
     }
 
     /// Test-only: is a GUI window with this id currently registered?
@@ -61,66 +73,22 @@ impl Engine {
     }
 
     /// Test-only accessor for the pure grid-interval selection logic (no clocks).
-    /// `None` = pane not streamed to its owning window right now.
+    /// `None` = no connection is interested in this pane right now.
     #[cfg(test)]
     pub(super) fn grid_interval_ms_for(&self, slug: &str) -> Option<u64> {
         self.grid_interval_for(slug).map(|d| d.as_millis() as u64)
     }
 
+    /// Drop a window from the registry. Workspaces are global — nothing is
+    /// reassigned; the survivors only need a fresh roster.
     pub fn unregister_gui(&mut self, window_id: &str) {
         let was_registered = self.gui_conns.iter().any(|c| c.id == window_id);
+        if !was_registered {
+            return;
+        }
         self.gui_conns.retain(|c| c.id != window_id);
-        let orphans: Vec<String> = self
-            .workspace_window
-            .iter()
-            .filter(|(_, w)| *w == window_id)
-            .map(|(ws, _)| ws.clone())
-            .collect();
-        // Also claim workspaces still pointing at this id even if conn was
-        // already pruned (Bye then EOF double-call).
-        if orphans.is_empty() && !was_registered {
-            return;
-        }
-        if orphans.is_empty() {
-            // Still notify peers that this window vanished from the list.
-            self.push_state_to_all();
-            return;
-        }
         if self.gui_conns.is_empty() {
-            // Last window closed — truly orphan (no owner). Next first window
-            // attach will collect everything.
-            for ws in &orphans {
-                self.workspace_window.remove(ws);
-            }
             return;
-        }
-        // Survivors exist — dump into the fullest window (never orphan).
-        let target = self
-            .gui_conns
-            .iter()
-            .map(|c| {
-                let n = self.workspaces_for_window(&c.id).len();
-                (n, c.id.clone())
-            })
-            .max_by_key(|(n, id)| (*n, id.clone()))
-            .map(|(_, id)| id)
-            .unwrap_or_else(|| self.gui_conns[0].id.clone());
-        for ws in &orphans {
-            self.workspace_window.insert(ws.clone(), target.clone());
-        }
-        let owned_now = self.workspaces_for_window(&target);
-        if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == target) {
-            let sel_ok = c
-                .selected_workspace
-                .as_ref()
-                .is_some_and(|s| owned_now.iter().any(|o| o == s));
-            if !sel_ok {
-                c.selected_workspace = orphans
-                    .first()
-                    .cloned()
-                    .or_else(|| owned_now.first().cloned());
-            }
-            self.selected_workspace = c.selected_workspace.clone();
         }
         // Push without prune (avoid re-entrant unregister).
         let ids: Vec<String> = self.gui_conns.iter().map(|c| c.id.clone()).collect();
@@ -128,12 +96,9 @@ impl Engine {
             let st = self.state_for_window(&id);
             self.send_to(&id, st);
         }
-        for ws in orphans {
-            self.flush_workspace_grids(&ws);
-        }
     }
 
-    /// Drop connections whose send channel is dead, reassigning their workspaces.
+    /// Drop connections whose send channel is dead.
     pub fn prune_dead_guis(&mut self) {
         let alive: Vec<String> = self
             .gui_conns
@@ -148,7 +113,6 @@ impl Engine {
             .map(|c| c.id.clone())
             .collect();
         for id in dead {
-            // unregister_gui retains by id — reassign/orphan correctly.
             self.unregister_gui(&id);
         }
     }
@@ -167,14 +131,44 @@ impl Engine {
         });
     }
 
-    fn send_grid_to_owners(&mut self, pane: &str, ev: GuiEvent) {
-        let owner = self.owner_of_pane(pane).map(|s| s.to_string());
-        if let Some(oid) = owner {
-            self.send_to(&oid, ev);
-        } else {
-            // Unowned (should be rare) — broadcast so something sees it.
-            self.broadcast(ev);
+    /// Fan a grid frame out to every connection currently streaming this pane
+    /// (i.e. one with a `grid_interval_for` rate). Nobody interested → nobody
+    /// gets it; there is no broadcast fallback, an unsubscribed workspace is
+    /// deliberately silent on the wire (the recorder tap still runs — see
+    /// `handle_session_event`).
+    fn send_grid_to_subscribers(&mut self, pane: &str, ev: GuiEvent) {
+        for id in self.conns_streaming(pane) {
+            self.send_to(&id, ev.clone());
         }
+    }
+
+    /// Window ids whose subscription/selection makes them want `pane`'s frames.
+    fn conns_streaming(&self, pane: &str) -> Vec<String> {
+        let Some(ws) = self
+            .panes
+            .iter()
+            .find(|p| p.slug == pane)
+            .map(|p| p.workspace.clone())
+        else {
+            return Vec::new();
+        };
+        self.gui_conns
+            .iter()
+            .filter(|c| Self::conn_rate_for(c, &ws).is_some())
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
+    /// One connection's grid rate for a workspace: selected → 16ms, subscribed
+    /// while the overview is open → 66ms (thumb rate), otherwise not streamed.
+    fn conn_rate_for(conn: &GuiConn, workspace: &str) -> Option<Duration> {
+        if conn.selected_workspace.as_deref() == Some(workspace) {
+            return Some(Duration::from_millis(16));
+        }
+        if conn.overview && conn.subscriptions.contains(workspace) {
+            return Some(Duration::from_millis(66));
+        }
+        None
     }
 
     pub(super) fn push_state_to_all(&mut self) {
@@ -213,23 +207,37 @@ impl Engine {
         v
     }
 
-    fn workspaces_for_window(&self, window_id: &str) -> Vec<String> {
-        let mut owned: Vec<String> = self
-            .workspace_window
-            .iter()
-            .filter(|(_, w)| *w == window_id)
-            .map(|(ws, _)| ws.clone())
-            .collect();
-        // Stable order from workspace_order then leftovers.
+    /// Every known workspace, ordered by `workspace_order` then alpha for the
+    /// leftovers. This is the global `workspace_order` clients receive.
+    fn all_workspace_names_ordered(&self) -> Vec<String> {
+        let mut rest = self.all_workspace_names();
         let mut ordered = Vec::new();
         for w in &self.workspace_order {
-            if owned.iter().any(|o| o == w) {
+            if rest.iter().any(|o| o == w) {
                 ordered.push(w.clone());
-                owned.retain(|o| o != w);
+                rest.retain(|o| o != w);
             }
         }
-        owned.sort();
-        ordered.extend(owned);
+        ordered.extend(rest);
+        ordered
+    }
+
+    /// This window's subscription set, ordered by `workspace_order` with the
+    /// leftovers appended alphabetically.
+    fn workspaces_for_window(&self, window_id: &str) -> Vec<String> {
+        let Some(conn) = self.gui_conns.iter().find(|c| c.id == window_id) else {
+            return Vec::new();
+        };
+        let mut subs: Vec<String> = conn.subscriptions.iter().cloned().collect();
+        let mut ordered = Vec::new();
+        for w in &self.workspace_order {
+            if subs.iter().any(|o| o == w) {
+                ordered.push(w.clone());
+                subs.retain(|o| o != w);
+            }
+        }
+        subs.sort();
+        ordered.extend(subs);
         ordered
     }
 
@@ -242,41 +250,24 @@ impl Engine {
         }
     }
 
+    /// The State push for one window. Everything except `selected_workspace` /
+    /// `focused_pane` / `subscriptions` is GLOBAL — clients render their own
+    /// active/parked split from the subscription set.
     fn state_for_window(&self, window_id: &str) -> GuiEvent {
-        let owned = self.workspaces_for_window(window_id);
-        let owned_set: HashSet<&str> = owned.iter().map(|s| s.as_str()).collect();
-        let panes: Vec<PaneInfo> = self
-            .pane_infos()
-            .into_iter()
-            .filter(|p| owned_set.contains(p.workspace.as_str()))
-            .collect();
+        let subs = self.workspaces_for_window(window_id);
+        let panes: Vec<PaneInfo> = self.pane_infos();
         let conn = self.gui_conns.iter().find(|c| c.id == window_id);
-        // Never fall back to another window's selection — that made empty
-        // windows inherit the primary's active circle in the sidebar.
+        // Selection is per-connection and must stay inside its subscriptions —
+        // never fall back to another window's choice.
         let selected = conn
             .and_then(|c| c.selected_workspace.clone())
-            .filter(|w| owned_set.contains(w.as_str()))
-            .or_else(|| owned.first().cloned());
+            .filter(|w| subs.iter().any(|s| s == w))
+            .or_else(|| subs.first().cloned());
         let focused = conn
             .and_then(|c| c.focused_pane.clone())
             .filter(|s| panes.iter().any(|p| p.slug == *s));
-        let extra: Vec<String> = self
-            .extra_workspaces
-            .iter()
-            .filter(|w| owned_set.contains(w.as_str()))
-            .cloned()
-            .collect();
-        let order: Vec<String> = owned.clone();
-        let foreign: Vec<ForeignWorkspace> = self
-            .workspace_window
-            .iter()
-            .filter(|(_, w)| *w != window_id)
-            .map(|(ws, wid)| ForeignWorkspace {
-                workspace: ws.clone(),
-                window_id: wid.clone(),
-                window_label: self.window_label(wid),
-            })
-            .collect();
+        let extra: Vec<String> = self.extra_workspaces.clone();
+        let order: Vec<String> = self.all_workspace_names_ordered();
         let statuses: Vec<StatusInfo> = self
             .statuses
             .iter()
@@ -292,12 +283,6 @@ impl Engine {
             .asks
             .iter()
             .filter(|a| a.answer.is_none())
-            .filter(|a| {
-                a.workspace
-                    .as_ref()
-                    .map(|w| owned_set.contains(w.as_str()))
-                    .unwrap_or(true)
-            })
             .map(|a| AskInfo {
                 id: a.id.clone(),
                 from: a.from.clone(),
@@ -307,16 +292,14 @@ impl Engine {
                 answer: a.answer.clone(),
             })
             .collect();
-        // Daemon-owned activity clocks for EVERY known workspace — owned AND
-        // foreign. A fresh/empty window needs times for the elsewhere rail,
-        // and a pulled workspace must arrive with its clock, not a blank one.
-        let mut meta_names: Vec<String> = owned.clone();
+        // Daemon-owned activity clocks for EVERY known workspace, subscribed or
+        // not — a parked circle must still show its real "time since update".
+        let mut meta_names: Vec<String> = order.clone();
         for ws in self
             .workspace_output
             .keys()
             .chain(self.workspace_touch_ms.keys())
             .cloned()
-            .chain(foreign.iter().map(|f| f.workspace.clone()))
         {
             if !meta_names.iter().any(|m| *m == ws) {
                 meta_names.push(ws);
@@ -340,29 +323,16 @@ impl Engine {
             statuses,
             window_id: Some(window_id.to_string()),
             windows: self.window_infos(),
-            foreign_workspaces: foreign,
+            subscriptions: subs,
             workspace_meta,
         }
     }
 
-    fn ensure_workspace_owned(&mut self, workspace: &str, window_id: &str) {
-        self.workspace_window
-            .entry(workspace.to_string())
-            .or_insert_with(|| window_id.to_string());
-    }
-
-    fn owner_of_workspace(&self, workspace: &str) -> Option<&str> {
-        self.workspace_window.get(workspace).map(|s| s.as_str())
-    }
-
-    fn owner_of_pane(&self, slug: &str) -> Option<&str> {
-        let ws = self
-            .panes
-            .iter()
-            .find(|p| p.slug == slug)?
-            .workspace
-            .as_str();
-        self.owner_of_workspace(ws)
+    /// Add `workspace` to this connection's subscription set.
+    fn subscribe_conn(&mut self, window_id: &str, workspace: &str) {
+        if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
+            c.subscriptions.insert(workspace.to_string());
+        }
     }
 
     /// Pack a grid as compact `grid_bin` (SCG3 full or row-damage).
@@ -436,40 +406,22 @@ impl Engine {
         crate::latency_probe::complete("d_input", &snap.pane, "daemon input→gridpush");
         let pane = snap.pane.clone();
         let ev = Self::grid_event(snap, damage.as_deref());
-        self.send_grid_to_owners(&pane, ev);
+        self.send_grid_to_subscribers(&pane, ev);
     }
 
-    /// Selected workspace on the owning window: ~60fps.
-    /// Overview on the owning window: ~15fps for other circles on that window.
+    /// The pane's push rate = the FASTEST any interested connection wants
+    /// (selected somewhere → 16ms; only subscribed-with-overview → 66ms;
+    /// nobody interested → None, the pane simply isn't streamed).
     fn grid_interval_for(&self, slug: &str) -> Option<Duration> {
         let ws = self
             .panes
             .iter()
             .find(|p| p.slug == slug)
             .map(|p| p.workspace.as_str())?;
-        let owner = self.owner_of_workspace(ws)?;
-        let conn = self.gui_conns.iter().find(|c| c.id == owner)?;
-        if conn.selected_workspace.as_deref() == Some(ws) {
-            return Some(Duration::from_millis(16));
-        }
-        if conn.overview {
-            return Some(Duration::from_millis(66));
-        }
-        None
-    }
-
-    /// FULL frame for every live pane — used when one window takes over
-    /// everything (CollectAll) and per-workspace flushes would be noise.
-    fn flush_all_grids(&mut self) {
-        let slugs: Vec<String> = self
-            .panes
+        self.gui_conns
             .iter()
-            .filter(|p| p.session.is_some())
-            .map(|p| p.slug.clone())
-            .collect();
-        for slug in slugs {
-            self.push_grid_full(&slug);
-        }
+            .filter_map(|c| Self::conn_rate_for(c, ws))
+            .min()
     }
 
     fn push_grid_throttled(&mut self, slug: &str) {
@@ -493,19 +445,19 @@ impl Engine {
                 return;
             }
         }
-        // Overview thumbs: always FULL for panes not currently selected on the
-        // owning window (avoids damage-base desync into permanent black).
+        // Overview thumbs: FULL whenever ANY recipient has this workspace
+        // non-selected (it's watching a thumb and never received the damage
+        // base — sending damage there desyncs into permanent black). Damage is
+        // only safe when every recipient has the workspace selected.
         let use_full = self
             .panes
             .iter()
             .find(|p| p.slug == slug)
-            .and_then(|p| {
-                let owner = self.owner_of_workspace(&p.workspace)?;
-                let conn = self.gui_conns.iter().find(|c| c.id == owner)?;
-                Some(
-                    conn.overview
-                        && conn.selected_workspace.as_deref() != Some(p.workspace.as_str()),
-                )
+            .map(|p| {
+                self.gui_conns
+                    .iter()
+                    .filter(|c| Self::conn_rate_for(c, &p.workspace).is_some())
+                    .any(|c| c.selected_workspace.as_deref() != Some(p.workspace.as_str()))
             })
             .unwrap_or(false);
         if use_full {
@@ -565,7 +517,14 @@ impl Engine {
     /// Recorder-side grid tap: ship a snapshot clone at most every 33ms per
     /// pane. `force` bypasses the gate (human input / title / exit moments).
     pub(crate) fn record_grid_tap(&mut self, slug: &str, force: bool) {
-        let Some(rec) = self.recorder.as_ref() else { return };
+        // Recording is pre-fan-out and subscription-blind on purpose: the DVR
+        // must capture panes no GUI is watching. Log the entry BEFORE any
+        // early return so tests can pin that invariant.
+        #[cfg(test)]
+        self.record_tap_log.push(slug.to_string());
+        let Some(rec) = self.recorder.as_ref() else {
+            return;
+        };
         let now = Instant::now();
         if !force {
             if let Some(last) = self.last_record_grid.get(slug) {
@@ -661,7 +620,10 @@ impl Engine {
             }
             SessionEvent::Exited { slug, code } => {
                 self.record_grid_tap(&slug.clone(), true);
-                self.record_event(slug, seance_core::replay::ReplayEvent::Exited { code: *code });
+                self.record_event(
+                    slug,
+                    seance_core::replay::ReplayEvent::Exited { code: *code },
+                );
                 if let Some(rec) = self.recorder.as_ref() {
                     rec.pane_closed(slug);
                 }
@@ -844,119 +806,66 @@ impl Engine {
             GuiRequest::Attach {
                 selected_workspace,
                 focused_pane,
-                empty,
+                subscriptions,
             } => {
-                // Claim policy:
-                //   • sole window → collect ALL workspaces (post last-close reopen)
-                //   • empty=true while peers exist → start blank
-                //   • otherwise → claim unowned orphans only
-                let sole = self.gui_conns.len() <= 1;
-                if sole {
-                    // First / only window: vacuum every known circle + any stale map keys.
-                    for ws in self.all_workspace_names() {
-                        self.workspace_window.insert(ws, window_id.to_string());
-                    }
-                    // Remap anything still pointing at a dead window id.
-                    let dead: Vec<String> = self
-                        .workspace_window
-                        .iter()
-                        .filter(|(_, w)| *w != window_id)
-                        .map(|(ws, _)| ws.clone())
-                        .collect();
-                    for ws in dead {
-                        self.workspace_window.insert(ws, window_id.to_string());
-                    }
-                } else if !empty {
-                    for ws in self.all_workspace_names() {
-                        self.workspace_window
-                            .entry(ws)
-                            .or_insert_with(|| window_id.to_string());
-                    }
-                }
-                // Per-window focus — empty windows stay unselected.
-                // Prefer the engine's last selection (survives Bye / restart-gui)
-                // when still owned by this window; else first owned circle.
-                let owned_now = self.workspaces_for_window(window_id);
-                let remembered_sel = self
-                    .selected_workspace
-                    .clone()
-                    .filter(|s| owned_now.iter().any(|o| o == s));
-                let default_sel = remembered_sel
-                    .clone()
-                    .or_else(|| owned_now.first().cloned());
+                // Seed the subscription set: an explicit list is intersected
+                // with what actually exists; absent means "everything"
+                // (fresh client / migration from the ownership model).
+                let known = self.all_workspace_names();
+                let seed: HashSet<String> = match subscriptions {
+                    Some(list) => list
+                        .into_iter()
+                        .filter(|w| known.iter().any(|k| k == w))
+                        .collect(),
+                    None => known.iter().cloned().collect(),
+                };
                 if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
-                    if empty && !sole {
-                        c.selected_workspace = None;
-                        c.focused_pane = None;
-                    } else if let Some(w) = selected_workspace.clone() {
-                        if self.workspace_window.get(&w).map(|s| s.as_str()) == Some(window_id)
-                            || sole
-                        {
-                            c.selected_workspace = Some(w);
-                        } else if c.selected_workspace.is_none() {
-                            c.selected_workspace = default_sel.clone();
-                        }
-                    } else if c
-                        .selected_workspace
-                        .as_ref()
-                        .map_or(true, |s| !owned_now.iter().any(|o| o == s))
-                    {
-                        c.selected_workspace = default_sel.clone();
-                    }
-                    if let Some(p) = focused_pane.clone() {
-                        c.focused_pane = Some(p);
-                    } else if c.focused_pane.is_none() {
-                        // Restore last focused pane when still in the selected circle.
-                        if let Some(fp) = self.focused_pane.clone() {
-                            let sel = c.selected_workspace.clone();
-                            if self.panes.iter().any(|p| {
-                                p.slug == fp && sel.as_deref() == Some(p.workspace.as_str())
-                            }) {
-                                c.focused_pane = Some(fp);
-                            }
-                        }
-                    }
+                    c.subscriptions = seed;
                 }
-                // Global "human" focus tracks non-empty attaches only.
-                if !empty || sole {
-                    if selected_workspace.is_some() {
-                        self.selected_workspace = selected_workspace;
-                    } else if sole {
-                        // Reopen after last-close / restart-gui: keep prior
-                        // selection when still valid — don't jump to first.
-                        if !self
-                            .selected_workspace
-                            .as_ref()
-                            .is_some_and(|s| owned_now.iter().any(|o| o == s))
-                        {
-                            self.selected_workspace = default_sel.clone();
-                        }
-                        if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
-                            if c.selected_workspace
-                                .as_ref()
-                                .map_or(true, |s| !owned_now.iter().any(|o| o == s))
-                            {
-                                c.selected_workspace = self.selected_workspace.clone();
-                            }
-                            // Keep engine focused_pane in sync with conn when valid.
-                            if let Some(fp) = c.focused_pane.clone() {
-                                self.focused_pane = Some(fp);
-                            }
-                        }
-                    }
-                    if focused_pane.is_some() {
-                        self.focused_pane = focused_pane;
+                let subs = self.workspaces_for_window(window_id);
+                let sel = selected_workspace
+                    .clone()
+                    .filter(|w| subs.iter().any(|s| s == w))
+                    .or_else(|| {
+                        self.selected_workspace
+                            .clone()
+                            .filter(|w| subs.iter().any(|s| s == w))
+                    })
+                    .or_else(|| subs.first().cloned());
+                if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
+                    c.selected_workspace = sel.clone();
+                    c.focused_pane = None;
+                }
+                // Restore focus: the requested pane, else the engine's last
+                // focused pane when it lives in the selected circle.
+                let focus = focused_pane.clone().or_else(|| {
+                    self.focused_pane.clone().filter(|fp| {
+                        self.panes
+                            .iter()
+                            .any(|p| p.slug == *fp && sel.as_deref() == Some(p.workspace.as_str()))
+                    })
+                });
+                if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
+                    c.focused_pane = focus.clone();
+                }
+                // The engine's remembered focus follows a window that actually
+                // has a selection (a deliberately blank window must not wipe it).
+                if sel.is_some() {
+                    self.selected_workspace = sel.clone();
+                    if focus.is_some() {
+                        self.focused_pane = focus;
                     }
                 }
                 // GUI reconnect has no prior base — force FULL frames so we
                 // never send DAMAGE against a stale/missing GUI snapshot.
                 self.last_grid_cells.clear();
-                // Kick PTYs owned by this window so empty post-handoff Terms repaint.
+                // Kick PTYs this window subscribes to so empty post-handoff
+                // Terms repaint.
                 let slugs: Vec<String> = self
                     .panes
                     .iter()
                     .filter(|p| p.session.is_some())
-                    .filter(|p| self.owner_of_workspace(&p.workspace) == Some(window_id))
+                    .filter(|p| subs.iter().any(|w| w == &p.workspace))
                     .map(|p| p.slug.clone())
                     .collect();
                 for slug in &slugs {
@@ -965,7 +874,7 @@ impl Engine {
                     }
                 }
                 let state = self.state_for_window(window_id);
-                // Also refresh other windows' foreign-workspace lists.
+                // Also refresh peers' rosters (window list / labels).
                 self.push_state_to_all();
                 for slug in &slugs {
                     self.push_grid_full(slug);
@@ -979,6 +888,43 @@ impl Engine {
                     }
                 });
                 Some(state)
+            }
+            GuiRequest::Subscribe { workspace } => {
+                self.subscribe_conn(window_id, &workspace);
+                let st = self.state_for_window(window_id);
+                self.send_to(window_id, st);
+                // If this window now streams the workspace (selected, or
+                // overview thumbs), it has no damage base for those panes.
+                let streams = self
+                    .gui_conns
+                    .iter()
+                    .find(|c| c.id == window_id)
+                    .and_then(|c| Self::conn_rate_for(c, &workspace))
+                    .is_some();
+                if streams {
+                    self.flush_workspace_grids(&workspace);
+                }
+                None
+            }
+            GuiRequest::Unsubscribe { workspace } => {
+                let was_selected = self.gui_conns.iter().any(|c| {
+                    c.id == window_id && c.selected_workspace.as_deref() == Some(workspace.as_str())
+                });
+                if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
+                    c.subscriptions.remove(&workspace);
+                }
+                if was_selected {
+                    // Dropping the circle you were looking at moves you to the
+                    // next one you still subscribe to (or nothing).
+                    let next_sel = self.workspaces_for_window(window_id).first().cloned();
+                    if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
+                        c.selected_workspace = next_sel;
+                        c.focused_pane = None;
+                    }
+                }
+                let st = self.state_for_window(window_id);
+                self.send_to(window_id, st);
+                None
             }
             GuiRequest::Input { pane, bytes_b64 } => {
                 self.record_event(
@@ -1170,7 +1116,9 @@ impl Engine {
                         .and_then(|c| c.selected_workspace.clone())
                         .unwrap_or_else(|| "main".into())
                 });
-                self.ensure_workspace_owned(&ws, window_id);
+                // A GUI-requested spawn auto-subscribes the requesting window
+                // to the target circle (ctl spawns subscribe nobody).
+                self.subscribe_conn(window_id, &ws);
                 match self.spawn(SpawnSpec {
                     name,
                     cwd,
@@ -1198,9 +1146,7 @@ impl Engine {
                             .into_iter()
                             .find(|p| p.slug == slug)
                             .unwrap();
-                        if let Some(owner) = self.owner_of_pane(&slug).map(|s| s.to_string()) {
-                            self.send_to(&owner, GuiEvent::PaneSpawned { pane: info.clone() });
-                        }
+                        self.send_to(window_id, GuiEvent::PaneSpawned { pane: info.clone() });
                         if let Some(snap) = self.snapshot_pane(&slug) {
                             self.broadcast_grid(snap);
                         }
@@ -1238,7 +1184,6 @@ impl Engine {
                 workspace,
                 before,
             } => {
-                self.ensure_workspace_owned(&workspace, window_id);
                 self.reorder_pane(&pane, &workspace, before.as_deref());
                 self.persist();
                 self.push_state_to_all();
@@ -1275,9 +1220,6 @@ impl Engine {
                         *w = new.clone();
                     }
                 }
-                if let Some(owner) = self.workspace_window.remove(&old) {
-                    self.workspace_window.insert(new.clone(), owner);
-                }
                 if let Some(t) = self.workspace_output.remove(&old) {
                     self.workspace_output.insert(new.clone(), t);
                 }
@@ -1287,9 +1229,14 @@ impl Engine {
                 if self.selected_workspace.as_deref() == Some(old.as_str()) {
                     self.selected_workspace = Some(new.clone());
                 }
+                // A rename must follow every subscription set, not just the
+                // selections — otherwise subscribers silently park the circle.
                 for c in &mut self.gui_conns {
                     if c.selected_workspace.as_deref() == Some(old.as_str()) {
                         c.selected_workspace = Some(new.clone());
+                    }
+                    if c.subscriptions.remove(&old) {
+                        c.subscriptions.insert(new.clone());
                     }
                 }
                 self.persist();
@@ -1306,8 +1253,7 @@ impl Engine {
                 if !self.workspace_order.iter().any(|w| w == &name) {
                     self.workspace_order.push(name.clone());
                 }
-                self.workspace_window
-                    .insert(name.clone(), window_id.to_string());
+                self.subscribe_conn(window_id, &name);
                 self.selected_workspace = Some(name.clone());
                 if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
                     c.selected_workspace = Some(name.clone());
@@ -1329,11 +1275,11 @@ impl Engine {
                 }
                 self.extra_workspaces.retain(|w| w != &workspace);
                 self.workspace_order.retain(|w| w != &workspace);
-                self.workspace_window.remove(&workspace);
                 if self.selected_workspace.as_deref() == Some(workspace.as_str()) {
                     self.selected_workspace = self.panes.first().map(|p| p.workspace.clone());
                 }
                 for c in &mut self.gui_conns {
+                    c.subscriptions.remove(&workspace);
                     if c.selected_workspace.as_deref() == Some(workspace.as_str()) {
                         c.selected_workspace = None;
                     }
@@ -1345,8 +1291,7 @@ impl Engine {
             GuiRequest::ForkWorkspace { workspace, name } => {
                 match self.fork_workspace(&workspace, name) {
                     Ok(new_ws) => {
-                        self.workspace_window
-                            .insert(new_ws.clone(), window_id.to_string());
+                        self.subscribe_conn(window_id, &new_ws);
                         self.persist();
                         self.push_state_to_all();
                         Some(GuiEvent::Ack {
@@ -1366,8 +1311,9 @@ impl Engine {
                 let mut workspace_changed = false;
                 let mut flush_ws: Option<String> = None;
                 let mut flush_pane: Option<String> = None;
+                // Selecting a circle auto-subscribes to it ("add to active").
                 if let Some(w) = workspace.as_ref() {
-                    self.ensure_workspace_owned(w, window_id);
+                    self.subscribe_conn(window_id, w);
                 }
                 if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
                     if let Some(p) = pane.clone() {
@@ -1399,12 +1345,12 @@ impl Engine {
                     c.overview = enabled;
                 }
                 if enabled {
-                    // FULL flush for this window's workspaces only.
-                    let owned = self.workspaces_for_window(window_id);
+                    // FULL flush for this window's subscribed workspaces only.
+                    let subs = self.workspaces_for_window(window_id);
                     let slugs: Vec<String> = self
                         .panes
                         .iter()
-                        .filter(|p| owned.iter().any(|w| w == &p.workspace) && p.session.is_some())
+                        .filter(|p| subs.iter().any(|w| w == &p.workspace) && p.session.is_some())
                         .map(|p| p.slug.clone())
                         .collect();
                     for slug in slugs {
@@ -1417,77 +1363,8 @@ impl Engine {
                 self.push_grid_full(&pane);
                 None
             }
-            GuiRequest::TransferWorkspace {
-                workspace,
-                to_window,
-            } => {
-                if !self.gui_conns.iter().any(|c| c.id == to_window) {
-                    return Some(GuiEvent::Ack {
-                        ok: false,
-                        data: None,
-                        error: Some(format!("unknown window {to_window}")),
-                    });
-                }
-                // Owner may push; destination may pull; unowned is free for all.
-                let owner = self.owner_of_workspace(&workspace).map(|s| s.to_string());
-                let allowed = match &owner {
-                    None => true,
-                    Some(o) => o == window_id || window_id == to_window,
-                };
-                if !allowed {
-                    return Some(GuiEvent::Ack {
-                        ok: false,
-                        data: None,
-                        error: Some("workspace not owned by this window".into()),
-                    });
-                }
-                let from = owner.clone().unwrap_or_else(|| window_id.to_string());
-                self.workspace_window
-                    .insert(workspace.clone(), to_window.clone());
-                // Clear selection on source if it pointed here.
-                let next_sel = self
-                    .workspaces_for_window(&from)
-                    .into_iter()
-                    .find(|w| w != &workspace);
-                if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == from) {
-                    if c.selected_workspace.as_deref() == Some(workspace.as_str()) {
-                        c.selected_workspace = next_sel;
-                    }
-                }
-                if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == to_window) {
-                    c.selected_workspace = Some(workspace.clone());
-                }
-                // State first so the destination GUI mounts RemoteTerms.
-                // Grids must follow *after* that (immediate flush races empty
-                // entities and gets dropped). Destination also requests refresh
-                // on State for empty snaps — delayed FULL is belt-and-suspenders.
-                self.push_state_to_all();
-                let slugs: Vec<String> = self
-                    .panes
-                    .iter()
-                    .filter(|p| p.workspace == workspace && p.session.is_some())
-                    .map(|p| p.slug.clone())
-                    .collect();
-                let tx = self.event_tx.clone();
-                let slugs_d = slugs.clone();
-                thread::spawn(move || {
-                    thread::sleep(Duration::from_millis(100));
-                    for slug in &slugs_d {
-                        let _ = tx.send(SessionEvent::ForceFullGrid { slug: slug.clone() });
-                    }
-                    thread::sleep(Duration::from_millis(250));
-                    for slug in slugs_d {
-                        let _ = tx.send(SessionEvent::ForceFullGrid { slug });
-                    }
-                });
-                Some(GuiEvent::Ack {
-                    ok: true,
-                    data: Some(json!({"workspace": workspace, "to_window": to_window})),
-                    error: None,
-                })
-            }
             GuiRequest::Bye => {
-                // Window closing — reassign workspaces immediately (don't wait
+                // Window closing — drop the connection immediately (don't wait
                 // for socket EOF). serve_gui will also unregister on exit; that
                 // is a no-op if already gone.
                 self.unregister_gui(window_id);
@@ -1500,7 +1377,7 @@ impl Engine {
                     });
                 }
                 // Tell the victim first (it must stop reconnecting), then
-                // unregister — workspaces reassign exactly like a Bye.
+                // unregister — exactly like a Bye.
                 self.send_to(
                     &window,
                     GuiEvent::Kicked {
@@ -1509,38 +1386,6 @@ impl Engine {
                 );
                 self.unregister_gui(&window);
                 None
-            }
-            GuiRequest::CollectAll => {
-                for ws in self.all_workspace_names() {
-                    self.workspace_window.insert(ws, window_id.to_string());
-                }
-                let pick = self.workspaces_for_window(window_id).first().cloned();
-                if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
-                    if c.selected_workspace.is_none() {
-                        c.selected_workspace = pick;
-                    }
-                }
-                // Other windows go empty.
-                let others: Vec<String> = self
-                    .gui_conns
-                    .iter()
-                    .filter(|c| c.id != window_id)
-                    .map(|c| c.id.clone())
-                    .collect();
-                for oid in others {
-                    if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == oid) {
-                        c.selected_workspace = None;
-                        c.focused_pane = None;
-                        c.overview = false;
-                    }
-                }
-                self.push_state_to_all();
-                self.flush_all_grids();
-                Some(GuiEvent::Ack {
-                    ok: true,
-                    data: Some(json!({"window": window_id})),
-                    error: None,
-                })
             }
             GuiRequest::AnswerAsk { id, answer } => {
                 if let Some(a) = self.asks.iter_mut().find(|a| a.id == id) {

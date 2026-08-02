@@ -136,17 +136,18 @@ fn build() {
         return;
     };
 
-    let close_cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
-        let hit = ev
-            .target()
-            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-            .and_then(|e| e.closest("#activity-close").ok().flatten())
-            .is_some();
-        if hit {
-            ev.stop_propagation();
-            close();
-        }
-    });
+    let close_cb =
+        Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
+            let hit = ev
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .and_then(|e| e.closest("#activity-close").ok().flatten())
+                .is_some();
+            if hit {
+                ev.stop_propagation();
+                close();
+            }
+        });
     let _ = root.add_event_listener_with_callback("mousedown", close_cb.as_ref().unchecked_ref());
 
     let node: &web_sys::Node = root.unchecked_ref();
@@ -186,7 +187,9 @@ fn rows_html(state: &ClientState, now: f64) -> String {
         let cls = actor_class(&item.actor);
         out.push_str(r#"<div class="act-row"><div class="act-when">"#);
         out.push_str(&esc(&rel_time(now - item.at_ms)));
-        out.push_str(r#"</div><div class="act-body"><div class="act-meta"><span class="act-actor "#);
+        out.push_str(
+            r#"</div><div class="act-body"><div class="act-meta"><span class="act-actor "#,
+        );
         out.push_str(cls);
         out.push_str(r#"">"#);
         out.push_str(&esc(&item.actor));

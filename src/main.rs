@@ -20,6 +20,7 @@ mod prompts;
 mod remote_cache;
 mod remote_term;
 mod remote_term_view;
+mod replayexport;
 mod runtime;
 mod scratchpad;
 mod state;
@@ -28,7 +29,6 @@ mod term_font;
 mod term_shared;
 mod theme;
 mod tunnel;
-mod replayexport;
 mod webbridge;
 
 use gpui::*;

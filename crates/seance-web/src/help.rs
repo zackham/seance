@@ -218,10 +218,10 @@ panes run on the daemon, the pixels arrive here.</p>
 <li>notes — each pane carries a shared markdown scratchpad the agent inside it reads and writes</li>
 <li>attribution — human and agent actions land in one event log (the activity drawer, <code>alt+a</code>)</li>
 </ul>
-<p class="note">this client attaches to the same daemon as the native app. a
-circle living on another window appears under <em>elsewhere</em> in the sidebar
-with a <code>pull</code> button — that is the "seance from anywhere"
-affordance: attach from a browser, pull the circle you need, work, and the
+<p class="note">this client attaches to the same daemon as the native app.
+circles are global and unowned — every window holds its own <em>subscription
+set</em>, so the same circle can be open here and on the desktop at once. that
+is the "seance from anywhere" affordance: attach from a browser, work, and the
 daemon keeps it durable.</p>
 
 <h1>keys — the web keymap</h1>
@@ -271,7 +271,6 @@ prefer the middle column.</p>
 <tr><td class="k">× banish</td><td class="d">kill. the first click arms it (turns red), a second within two seconds does it. banishing the last pane banishes the circle — ptys shut down, scratchpad files on disk are kept</td></tr>
 <tr><td class="k">quicklaunch</td><td class="d">saved pane recipes (name + cwd + command) — one click summons a pane already pointed at the right project</td></tr>
 <tr><td class="k">accounts</td><td class="d">the host-bridge strip: which claude account a new agent pane runs as. it fails closed — a quiet bridge shows an empty strip rather than a wrong one</td></tr>
-<tr><td class="k">elsewhere</td><td class="d">circles owned by another window, each with <code>pull</code> to take ownership here</td></tr>
 </table>
 
 <h1>asks + ghost proposals</h1>

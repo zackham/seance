@@ -97,8 +97,6 @@ pub struct Engine {
     event_tx: Sender<SessionEvent>,
     /// Live GUI windows (one connection = one window).
     gui_conns: Vec<GuiConn>,
-    /// workspace name → owning window id (exclusive).
-    workspace_window: HashMap<String, String>,
     next_window_seq: u64,
     /// Per-pane last full-grid push — TUIs with spinners wake the PTY dozens of
     /// times per second; unthrottled snapshots peg the GUI.
@@ -120,6 +118,12 @@ pub struct Engine {
     /// workspace → last human input (unix ms). Same durability story; drives
     /// the sidebar's recency sort. Agent/ctl sends deliberately do NOT bump.
     pub workspace_touch_ms: HashMap<String, u64>,
+    /// Test-only: panes `record_grid_tap` was entered for, in order. Recording
+    /// must be independent of GUI fan-out (a pane nobody subscribes to still
+    /// belongs in the replay ring), and that is otherwise unobservable without
+    /// a live recorder + PTY.
+    #[cfg(test)]
+    pub(super) record_tap_log: Vec<String>,
 }
 
 impl Engine {
@@ -150,7 +154,6 @@ impl Engine {
             caps: crate::caps::CapStore::default(), // PolicyMode::Open
             event_tx,
             gui_conns: Vec::new(),
-            workspace_window: HashMap::new(),
             next_window_seq: 1,
             last_grid_push: HashMap::new(),
             recorder: None,
@@ -159,6 +162,7 @@ impl Engine {
             last_grid_cells: HashMap::new(),
             workspace_output: HashMap::new(),
             workspace_touch_ms: HashMap::new(),
+            record_tap_log: Vec::new(),
         };
         (eng, event_rx)
     }
@@ -212,7 +216,6 @@ impl Engine {
             caps: crate::caps::CapStore::load(),
             event_tx,
             gui_conns: Vec::new(),
-            workspace_window: HashMap::new(),
             next_window_seq: 1,
             last_grid_push: HashMap::new(),
             recorder: None,
@@ -221,6 +224,8 @@ impl Engine {
             last_grid_cells: HashMap::new(),
             workspace_output: HashMap::new(),
             workspace_touch_ms: HashMap::new(),
+            #[cfg(test)]
+            record_tap_log: Vec::new(),
         };
 
         eng.workspace_output = state.workspace_output.iter().cloned().collect();
@@ -340,7 +345,6 @@ impl Engine {
             caps: crate::caps::CapStore::load(),
             event_tx: event_tx.clone(),
             gui_conns: Vec::new(),
-            workspace_window: HashMap::new(),
             next_window_seq: 1,
             last_grid_push: HashMap::new(),
             recorder: None,
@@ -351,6 +355,8 @@ impl Engine {
             // every circle's "time since update" to unknown.
             workspace_output: bundle.workspace_output.into_iter().collect(),
             workspace_touch_ms: bundle.workspace_touch_ms.into_iter().collect(),
+            #[cfg(test)]
+            record_tap_log: Vec::new(),
         };
 
         let mut fd_map: HashMap<usize, OwnedFd> =

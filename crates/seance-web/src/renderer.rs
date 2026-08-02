@@ -71,7 +71,11 @@ fn unpack(c: u32, default: [f32; 3]) -> [f32; 3] {
     if c == DEFAULT_COLOR {
         return default;
     }
-    rgb(((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8)
+    rgb(
+        ((c >> 16) & 0xFF) as u8,
+        ((c >> 8) & 0xFF) as u8,
+        (c & 0xFF) as u8,
+    )
 }
 
 /// Per-frame options the integrator owns (blink phase, focus, mouse selection).
@@ -286,7 +290,11 @@ impl TermRenderer {
     pub fn set_font(&mut self, family: &str, px: f32, dpr: f64) {
         self.family = family.to_string();
         self.font_px = if px.is_finite() && px > 1.0 { px } else { 14.0 };
-        self.dpr = if dpr.is_finite() && dpr > 0.0 { dpr } else { 1.0 };
+        self.dpr = if dpr.is_finite() && dpr > 0.0 {
+            dpr
+        } else {
+            1.0
+        };
         // Metrics/atlas rebuild failures leave the previous (valid) state in
         // place rather than poisoning the renderer; the next frame retries.
         let _ = self.remeasure();
@@ -316,7 +324,10 @@ impl TermRenderer {
     }
 
     pub fn grid_for(&self, css_w: f64, css_h: f64) -> (u16, u16) {
-        let (cw, ch) = (self.metrics.cell_w_css as f64, self.metrics.cell_h_css as f64);
+        let (cw, ch) = (
+            self.metrics.cell_w_css as f64,
+            self.metrics.cell_h_css as f64,
+        );
         if cw <= 0.0 || ch <= 0.0 {
             return (1, 1);
         }
@@ -572,7 +583,11 @@ impl TermRenderer {
         let tm = self.ctx2d.measure_text(s)?;
         let advance = tm.width();
         let right = tm.actual_bounding_box_right();
-        let ink = if right.is_finite() { advance.max(right) } else { advance };
+        let ink = if right.is_finite() {
+            advance.max(right)
+        } else {
+            advance
+        };
         let w = (ink.ceil() as i32 + 2 * m.pad).clamp(1, m.box_w);
         let h = m.cell_h + 2 * m.pad;
 
@@ -666,7 +681,9 @@ impl TermRenderer {
         self.ctx2d.set_fill_style_str("#ffffff");
         self.ctx2d.fill_rect(0.0, 0.0, block as f64, block as f64);
         let (ax, ay) = self.alloc(block, block)?;
-        let data = self.ctx2d.get_image_data(0.0, 0.0, block as f64, block as f64)?;
+        let data = self
+            .ctx2d
+            .get_image_data(0.0, 0.0, block as f64, block as f64)?;
         self.gl.tex_sub_image_2d_with_u32_and_u32_and_image_data(
             Gl::TEXTURE_2D,
             0,
@@ -753,8 +770,11 @@ impl TermRenderer {
         }
         let view = self.staging.subarray(0, n);
         view.copy_from(verts);
-        self.gl
-            .buffer_data_with_array_buffer_view(Gl::ARRAY_BUFFER, view.as_ref(), Gl::DYNAMIC_DRAW);
+        self.gl.buffer_data_with_array_buffer_view(
+            Gl::ARRAY_BUFFER,
+            view.as_ref(),
+            Gl::DYNAMIC_DRAW,
+        );
         self.gl
             .draw_arrays(Gl::TRIANGLES, 0, (verts.len() / FLOATS_PER_VERT) as i32);
     }

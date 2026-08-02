@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::snapshot::{GhostSnap, GridSnapshot};
 use crate::control::ControlRequest;
+use crate::snapshot::{GhostSnap, GridSnapshot};
 
 /// First line on every socket connection.
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,16 +53,27 @@ mod hello_tests {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum GuiRequest {
     /// Full attach: daemon replies with State then streams grids.
-    /// `empty: true` = new/second window that claims no existing workspaces
-    /// (unless this is the only GUI, in which case orphans are always claimed).
+    ///
+    /// `subscriptions` seeds this connection's subscription set (workspaces it
+    /// wants grid streams for — there is no ownership):
+    /// * `Some(list)` → subscribe to exactly `list ∩ known workspaces`
+    ///   (`Some(vec![])` = a deliberately blank window).
+    /// * `None` → subscribe to every current workspace (fresh client).
     Attach {
         #[serde(default)]
         selected_workspace: Option<String>,
         #[serde(default)]
         focused_pane: Option<String>,
-        /// Prefer an empty window (second process / "new window").
         #[serde(default)]
-        empty: bool,
+        subscriptions: Option<Vec<String>>,
+    },
+    /// Add `workspace` to this connection's subscription set.
+    Subscribe {
+        workspace: String,
+    },
+    /// Drop `workspace` from this connection's subscription set.
+    Unsubscribe {
+        workspace: String,
     },
     Input {
         pane: String,
@@ -164,15 +175,8 @@ pub enum GuiRequest {
     RefreshGrid {
         pane: String,
     },
-    /// Move a workspace to another GUI window (exclusive ownership).
-    TransferWorkspace {
-        workspace: String,
-        to_window: String,
-    },
-    /// Pull every workspace into this window (other windows go empty).
-    CollectAll,
-    /// Kick another GUI window off the daemon (✦ popover "kill"). Its
-    /// workspaces reassign exactly as if it had sent Bye.
+    /// Kick another GUI window off the daemon (✦ popover "kill"). It drops off
+    /// the roster exactly as if it had sent Bye.
     CloseWindow {
         window: String,
     },
@@ -204,7 +208,8 @@ pub enum GuiRequest {
         detail: String,
     },
     Ping,
-    /// Window is closing — reassign workspaces and drop this connection.
+    /// Window is closing — drop this connection (workspaces are global; nothing
+    /// is reassigned).
     Bye,
 }
 
@@ -263,23 +268,19 @@ fn default_true() -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WindowInfo {
     pub id: String,
-    /// e.g. `cadence +2` or `(empty)`.
+    /// e.g. `cadence +2` or `(empty)` — first subscribed workspace + "+N".
     pub label: String,
+    /// Size of that window's subscription set.
     pub workspace_count: usize,
-}
-
-/// Workspace living on another window (for pull-to-here menus).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ForeignWorkspace {
-    pub workspace: String,
-    pub window_id: String,
-    pub window_label: String,
 }
 
 /// Daemon → GUI push messages.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum GuiEvent {
+    /// Global daemon state. `panes` / `statuses` / `asks` / `extra_workspaces`
+    /// / `workspace_order` / `workspace_meta` cover EVERY workspace — the
+    /// per-connection view is `subscriptions`, and clients filter locally.
     State {
         panes: Vec<PaneInfo>,
         selected_workspace: Option<String>,
@@ -291,12 +292,13 @@ pub enum GuiEvent {
         /// This GUI connection's window id (multi-window).
         #[serde(default)]
         window_id: Option<String>,
-        /// All live windows (for transfer menus). Label = first ws + "+N".
+        /// All live windows (multiplayer roster). Label = first ws + "+N".
         #[serde(default)]
         windows: Vec<WindowInfo>,
-        /// Workspaces owned by *other* windows (empty-sidebar pull menu).
+        /// This connection's subscription set, ordered by `workspace_order`
+        /// then alpha for the leftovers.
         #[serde(default)]
-        foreign_workspaces: Vec<ForeignWorkspace>,
+        subscriptions: Vec<String>,
         /// Daemon-owned per-workspace activity clocks (0.11+). Absent on
         /// older daemons — clients then keep their purely local stamps.
         #[serde(default)]
@@ -526,6 +528,53 @@ mod workspace_meta_tests {
         assert_eq!(workspace_meta[0].last_touch_ms, 0);
         assert_eq!(workspace_meta[1].workspace, "main");
         assert_eq!(workspace_meta[1].last_output_ms, 0);
+    }
+
+    /// Attach's subscription seed is three-valued: absent/null = "everything",
+    /// `[]` = a deliberately blank window, a list = exactly those.
+    #[test]
+    fn attach_subscription_seed_is_three_valued() {
+        let missing: GuiRequest = serde_json::from_str(r#"{"op":"attach"}"#).unwrap();
+        let empty: GuiRequest =
+            serde_json::from_str(r#"{"op":"attach","subscriptions":[]}"#).unwrap();
+        let listed: GuiRequest =
+            serde_json::from_str(r#"{"op":"attach","subscriptions":["lab"]}"#).unwrap();
+        let seed = |r: &GuiRequest| match r {
+            GuiRequest::Attach { subscriptions, .. } => subscriptions.clone(),
+            _ => panic!("expected Attach"),
+        };
+        assert_eq!(seed(&missing), None);
+        assert_eq!(seed(&empty), Some(vec![]));
+        assert_eq!(seed(&listed), Some(vec!["lab".to_string()]));
+    }
+
+    #[test]
+    fn subscribe_ops_roundtrip() {
+        let json = serde_json::to_string(&GuiRequest::Subscribe {
+            workspace: "lab".into(),
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"op":"subscribe","workspace":"lab"}"#);
+        let back: GuiRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, GuiRequest::Subscribe { workspace } if workspace == "lab"));
+        let back: GuiRequest =
+            serde_json::from_str(r#"{"op":"unsubscribe","workspace":"lab"}"#).unwrap();
+        assert!(matches!(back, GuiRequest::Unsubscribe { workspace } if workspace == "lab"));
+    }
+
+    /// `subscriptions` defaults to empty on a payload that predates it.
+    #[test]
+    fn state_without_subscriptions_parses() {
+        let ev: GuiEvent = serde_json::from_str(
+            r#"{"event":"state","panes":[],"selected_workspace":null,
+                "focused_pane":null,"extra_workspaces":[],
+                "workspace_order":[],"asks":[],"statuses":[]}"#,
+        )
+        .unwrap();
+        match ev {
+            GuiEvent::State { subscriptions, .. } => assert!(subscriptions.is_empty()),
+            _ => panic!("expected State"),
+        }
     }
 
     #[test]

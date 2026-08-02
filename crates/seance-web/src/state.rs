@@ -7,9 +7,7 @@
 use std::collections::HashMap;
 
 use base64::Engine as _;
-use seance_core::protocol::{
-    AskInfo, ForeignWorkspace, GuiEvent, PaneInfo, StatusInfo, WindowInfo,
-};
+use seance_core::protocol::{AskInfo, GuiEvent, PaneInfo, StatusInfo, WindowInfo};
 use seance_core::snapshot::{decode_grid_bin_onto, GridSnapshot};
 
 /// What a folded event dirtied.
@@ -54,7 +52,10 @@ pub struct ClientState {
     pub agency: HashMap<String, AgencyState>,
     pub window_id: Option<String>,
     pub windows: Vec<WindowInfo>,
-    pub foreign_workspaces: Vec<ForeignWorkspace>,
+    /// This connection's subscription set (daemon order). State arrives
+    /// GLOBAL and is filtered to these at ingest — the parked group is a
+    /// later phase.
+    pub subscriptions: Vec<String>,
     /// Who last wrote stdin per pane (`human` / `agent:x` / `cli` / `propose`).
     pub input_origin: HashMap<String, String>,
     /// Monotonic revision bumped on every Structure-level change.
@@ -201,7 +202,11 @@ impl ClientState {
         }
         out.sort_by(|a, b| {
             let key = |ws: &str| {
-                let band = if self.workspace_has_working_agent(ws) { 0u8 } else { 1 };
+                let band = if self.workspace_has_working_agent(ws) {
+                    0u8
+                } else {
+                    1
+                };
                 // Working band: when work STARTED (stable while working).
                 // Idle band: the displayed clock (last output; touch floor).
                 let at = if band == 0 {
@@ -216,7 +221,10 @@ impl ClientState {
                         .unwrap_or(f64::MIN)
                         .max(self.workspace_touch.get(ws).copied().unwrap_or(f64::MIN))
                 };
-                (band, std::cmp::Reverse(at.clamp(0.0, u64::MAX as f64) as u64))
+                (
+                    band,
+                    std::cmp::Reverse(at.clamp(0.0, u64::MAX as f64) as u64),
+                )
             };
             key(a).cmp(&key(b)).then_with(|| a.cmp(b))
         });
@@ -410,9 +418,18 @@ impl ClientState {
                 statuses,
                 window_id,
                 windows,
-                foreign_workspaces,
+                subscriptions,
                 workspace_meta,
             } => {
+                // State is global from 0.12: keep only what this connection
+                // subscribes to, so the UI looks exactly like it did under
+                // ownership. `workspace_meta` stays global (name/clock census).
+                let subs: std::collections::HashSet<String> =
+                    subscriptions.iter().cloned().collect();
+                let panes: Vec<PaneInfo> = panes
+                    .into_iter()
+                    .filter(|p| subs.contains(&p.workspace))
+                    .collect();
                 // Drop grids for panes that no longer exist (reattach after
                 // daemon restart must not paint ghosts).
                 let live: std::collections::HashSet<String> =
@@ -421,16 +438,31 @@ impl ClientState {
                 self.panes = panes;
                 self.selected_workspace = selected_workspace;
                 self.focused_pane = focused_pane;
-                self.extra_workspaces = extra_workspaces;
-                self.workspace_order = workspace_order;
-                self.asks = asks;
+                self.extra_workspaces = extra_workspaces
+                    .into_iter()
+                    .filter(|w| subs.contains(w))
+                    .collect();
+                self.workspace_order = workspace_order
+                    .into_iter()
+                    .filter(|w| subs.contains(w))
+                    .collect();
+                self.asks = asks
+                    .into_iter()
+                    .filter(|a| {
+                        a.workspace
+                            .as_ref()
+                            .map(|w| subs.contains(w))
+                            .unwrap_or(true)
+                    })
+                    .collect();
                 self.statuses = statuses
                     .into_iter()
+                    .filter(|s| live.contains(&s.slug))
                     .map(|s| (s.slug.clone(), s))
                     .collect();
                 self.window_id = window_id;
                 self.windows = windows;
-                self.foreign_workspaces = foreign_workspaces;
+                self.subscriptions = subscriptions;
                 // Daemon-owned clocks are the durable copy — mirror them
                 // (converted to the perf domain, max-merged so a local stamp
                 // from a frame we already painted is never walked back).
@@ -443,17 +475,14 @@ impl ClientState {
             }
             GuiEvent::Grid(snap) => {
                 let pane = snap.pane.clone();
-                let changed = self
-                    .grids
-                    .get(&pane)
-                    .is_some_and(|prev| {
-                        // Same dims only: a resize reflow re-renders everything
-                        // without any real output.
-                        !prev.cells.is_empty()
-                            && prev.cols == snap.cols
-                            && prev.rows == snap.rows
-                            && prev.cells != snap.cells
-                    });
+                let changed = self.grids.get(&pane).is_some_and(|prev| {
+                    // Same dims only: a resize reflow re-renders everything
+                    // without any real output.
+                    !prev.cells.is_empty()
+                        && prev.cols == snap.cols
+                        && prev.rows == snap.rows
+                        && prev.cells != snap.cells
+                });
                 self.grids.insert(pane.clone(), snap);
                 if changed {
                     self.note_pane_output(&pane, now_ms);
@@ -470,17 +499,14 @@ impl ClientState {
                     Ok(snap) => {
                         // Stamp only real content change — full re-pushes on
                         // attach/pull must not reset the activity clock.
-                        let changed = self
-                            .grids
-                            .get(&pane)
-                            .is_some_and(|prev| {
-                        // Same dims only: a resize reflow re-renders everything
-                        // without any real output.
-                        !prev.cells.is_empty()
-                            && prev.cols == snap.cols
-                            && prev.rows == snap.rows
-                            && prev.cells != snap.cells
-                    });
+                        let changed = self.grids.get(&pane).is_some_and(|prev| {
+                            // Same dims only: a resize reflow re-renders everything
+                            // without any real output.
+                            !prev.cells.is_empty()
+                                && prev.cols == snap.cols
+                                && prev.rows == snap.rows
+                                && prev.cells != snap.cells
+                        });
                         self.grids.insert(pane.clone(), snap);
                         if changed {
                             self.note_pane_output(&pane, now_ms);
@@ -493,7 +519,12 @@ impl ClientState {
             GuiEvent::PaneSpawned { pane } => {
                 self.last_spawned = Some(pane.slug.clone());
                 self.touch_workspace(&pane.workspace.clone(), now_ms);
-                self.note_activity(now_ms, "daemon", Some(&pane.slug), format!("pane spawned: {}", pane.name));
+                self.note_activity(
+                    now_ms,
+                    "daemon",
+                    Some(&pane.slug),
+                    format!("pane spawned: {}", pane.name),
+                );
                 if let Some(existing) = self.panes.iter_mut().find(|p| p.slug == pane.slug) {
                     *existing = pane;
                 } else {
@@ -646,9 +677,7 @@ mod tests {
         };
         assert_eq!(
             st.apply_event(ev, 0.0),
-            Applied::Grid {
-                pane: "w-1".into()
-            }
+            Applied::Grid { pane: "w-1".into() }
         );
         assert_eq!(st.grids.get("w-1").unwrap().rev, 1);
     }
@@ -671,9 +700,7 @@ mod tests {
         // No base grid stored → decoder fails → refresh requested.
         assert_eq!(
             st.apply_event(ev, 0.0),
-            Applied::NeedRefresh {
-                pane: "w-1".into()
-            }
+            Applied::NeedRefresh { pane: "w-1".into() }
         );
     }
 

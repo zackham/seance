@@ -11,7 +11,9 @@ pub const TOKEN_LEN: usize = 64;
 
 /// Shape check: 64 lowercase-hex chars. Cheap pre-filter before compare.
 pub fn token_well_formed(t: &str) -> bool {
-    t.len() == TOKEN_LEN && t.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    t.len() == TOKEN_LEN
+        && t.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 /// Constant-time equality over the full token length. Returns false on any

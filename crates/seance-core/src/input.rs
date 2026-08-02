@@ -151,7 +151,13 @@ pub enum MouseButton {
 
 /// SGR (1006) mouse report. `pressed=false` = release (ignored for wheel).
 /// `col`/`row` are 0-based cell coordinates; the wire is 1-based.
-pub fn sgr_mouse(button: MouseButton, col: u16, row: u16, pressed: bool, mods: Modifiers) -> Vec<u8> {
+pub fn sgr_mouse(
+    button: MouseButton,
+    col: u16,
+    row: u16,
+    pressed: bool,
+    mods: Modifiers,
+) -> Vec<u8> {
     let mut cb: u16 = match button {
         MouseButton::Left => 0,
         MouseButton::Middle => 1,
