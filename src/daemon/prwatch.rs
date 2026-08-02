@@ -109,6 +109,40 @@ mod tests {
     }
 
     #[test]
+    fn parses_new_richer_fields() {
+        let body = r#"{
+            "https://github.com/o/r/pull/1": {
+                "state":"open","attention":"needs","label":"CI ✗","updated_ms":7,
+                "is_draft":true,"ci":"fail","review":"changes",
+                "opened_ms":100,"last_review_ms":200,"last_comment_ms":300
+            }
+        }"#;
+        let m = parse_watch(body.as_bytes());
+        let one = &m["https://github.com/o/r/pull/1"];
+        assert!(one.is_draft);
+        assert_eq!(one.ci.as_deref(), Some("fail"));
+        assert_eq!(one.review.as_deref(), Some("changes"));
+        assert_eq!(one.opened_ms, 100);
+        assert_eq!(one.last_review_ms, 200);
+        assert_eq!(one.last_comment_ms, 300);
+    }
+
+    #[test]
+    fn old_shape_without_new_keys_still_parses() {
+        let body = r#"{"https://github.com/o/r/pull/1":
+            {"state":"open","attention":"needs","label":"CI ✗","updated_ms":7}}"#;
+        let one = &parse_watch(body.as_bytes())["https://github.com/o/r/pull/1"];
+        assert_eq!(one.label, "CI ✗");
+        assert!(!one.is_draft);
+        assert!(one.ci.is_none());
+        assert!(one.review.is_none());
+        assert_eq!(
+            (one.opened_ms, one.last_review_ms, one.last_comment_ms),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
     fn corrupt_body_is_empty_not_panic() {
         assert!(parse_watch(b"not json").is_empty());
     }

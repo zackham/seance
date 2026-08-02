@@ -17,6 +17,26 @@ use crate::runtime::protocol::{PrLink, PrStatus};
 /// a handful of open PRs is a workspace, not a chip.
 pub(crate) const MAX_PR_LINKS: usize = 8;
 
+/// Does this status change count as a *verdict transition* worth resurfacing
+/// the circle for?
+///
+/// A transition is a change in `attention` or `label` — the two fields a human
+/// reads off the chip. Two deliberate non-bumps:
+/// * the boot backfill, where a link that had **no** status gains a neutral one
+///   (`attention: None`) — otherwise every restart reshuffles the sidebar;
+/// * status loss (poller drops the URL), which is bookkeeping, not news.
+///
+/// A first status that already asks for attention DOES bump: that is news.
+fn pr_verdict_transition(prev: Option<&PrStatus>, next: Option<&PrStatus>) -> bool {
+    let Some(next) = next else {
+        return false;
+    };
+    match prev {
+        None => next.attention.is_some(),
+        Some(prev) => prev.attention != next.attention || prev.label != next.label,
+    }
+}
+
 impl Engine {
     /// Record a scraped (or hand-seeded) URL on a workspace.
     ///
@@ -69,14 +89,25 @@ impl Engine {
     /// changed (the caller pushes state only then).
     pub(crate) fn ingest_pr_watch(&mut self, watch: &HashMap<String, PrStatus>) -> bool {
         let mut changed = false;
-        for links in self.pr_links.values_mut() {
+        let mut bumped: Vec<String> = Vec::new();
+        for (ws, links) in self.pr_links.iter_mut() {
             for link in links.iter_mut() {
                 let next = watch.get(&link.url);
-                if link.status.as_ref() != next {
-                    link.status = next.cloned();
-                    changed = true;
+                if link.status.as_ref() == next {
+                    continue;
                 }
+                if pr_verdict_transition(link.status.as_ref(), next) && !bumped.contains(ws) {
+                    bumped.push(ws.clone());
+                }
+                link.status = next.cloned();
+                changed = true;
             }
+        }
+        let now = now_ms();
+        for ws in bumped {
+            // Same clock the sidebar's idle band sorts + displays, so a changed
+            // verdict floats the circle.
+            self.workspace_output.insert(ws, now);
         }
         changed
     }

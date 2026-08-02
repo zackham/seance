@@ -375,6 +375,7 @@ fn pr_watch_ingest_sets_and_clears_statuses() {
                 attention: Some("needs".into()),
                 label: "CI x".into(),
                 updated_ms: 5,
+                ..Default::default()
             },
         );
         // An unknown URL in the watch file is ignored (scrape list is truth).
@@ -397,6 +398,100 @@ fn pr_watch_ingest_sets_and_clears_statuses() {
         // Poller dropping a URL clears its status.
         assert!(eng.ingest_pr_watch(&std::collections::HashMap::new()));
         assert!(eng.pr_links["lab"][0].status.is_none());
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn pr_watch_ingest_bumps_recency_only_on_transition() {
+    with_test_state_dir("pr-bump", || {
+        let scratch = temp_scratch("pr-bump");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let url = "https://github.com/o/r/pull/1";
+        eng.record_pr_link("lab", url, 1);
+        eng.workspace_output.insert("lab".into(), 1);
+
+        let status = |attention: Option<&str>, label: &str| {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                url.to_string(),
+                PrStatus {
+                    state: "open".into(),
+                    attention: attention.map(|a| a.to_string()),
+                    label: label.into(),
+                    updated_ms: 5,
+                    ..Default::default()
+                },
+            );
+            m
+        };
+
+        // Boot backfill: first status, no attention → no reshuffle.
+        assert!(eng.ingest_pr_watch(&status(None, "CI ok")));
+        assert_eq!(eng.workspace_output.get("lab"), Some(&1));
+
+        // Identical re-poll: no change at all.
+        assert!(!eng.ingest_pr_watch(&status(None, "CI ok")));
+        assert_eq!(eng.workspace_output.get("lab"), Some(&1));
+
+        // Verdict flips → bump.
+        assert!(eng.ingest_pr_watch(&status(Some("needs"), "CI ✗")));
+        let bumped = eng.workspace_output["lab"];
+        assert!(bumped > 1, "expected recency bump, got {bumped}");
+
+        // Label-only change also counts as a transition.
+        eng.workspace_output.insert("lab".into(), 2);
+        assert!(eng.ingest_pr_watch(&status(Some("needs"), "2 comments")));
+        assert!(eng.workspace_output["lab"] > 2);
+
+        // Poller drops the URL: status clears, but that is bookkeeping.
+        eng.workspace_output.insert("lab".into(), 3);
+        assert!(eng.ingest_pr_watch(&std::collections::HashMap::new()));
+        assert_eq!(eng.workspace_output.get("lab"), Some(&3));
+
+        // First status that already asks for attention DOES bump.
+        assert!(eng.ingest_pr_watch(&status(Some("needs"), "CI ✗")));
+        assert!(eng.workspace_output["lab"] > 3);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn pr_watch_ingest_passes_new_status_fields_through() {
+    with_test_state_dir("pr-fields", || {
+        let scratch = temp_scratch("pr-fields");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let url = "https://github.com/o/r/pull/1";
+        eng.record_pr_link("lab", url, 1);
+
+        let mut watch = std::collections::HashMap::new();
+        watch.insert(
+            url.to_string(),
+            PrStatus {
+                state: "open".into(),
+                attention: Some("needs".into()),
+                label: "CI ✗".into(),
+                updated_ms: 5,
+                is_draft: true,
+                ci: Some("fail".into()),
+                review: Some("changes".into()),
+                opened_ms: 111,
+                last_review_ms: 222,
+                last_comment_ms: 333,
+            },
+        );
+        assert!(eng.ingest_pr_watch(&watch));
+        let st = eng.pr_links["lab"][0].status.clone().unwrap();
+        assert_eq!(st, watch[url]);
+        assert!(st.is_draft);
+        assert_eq!(st.ci.as_deref(), Some("fail"));
+        assert_eq!(st.review.as_deref(), Some("changes"));
+        assert_eq!(
+            (st.opened_ms, st.last_review_ms, st.last_comment_ms),
+            (111, 222, 333)
+        );
 
         let _ = std::fs::remove_dir_all(&scratch);
     });

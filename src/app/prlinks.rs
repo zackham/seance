@@ -242,6 +242,7 @@ mod tests {
                 attention: Some(a.into()),
                 label: "CI ✗".into(),
                 updated_ms: 1,
+                ..Default::default()
             }),
             seen_ms: 1,
         }

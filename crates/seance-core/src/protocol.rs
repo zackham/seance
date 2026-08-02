@@ -492,6 +492,24 @@ pub struct PrStatus {
     /// Poller's last refresh (unix ms).
     #[serde(default)]
     pub updated_ms: u64,
+    /// PR is a draft.
+    #[serde(default)]
+    pub is_draft: bool,
+    /// `pass` | `fail` | `running`, or None when the PR has no checks.
+    #[serde(default)]
+    pub ci: Option<String>,
+    /// `required` | `approved` | `changes`, or None.
+    #[serde(default)]
+    pub review: Option<String>,
+    /// PR open time (unix ms; 0 = unknown).
+    #[serde(default)]
+    pub opened_ms: u64,
+    /// Latest review submission (unix ms; 0 = unknown).
+    #[serde(default)]
+    pub last_review_ms: u64,
+    /// Latest comment (unix ms; 0 = unknown).
+    #[serde(default)]
+    pub last_comment_ms: u64,
 }
 
 /// Pad rev + bytes recorded at last inject — wait uses this for since-inject evidence.
@@ -630,6 +648,12 @@ mod workspace_meta_tests {
                     attention: Some("needs".into()),
                     label: "CI x".into(),
                     updated_ms: 9,
+                    is_draft: true,
+                    ci: Some("running".into()),
+                    review: Some("changes".into()),
+                    opened_ms: 100,
+                    last_review_ms: 200,
+                    last_comment_ms: 300,
                 }),
                 seen_ms: 5,
             }],
