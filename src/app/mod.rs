@@ -211,6 +211,10 @@ pub struct SeanceApp {
     pr_menu_open: bool,
     /// Full-content PR board overlay (sidebar `PRs (N)` button).
     pr_board: bool,
+    /// Ctrl+page cycling burst: display-order snapshot + last press, so the
+    /// rotation stays monotonic across mid-burst sidebar resorts.
+    cycle_ring: Vec<String>,
+    cycle_ring_at: Option<std::time::Instant>,
     /// Render-safe cache of daemon-side files (pad sidecars, phone binds,
     /// prompt library) — refreshed by a ~2s background loop.
     remote_cache: Arc<crate::remote_cache::RemoteCache>,
@@ -395,6 +399,8 @@ impl SeanceApp {
             pr_links: std::collections::HashMap::new(),
             pr_menu_open: false,
             pr_board: false,
+            cycle_ring: Vec::new(),
+            cycle_ring_at: None,
             remote_cache,
             render_probe: RenderProbe::default(),
         };

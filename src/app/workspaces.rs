@@ -21,24 +21,20 @@ pub(super) fn rel_label(delta_ms: u64) -> String {
 }
 use super::{RenameTarget, SeanceApp};
 
-/// Cycling order for ctrl+page: the active set ordered by `workspace_order`
-/// (the daemon's stable creation order), with anything unknown to that order
-/// appended alphabetically. Sidebar display order is untouched.
-pub(super) fn stable_ring(active: &[String], order: &[String]) -> Vec<String> {
-    let mut known: Vec<&String> = Vec::new();
-    let mut rest: Vec<&String> = Vec::new();
-    for ws in order {
-        if active.contains(ws) && !known.contains(&ws) {
-            known.push(ws);
-        }
+/// Ring for one ctrl+page burst: reuse the burst's snapshot while it lives
+/// (so a mid-burst resort can't reshuffle the rotation), else snapshot the
+/// current DISPLAY order. Returns `(ring, took_new_snapshot)`. Pure — the
+/// burst-liveness clock stays with the caller.
+pub(super) fn cycle_burst_ring(
+    snapshot: &[String],
+    burst_live: bool,
+    display: &[String],
+) -> (Vec<String>, bool) {
+    if burst_live && !snapshot.is_empty() {
+        (snapshot.to_vec(), false)
+    } else {
+        (display.to_vec(), true)
     }
-    for ws in active {
-        if !known.contains(&ws) && !rest.contains(&ws) {
-            rest.push(ws);
-        }
-    }
-    rest.sort();
-    known.into_iter().chain(rest).cloned().collect()
 }
 
 /// Badge on an *inactive* workspace header in the sidebar.
@@ -563,10 +559,20 @@ impl SeanceApp {
         cx: &mut Context<Self>,
     ) {
         // Parked circles are deliberately out of the rotation — that's the
-        // point of parking them. The ring is STABLE (creation order, alpha
-        // fallback): the sidebar's recency sort would make ctrl+page
-        // non-monotonic, since selecting bumps recency.
-        let list = stable_ring(&self.active_workspaces(cx), &self.workspace_order);
+        // point of parking them. Cycle in the DISPLAYED sidebar order (a
+        // creation-order ring made "next" land somewhere visually random),
+        // but snapshot that order for the duration of a cycling burst so a
+        // mid-burst working-band resort can't make the ring non-monotonic.
+        let now = std::time::Instant::now();
+        let burst_live = self
+            .cycle_ring_at
+            .is_some_and(|at| now.duration_since(at) < std::time::Duration::from_millis(2000));
+        let (list, took_new) =
+            cycle_burst_ring(&self.cycle_ring, burst_live, &self.active_workspaces(cx));
+        if took_new {
+            self.cycle_ring = list.clone();
+        }
+        self.cycle_ring_at = Some(now);
         if list.is_empty() {
             return;
         }
@@ -667,38 +673,39 @@ impl SeanceApp {
 
 #[cfg(test)]
 mod tests {
-    use super::stable_ring;
+    use super::cycle_burst_ring;
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
-    fn ring_follows_workspace_order_not_the_display_sort() {
-        let active = v(&["c", "a", "b"]); // recency-sorted sidebar order
-        let order = v(&["a", "b", "c", "d"]);
-        assert_eq!(stable_ring(&active, &order), v(&["a", "b", "c"]));
+    fn fresh_burst_snapshots_the_display_order() {
+        let (ring, took) = cycle_burst_ring(&[], false, &v(&["c", "a", "b"]));
+        assert!(took);
+        assert_eq!(ring, v(&["c", "a", "b"]));
     }
 
     #[test]
-    fn ring_appends_unordered_workspaces_alphabetically() {
-        let active = v(&["zeta", "b", "alpha"]);
-        let order = v(&["b"]);
-        assert_eq!(stable_ring(&active, &order), v(&["b", "alpha", "zeta"]));
+    fn live_burst_keeps_its_snapshot_across_a_resort() {
+        let snap = v(&["c", "a", "b"]);
+        let (ring, took) = cycle_burst_ring(&snap, true, &v(&["a", "b", "c"]));
+        assert!(!took);
+        assert_eq!(ring, snap);
     }
 
     #[test]
-    fn ring_is_stable_across_recency_reshuffles() {
-        let order = v(&["a", "b", "c"]);
-        let first = stable_ring(&v(&["a", "b", "c"]), &order);
-        let after_select = stable_ring(&v(&["b", "c", "a"]), &order);
-        assert_eq!(first, after_select);
+    fn expired_burst_resnapshots() {
+        let snap = v(&["c", "a", "b"]);
+        let (ring, took) = cycle_burst_ring(&snap, false, &v(&["a", "b", "c"]));
+        assert!(took);
+        assert_eq!(ring, v(&["a", "b", "c"]));
     }
 
     #[test]
-    fn ring_drops_parked_and_duplicate_order_entries() {
-        let active = v(&["a", "c"]);
-        let order = v(&["a", "b", "a", "c"]);
-        assert_eq!(stable_ring(&active, &order), v(&["a", "c"]));
+    fn empty_snapshot_resnapshots_even_mid_burst() {
+        let (ring, took) = cycle_burst_ring(&[], true, &v(&["a"]));
+        assert!(took);
+        assert_eq!(ring, v(&["a"]));
     }
 }
