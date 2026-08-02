@@ -105,7 +105,7 @@ Upgrade load test: `./scripts/upgrade-load-test.sh` (upgrades live daemon)
 | ctrl+shift+s | flip notes ↔ face |
 | ctrl+shift+p | pop pane to its own window |
 | ctrl+shift+k | precanned prompt palette |
-| ctrl+shift+j | fuzzy jump (pane / workspace) |
+| ctrl+shift+j | fuzzy jump (workspace) |
 | ctrl+shift+z | focus-zoom active pane |
 | ctrl+shift+space | overview (live map) |
 | ctrl+shift+r | rename selected workspace |

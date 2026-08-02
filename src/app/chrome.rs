@@ -916,7 +916,7 @@ pub(super) fn render_help() -> gpui::AnyElement {
         .child(row("ctrl+shift+s", "flip notes on the active pane / flip back"))
         .child(row("ctrl+shift+p", "pop active pane out / return to the circle"))
         .child(row("ctrl+shift+k", "precanned prompt palette"))
-        .child(row("ctrl+shift+j", "fuzzy jump to pane / workspace"))
+        .child(row("ctrl+shift+j", "fuzzy jump to workspace"))
         .child(row("ctrl+shift+z", "focus-zoom active pane (esc unzoom)"))
         .child(row("ctrl+shift+f", "jump to last failed shell command"))
         .child(row("ctrl+pgup / pgdn", "previous / next workspace (sidebar order, wraps)"))

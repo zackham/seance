@@ -201,35 +201,17 @@ impl SeanceApp {
                     )
                 }
                 PaletteMode::Jump { query, selected } => {
+                    // Workspaces only (owner decision 2026-08-02): pane
+                    // entries made the list mostly noise — jumping means
+                    // switching circles; panes are reachable within one.
                     let q = query.trim().to_ascii_lowercase();
-                    let mut items: Vec<(String, String)> = self
-                        .panes
-                        .iter()
-                        .filter(|p| {
-                            if q.is_empty() {
-                                return true;
-                            }
-                            let hay =
-                                format!("{} {} {} {}", p.name, p.slug, p.command, p.workspace)
-                                    .to_ascii_lowercase();
-                            q.split_whitespace().all(|t| hay.contains(t))
-                        })
-                        .map(|p| {
-                            let st = self
-                                .statuses
-                                .get(&p.slug)
-                                .map(|s| s.state.as_str())
-                                .unwrap_or("-");
-                            (
-                                p.slug.clone(),
-                                format!("{} · {st} · {}", p.name, p.workspace),
-                            )
-                        })
-                        .collect();
-                    // Also offer workspaces as jump targets with ws: prefix
+                    let mut items: Vec<(String, String)> = Vec::new();
                     for ws in self.workspaces(_cx) {
-                        if q.is_empty() || ws.to_ascii_lowercase().contains(&q) {
-                            items.push((format!("ws:{ws}"), format!("workspace · {ws}")));
+                        if q.is_empty()
+                            || q.split_whitespace()
+                                .all(|t| ws.to_ascii_lowercase().contains(t))
+                        {
+                            items.push((format!("ws:{ws}"), ws.clone()));
                         }
                     }
                     (
