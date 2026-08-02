@@ -15,6 +15,32 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [0.14.1] — 2026-08-02
+
+Remove one PR ref and have it stay removed; cycle in the order you see.
+
+### Added
+
+- **Remove a single PR ref, both GUIs.** Hover a row in the chip popover or
+  the PR board and a **✕** drops just that reference — no more clearing the
+  whole circle to be rid of one stale link.
+- **Removal is sticky.** A TUI repaint re-emits the same bytes, so a plain
+  removal used to undo itself within seconds: the daemon now keeps a
+  per-workspace **dismissed set** (cap 32, oldest evicted) that blocks the
+  re-scrape at its single choke point. It persists across daemon restart and
+  `seance upgrade` handoff, carries through rename, and drops with the
+  workspace. A new *distinct* URL is still tracked, `seance ctl pr-link add`
+  un-dismisses, and both single-URL and clear-all `pr-link clear` dismiss
+  what they remove.
+
+### Fixed
+
+- **`ctrl+page` cycles the order you're looking at.** 0.14.0 rotated a ring
+  in workspace *creation* order, so "next" landed somewhere visually random.
+  Cycling now walks the **displayed sidebar order**, frozen for the duration
+  of a 2-second keypress burst so a mid-burst resort can't reshuffle the
+  rotation under your fingers. Both GUIs.
+
 ## [0.14.0] — 2026-08-02
 
 The PR board: every circle's open PRs in one sweep, needs first.

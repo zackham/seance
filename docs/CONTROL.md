@@ -217,6 +217,13 @@ Notes:
   itself — these verbs are for backfill and hygiene. `add` seeds a link
   (per-workspace cap 8, most recent last); `clear` drops one URL, or every
   link on the workspace when `URL` is omitted (`rm` / `remove` alias `clear`).
+  **`clear` also dismisses** (0.14.1): every URL it removes is tombstoned on
+  that workspace, so a re-scrape of the same URL off pane output is ignored —
+  without that, a TUI repaint undoes the removal within seconds. Dismissals
+  are per workspace (cap 32, oldest evicted), persist across daemon restart
+  and `seance upgrade`, carry through rename, and drop with the workspace.
+  A new *distinct* URL is still tracked normally, and an explicit **`add`
+  un-dismisses** — an intentional add always beats a past clear.
   Requests are `PrLinkAdd` / `PrLinkClear`, cap-checked as **`pr_link_add`** /
   **`pr_link_clear`** (mutating: denied under `locked` without a grant).
   Statuses are not settable here — those come from the external watcher

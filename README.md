@@ -13,7 +13,7 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.14.0
+**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.14.1
 
 Release notes: [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -21,7 +21,9 @@ Release notes: [`CHANGELOG.md`](CHANGELOG.md).
 a circle-first sweep of every PR the daemon knows: needs-first sections, each
 row `repo#N` with draft / CI / review glyphs, age, last review or comment, and
 a *push or close* mark once it's gone quiet. Click a row to open the PR, a
-section header to jump to that circle. The watcher now supplies structured
+section header to jump to that circle. Hover a row — in the board or the chip
+popover — and a **✕** drops that one ref for good: the removal is remembered
+per circle, so the next pane repaint can't scrape it back. The watcher now supplies structured
 state (draft, CI pass/fail/running, review required/approved/changes,
 open/review/comment times) instead of one label string, a verdict *change*
 bumps the circle's recency clock, and chips lead with the repo name.
