@@ -41,10 +41,14 @@ browser (wasm)                      native
 - **Renderer**: glyph-atlas WebGL2, two draw calls per frame (bg pass + glyph
   pass), damage-driven repaints, DPR-exact metrics. Steady-state allocates
   nothing per frame.
-- **Windows**: a web attach is a normal second GUI window. Workspaces owned by
-  the desktop window appear under **elsewhere** in the sidebar with a `pull`
-  button (`TransferWorkspace`). Pull what you need; the desktop can pull it
-  back the same way.
+- **Windows**: a web attach is a normal second GUI window. Nothing is owned —
+  each connection carries its own subscription set (`GuiRequest::Subscribe` /
+  `Unsubscribe`), so the same circle can be live in the browser and on the
+  desktop at once. Subscribed circles are **active** in the sidebar;
+  everything else sits in the collapsed **parked** group, and selecting a
+  parked row subscribes it. The active set persists in
+  `localStorage["seance_active"]` (`{active, seen}`) and is replayed on
+  attach; no stored set = subscribe everything.
 - **Probe**: the `probe` topbar button (or ctrl+shift+P) overlays echo
   p50/p95, paint time, ws rtt, rx rate — same philosophy as the native
   latency probe: performance is measured, not claimed.
@@ -77,7 +81,8 @@ error (by design).
 ## Chrome parity (2026-07-31)
 
 The native chrome is replicated sincerely: auto-sorted workspace lister
-(working band + touch recency, attention badges, inline rename, banish ×),
+(working band + touch recency, attention badges, inline rename, banish ×,
+active/parked accordion with park / add-to-active row menus),
 ◈+ create-workspace, quicklaunch strip (daemon-side json via the fs bridge,
 chips, editor modal, right-click), the claude-accounts host strip, footer
 (+ summon / ≋ activity / ? grimoire), per-row and per-tile context menus,

@@ -45,7 +45,7 @@ pub trait Actions {
     /// `new_default_session` semantics).
     fn summon(&self);
     /// Quicklaunch chip click: FRESH workspace named after the entry
-    /// (uniquified against all known + foreign workspaces), single pane,
+    /// (uniquified against all known workspaces), single pane,
     /// no rename prompt.
     fn quicklaunch(&self, name: &str, cwd: Option<String>, command: Option<String>);
     /// Bump a workspace's recency (context-menu "touch") + flight-recorder log.

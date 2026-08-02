@@ -1,5 +1,13 @@
 # handoff: build the subscription model
 
+> **SHIPPED 2026-08-01 in 0.12.0.** Phases 1 (engine: `workspace_window`
+> deleted, per-conn subscription sets, Subscribe/Unsubscribe replacing
+> TransferWorkspace/CollectAll, global `State` + per-subscriber grid fan-out)
+> and 2 (both sidebars active/parked, select-to-subscribe, park /
+> add-to-active menus, native `subscriptions.json` + web `seance_active`
+> persistence) are done and green. §3 (PR links / multiplayer follow-ons)
+> is still open — that's the remaining work in this doc.
+
 *for a fresh claude session. written by silicon-zack 2026-08-01 at the end of
 the 0.10.9→0.11.2 run (web client, replay, census). context: zack approved
 [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md) in full — design questions are CLOSED,

@@ -13,7 +13,45 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 2. **Add a section at the top of this file** (same commit)
 3. Update any version-pinned contracts in `CLAUDE.md` if behavior changed
 
-Unreleased work can sit under `## [Unreleased]
+Unreleased work can sit under `## [Unreleased]` until the version bump.
+
+## [0.12.0] — 2026-08-01
+
+Subscriptions replace ownership: a circle can be live in every window at once.
+
+### Changed
+
+- **Workspace ownership is gone.** A workspace was exclusively owned by one
+  GUI window; to see it elsewhere you had to *pull* it away from wherever it
+  was. Now each connection carries its own subscription set, so the same
+  circle renders on the desktop, the laptop and the browser simultaneously —
+  no tug-of-war, no "elsewhere" limbo.
+- **Both sidebars split active / parked.** Active = what this window
+  subscribes to, rendered exactly as before; everything else collapses into
+  one **parked (N)** accordion below with the same sort and attention badges.
+  Selecting a parked row subscribes it; row menus gain *park* and *add to
+  active*; ctrl+page cycles the active list only. Panes spawned by `ctl` land
+  parked and badge **needs** until you first select them.
+- The active set persists per client and is replayed on attach — native
+  `~/.config/seance/subscriptions.json` (`{active, seen}`, atomic, shared with
+  the reconnect supervisor), web `localStorage["seance_active"]`. No stored
+  set = subscribe everything, so existing installs come up unchanged.
+- Grid fan-out is now per subscriber: 16ms for a subscriber's selected
+  workspace, 66ms for subscribed-but-not-selected (and overview), nothing for
+  a workspace nobody watches — the minimum across connections wins, and a
+  full grid goes out whenever any interested window doesn't have it selected.
+- Recording is independent of watching: the recorder taps ahead of fan-out,
+  so a zero-subscriber pane still records to the 48h ring.
+
+### Breaking
+
+- **Wire change** (all clients must match, as usual): `GuiRequest::Subscribe`
+  / `Unsubscribe` replace `TransferWorkspace` / `CollectAll`, which are
+  deleted. `GuiEvent::State` is now global (panes, statuses, asks, order for
+  every workspace) plus a `subscriptions` field; `foreign_workspaces` is
+  gone. `Attach` carries `subscriptions: Option<Vec<String>>` — `None`
+  subscribes to everything (migration path), `Some([])` is an empty window.
+  `Engine::flush_all_grids` retired.
 
 ## [0.11.2] — 2026-08-01
 
@@ -101,11 +139,7 @@ The web era: seance from anywhere, and sessions you can share.
   (`PAGER=cat`, `GIT_TERMINAL_PROMPT=0`, …) into every spawned pane. Pane
   PTYs now scrub agent-ish env (PAGER/GIT_PAGER/SYSTEMD_PAGER/
   GIT_TERMINAL_PROMPT/CI/DEBIAN_FRONTEND/NO_COLOR) at spawn — panes are
-  human terminals by definition.` until the version bump.
-
----
-
-## [Unreleased]
+  human terminals by definition.
 
 ## [0.10.8] — 2026-07-30
 

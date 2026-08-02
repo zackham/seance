@@ -75,8 +75,9 @@ way as Linux (`scripts/bootstrap-deps.sh` symlinks `deps/zed`, then
 
 ## Workspaces on a second machine
 
-A thin-client window follows the normal multi-window model: workspaces are
-exclusively owned by one window. A fresh mac window starts empty — pull the
-circles you want (sidebar pull menu, or collect-all to grab everything);
-back at the desk, collect-all there to bring them home. Sessions never move
-or restart — only which window renders them.
+A thin-client window follows the normal multi-window model: nothing is owned,
+each window subscribes to the circles it wants (0.12). A fresh mac window
+starts with everything subscribed; park what you don't want and the set is
+remembered per client (`~/.config/seance/subscriptions.json`). The same
+circle can be live here and at the desk simultaneously — sessions never move
+or restart, only which windows render them.

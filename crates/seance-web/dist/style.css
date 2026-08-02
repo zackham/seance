@@ -524,6 +524,65 @@ input:focus {
   color: var(--text-dim);
 }
 
+/* ── parked group (collapsed accordion under the active rows) ───────── */
+.parked-group {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+.parked-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+.parked-head:hover {
+  background: var(--surface);
+}
+.parked-caret {
+  flex: 0 0 auto;
+  line-height: 1;
+}
+.parked-title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.parked-dot {
+  flex: 0 0 auto;
+  line-height: 1;
+  color: var(--text-faint);
+}
+.parked-dot.needs {
+  color: var(--violet);
+}
+.parked-dot.working {
+  color: var(--text-dim);
+}
+.parked-dot.done {
+  color: var(--success);
+}
+.parked-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* Parked rows are the same rows, visually muted. */
+.ws-row.parked {
+  opacity: 0.62;
+}
+.ws-row.parked:hover {
+  opacity: 1;
+}
+
 /* foreign ("elsewhere") workspaces — pull-to-here */
 .ws-row.foreign {
   cursor: default;

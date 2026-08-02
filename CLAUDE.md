@@ -59,11 +59,11 @@ src/app/               the GPUI app, split by surface:
   chrome.rs            render_pane, help overlay, asks/activity/stage strips
   pads.rs              scratchpad drawer + phone spine
   overview.rs          ctrl+shift+space live map
-  sidebar.rs           left rail: workspace rows, context menus, host list
+  sidebar.rs           left rail: active/parked workspace rows, context menus, host list
   tiles.rs             tile grid + sashes + zoom
   palette.rs           command palette
   quicklaunch.rs       quicklaunch strip + create/edit modal (daemon-side json)
-  workspaces.rs        workspace state ops + WorkspaceAttention
+  workspaces.rs        workspace state ops + WorkspaceAttention + active/parked partition
 src/runtime/engine/    the daemon: mod.rs (~0.6k: Engine, persist, upgrade
                        handoff) + gui.rs (conn registry, state/grid push,
                        handle_gui) + spawn.rs (PTY lifecycle) + control.rs
@@ -76,6 +76,7 @@ src/ctl/               the CLI client: mod.rs, parse.rs, wait.rs, print.rs, phon
 src/control.rs         control-plane wire types + serde
 src/gui_client.rs      GUI→daemon request client + fs-bridge fs_call plumbing
 src/tunnel.rs          thin-client ssh -N -L forward supervisor (docs/REMOTE.md)
+src/subscriptions_pref.rs  per-GUI active-set persistence (~/.config/seance/subscriptions.json)
 src/launch.rs          launch preference (local vs remote host, persisted)
 src/picker.rs          startup picker window (choose daemon location)
 src/sysopen.rs         portability helpers (open/xdg-open, ps//proc, getuid)
@@ -110,7 +111,7 @@ protocol and the same invariant: it has no filesystem at all.
   `pub` (gpui requirement).
 - Every file owns its `use` header; parent imports don't flow through.
 - Multi-window protocol APIs not yet wired to UI are kept behind documented
-  `#[allow(dead_code)]` (`GuiClient::refresh_grid`, `Engine::flush_all_grids`,
+  `#[allow(dead_code)]` (`GuiClient::refresh_grid`,
   `Engine::full_state_event`, `empty_window` read-side). **Wire or retire
   consciously — never delete blind, never strip the allow to "fix" a warning.**
 - Dead-code deletions must be compiler-verified (rustc "never used" + zero
