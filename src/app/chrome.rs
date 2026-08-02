@@ -8,7 +8,10 @@ use gpui::{
     div, ease_in_out, prelude::*, px, Animation, AnimationExt as _, Context, Entity, Render,
     SharedString, Window,
 };
-use gpui_component::{input::InputState, Colorize as _, StyledExt as _, WindowExt as _};
+use gpui_component::{
+    input::{Input, InputState},
+    Colorize as _, StyledExt as _, WindowExt as _,
+};
 
 use crate::events;
 use crate::pane::Pane;
@@ -16,7 +19,7 @@ use crate::scratchpad::ScratchpadDrawer;
 use crate::theme::SeancePalette;
 
 use super::util::{selected_row_fill, status_color, tip};
-use super::{Drawer, OwnerChrome, PaneStatus, SeanceApp};
+use super::{Drawer, OwnerChrome, PaneStatus, RenameTarget, SeanceApp};
 
 /// The grimoire in its own window.
 pub(super) struct HelpWindow;
@@ -320,7 +323,7 @@ pub(super) fn render_pane(
     status: Option<&PaneStatus>,
     owner: Option<&OwnerChrome>,
     touch: Option<&(String, String, std::time::Instant)>,
-    whisper: Option<&Entity<InputState>>,
+    rename: Option<&Entity<InputState>>,
     flipped: Option<&Entity<ScratchpadDrawer>>,
     is_zoomed: bool,
     phone_linked: bool,
@@ -328,8 +331,11 @@ pub(super) fn render_pane(
 ) -> impl IntoElement {
     let is_active = active == Some(pane.slug.as_str());
     let is_flipped = flipped.is_some();
-    let _ = whisper; // whisper UI retired — keep arg for call-site stability
+    // Inline pane rename: the editor swaps in for the title text while this
+    // pane is the rename target (whisper UI retired; this arg took its slot).
+    let rename_input = rename.cloned();
     let slug = pane.slug.clone();
+    let pane_name = pane.name.clone();
     let running = pane.is_running(cx);
     let title = pane.title(cx).unwrap_or_else(|| pane.command.clone());
     // Daemon-backed terminal panes get arm/phone chrome.
@@ -519,8 +525,15 @@ pub(super) fn render_pane(
                             SeancePalette::status_exited()
                         }),
                 )
-                .child(
-                    div()
+                .child(match rename_input {
+                    // Renaming this pane — the inline editor takes the title slot.
+                    Some(input) => div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&input))
+                        .into_any_element(),
+                    None => div()
+                        .id(SharedString::from(format!("pane-title-{slug}")))
                         .flex_1()
                         .min_w_0()
                         .text_xs()
@@ -532,12 +545,30 @@ pub(super) fn render_pane(
                             SeancePalette::text_faint()
                         })
                         .truncate()
+                        .cursor_pointer()
+                        .tooltip(tip("double-click to rename this pane"))
+                        .on_click(cx.listener({
+                            let slug = slug.clone();
+                            let name = pane_name.clone();
+                            move |this, event: &gpui::ClickEvent, window, cx| {
+                                if event.click_count() == 2 {
+                                    this.start_rename(
+                                        RenameTarget::Pane(slug.clone()),
+                                        &name,
+                                        window,
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                }
+                            }
+                        }))
                         .child(if is_flipped {
-                            format!("{} — notes (back)", pane.name)
+                            format!("{} — notes (back)", pane_name)
                         } else {
-                            format!("{} — {}", pane.name, title)
-                        }),
-                )
+                            format!("{} — {}", pane_name, title)
+                        })
+                        .into_any_element(),
+                })
                 .children(status.map(|st| {
                     div()
                         .flex_none()
@@ -845,6 +876,7 @@ pub(super) fn render_help() -> gpui::AnyElement {
         .child(row("☎", "phone — telegram topic + stage card (roster/ctl how-to; no participant claim)"))
         .child(row("▤", "pad drawer — task inject body + scratchpad tail"))
         .child(row("💬", "whisper — open a compose bar; Enter injects into the agent"))
+        .child(row("double-click title", "rename pane inline (Enter commits, Esc cancels)"))
         .child(row("stage chip click", "focus pane + open pad drawer (double-click zooms)"))
         .child(row("✎ notes", "flip the pane over onto its notes face"))
         .child(row("↻ face", "flip back from notes to the terminal"))

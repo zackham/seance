@@ -1515,6 +1515,15 @@ impl SeanceApp {
 
     // ---- inline rename ----
 
+    /// The inline-rename editor for `slug`, if that pane is the current
+    /// rename target — the pane title strip swaps it in for the title text.
+    pub(super) fn pane_rename_input(&self, slug: &str) -> Option<&Entity<InputState>> {
+        match &self.renaming {
+            Some((RenameTarget::Pane(s), input)) if s == slug => Some(input),
+            _ => None,
+        }
+    }
+
     fn start_rename(
         &mut self,
         target: RenameTarget,
