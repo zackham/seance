@@ -646,3 +646,168 @@ fn last_pane_death_prunes_the_workspace_but_spares_created_circles() {
         let _ = std::fs::remove_dir_all(&scratch);
     });
 }
+
+// ── PR link dismissal (clear must survive the next TUI repaint) ────────────
+
+#[test]
+fn clearing_a_link_dismisses_it_against_re_scrape() {
+    with_test_state_dir("pr-dismiss", || {
+        let scratch = temp_scratch("pr-dismiss");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let url = "https://github.com/o/r/pull/1";
+
+        eng.record_pr_link("lab", url, 1);
+        assert_eq!(eng.clear_pr_links("lab", Some(url)), 1);
+
+        // The repaint: same url, same workspace, must not come back.
+        assert!(!eng.record_pr_link("lab", url, 2));
+        assert!(!eng.pr_links.contains_key("lab"));
+
+        // A different url still lands normally.
+        assert!(eng.record_pr_link("lab", "https://github.com/o/r/pull/2", 3));
+        assert_eq!(eng.pr_links["lab"].len(), 1);
+
+        // Other workspaces are unaffected by lab's dismissal.
+        assert!(eng.record_pr_link("atelier", url, 4));
+        assert_eq!(eng.pr_links["atelier"][0].url, url);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn clear_all_dismisses_every_removed_link() {
+    with_test_state_dir("pr-dismiss-all", || {
+        let scratch = temp_scratch("pr-dismiss-all");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        for n in 1..=3 {
+            eng.record_pr_link("lab", &format!("https://github.com/o/r/pull/{n}"), n);
+        }
+
+        assert_eq!(eng.clear_pr_links("lab", None), 3);
+        assert_eq!(eng.pr_dismissed["lab"].len(), 3);
+        for n in 1..=3 {
+            assert!(!eng.record_pr_link("lab", &format!("https://github.com/o/r/pull/{n}"), 9));
+        }
+        assert!(!eng.pr_links.contains_key("lab"));
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn explicit_add_un_dismisses() {
+    with_test_state_dir("pr-undismiss", || {
+        let scratch = temp_scratch("pr-undismiss");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let url = "https://github.com/o/r/pull/1";
+        eng.record_pr_link("lab", url, 1);
+        eng.clear_pr_links("lab", Some(url));
+
+        let r = eng.handle_control(ControlRequest::PrLinkAdd {
+            url: url.into(),
+            workspace: Some("lab".into()),
+            scope: None,
+            from: None,
+        });
+        assert!(r.ok, "{:?}", r.error);
+        assert_eq!(eng.pr_links["lab"][0].url, url);
+        assert!(!eng.pr_link_dismissed("lab", url));
+        // And the scraper may keep it alive again.
+        assert!(!eng.record_pr_link("lab", url, 5)); // already most-recent
+        assert_eq!(eng.pr_links["lab"].len(), 1);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn dismissals_cap_and_evict_oldest() {
+    with_test_state_dir("pr-dismiss-cap", || {
+        let scratch = temp_scratch("pr-dismiss-cap");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let cap = super::pr_links::MAX_PR_DISMISSED;
+        for n in 0..cap + 2 {
+            eng.clear_pr_links("lab", Some(&format!("https://github.com/o/r/pull/{n}")));
+        }
+        assert_eq!(eng.pr_dismissed["lab"].len(), cap);
+        // Oldest two evicted → scrapable again; newest still tombstoned.
+        assert!(eng.record_pr_link("lab", "https://github.com/o/r/pull/0", 1));
+        assert!(!eng.record_pr_link(
+            "lab",
+            &format!("https://github.com/o/r/pull/{}", cap + 1),
+            2
+        ));
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn rename_and_forget_follow_the_dismissed_set() {
+    with_test_state_dir("pr-dismiss-hygiene", || {
+        let scratch = temp_scratch("pr-dismiss-hygiene");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let url = "https://github.com/o/r/pull/1";
+        eng.clear_pr_links("lab", Some(url));
+
+        eng.rename_pr_links("lab", "atelier");
+        assert!(!eng.pr_dismissed.contains_key("lab"));
+        assert!(eng.pr_link_dismissed("atelier", url));
+        assert!(!eng.record_pr_link("atelier", url, 1));
+
+        eng.forget_workspace("atelier");
+        assert!(!eng.pr_dismissed.contains_key("atelier"));
+        // Forgotten circle starts clean — the tombstones went with the row.
+        assert!(eng.record_pr_link("atelier", url, 2));
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn dismissals_survive_persist_reload_and_handoff() {
+    with_test_state_dir("pr-dismiss-persist", || {
+        let scratch = temp_scratch("pr-dismiss-persist");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let url = "https://github.com/o/r/pull/7";
+        eng.push_stub_pane("worker", "lab");
+        eng.record_pr_link("lab", url, 42);
+        eng.clear_pr_links("lab", Some(url));
+        eng.persist();
+
+        let state = crate::state::AppState::load();
+        assert_eq!(
+            state.pr_dismissed,
+            vec![("lab".to_string(), vec![url.to_string()])]
+        );
+
+        // Handoff carries it too — an upgrade must not resurrect the link.
+        let bundle = crate::runtime::protocol::HandoffBundle {
+            panes: vec![],
+            selected_workspace: None,
+            focused_pane: None,
+            extra_workspaces: vec![],
+            workspace_order: vec![],
+            proposal_counter: 0,
+            ask_counter: 0,
+            statuses: vec![],
+            asks: vec![],
+            pad_revs: vec![],
+            inject_baselines: vec![],
+            tasks: vec![],
+            task_counter: 0,
+            active_tasks: vec![],
+            cmd_log: Default::default(),
+            workspace_output: vec![],
+            workspace_touch_ms: vec![],
+            pr_links: vec![],
+            pr_dismissed: vec![("lab".to_string(), vec![url.to_string()])],
+        };
+        let json = serde_json::to_string(&bundle).unwrap();
+        let back: crate::runtime::protocol::HandoffBundle = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pr_dismissed, bundle.pr_dismissed);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}

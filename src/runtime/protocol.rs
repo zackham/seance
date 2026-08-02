@@ -83,4 +83,9 @@ pub struct HandoffBundle {
     /// workspace → scraped PR links (0.13 — survive upgrade).
     #[serde(default)]
     pub pr_links: Vec<(String, Vec<crate::runtime::protocol::PrLink>)>,
+    /// workspace → PR urls the human cleared (0.14.1). Must survive upgrade:
+    /// the scraper re-reads the same TUI bytes on every repaint, so a
+    /// dismissal that dies with the process un-dismisses itself in seconds.
+    #[serde(default)]
+    pub pr_dismissed: Vec<(String, Vec<String>)>,
 }

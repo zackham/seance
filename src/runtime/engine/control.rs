@@ -800,6 +800,9 @@ impl Engine {
                 if !url.contains("/pull/") {
                     return err(format!("pr-link add: '{url}' is not a PR url"));
                 }
+                // Explicit add beats a past clear: lift the tombstone first,
+                // otherwise `record_pr_link` would silently no-op.
+                self.undismiss_pr_link(&ws, &url);
                 self.record_pr_link(&ws, &url, now_ms());
                 let n = self.pr_links.get(&ws).map(|l| l.len()).unwrap_or(0);
                 self.persist();

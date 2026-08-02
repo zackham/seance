@@ -122,6 +122,11 @@ pub struct Engine {
     /// workspace → PR links scraped from pane output (most recent LAST).
     /// Statuses are merged in from the external watcher; see `pr_links.rs`.
     pub pr_links: HashMap<String, Vec<PrLink>>,
+    /// workspace → PR urls the human explicitly cleared, oldest FIRST.
+    /// The scraper must not re-add these to that workspace: a TUI repaints
+    /// the same PR url every few seconds, so without a tombstone the clear
+    /// undoes itself. `pr-link add` un-dismisses (explicit add always wins).
+    pub pr_dismissed: HashMap<String, Vec<String>>,
     /// Test-only: panes `record_grid_tap` was entered for, in order. Recording
     /// must be independent of GUI fan-out (a pane nobody subscribes to still
     /// belongs in the replay ring), and that is otherwise unobservable without
@@ -167,6 +172,7 @@ impl Engine {
             workspace_output: HashMap::new(),
             workspace_touch_ms: HashMap::new(),
             pr_links: HashMap::new(),
+            pr_dismissed: HashMap::new(),
             record_tap_log: Vec::new(),
         };
         (eng, event_rx)
@@ -230,6 +236,7 @@ impl Engine {
             workspace_output: HashMap::new(),
             workspace_touch_ms: HashMap::new(),
             pr_links: HashMap::new(),
+            pr_dismissed: HashMap::new(),
             #[cfg(test)]
             record_tap_log: Vec::new(),
         };
@@ -237,6 +244,7 @@ impl Engine {
         eng.workspace_output = state.workspace_output.iter().cloned().collect();
         eng.workspace_touch_ms = state.workspace_touch_ms.iter().cloned().collect();
         eng.pr_links = state.pr_links.iter().cloned().collect();
+        eng.pr_dismissed = state.pr_dismissed.iter().cloned().collect();
 
         for t in state.tasks {
             eng.tasks.insert(t.id.clone(), t);
@@ -363,6 +371,7 @@ impl Engine {
             workspace_output: bundle.workspace_output.into_iter().collect(),
             workspace_touch_ms: bundle.workspace_touch_ms.into_iter().collect(),
             pr_links: bundle.pr_links.into_iter().collect(),
+            pr_dismissed: bundle.pr_dismissed.into_iter().collect(),
             #[cfg(test)]
             record_tap_log: Vec::new(),
         };
@@ -542,6 +551,11 @@ impl Engine {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            pr_dismissed: self
+                .pr_dismissed
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         };
         let _ = state.save();
     }
@@ -663,6 +677,11 @@ impl Engine {
                 .collect(),
             pr_links: self
                 .pr_links
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            pr_dismissed: self
+                .pr_dismissed
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),

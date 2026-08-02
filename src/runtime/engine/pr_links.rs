@@ -17,6 +17,11 @@ use crate::runtime::protocol::{PrLink, PrStatus};
 /// a handful of open PRs is a workspace, not a chip.
 pub(crate) const MAX_PR_LINKS: usize = 8;
 
+/// Most dismissals remembered per workspace (oldest evicted). Dismissals are
+/// tombstones against a *re-scrape*, so the set only has to outlive the pane
+/// output that keeps re-emitting the url — a few dozen is generous.
+pub(crate) const MAX_PR_DISMISSED: usize = 32;
+
 /// Does this status change count as a *verdict transition* worth resurfacing
 /// the circle for?
 ///
@@ -44,6 +49,9 @@ impl Engine {
     /// disturbing its poller status. Returns true when the list changed in a
     /// way clients should see.
     pub(crate) fn record_pr_link(&mut self, workspace: &str, url: &str, seen_ms: u64) -> bool {
+        if self.pr_link_dismissed(workspace, url) {
+            return false;
+        }
         let links = self.pr_links.entry(workspace.to_string()).or_default();
         if let Some(pos) = links.iter().position(|l| l.url == url) {
             let mut link = links.remove(pos);
@@ -65,19 +73,69 @@ impl Engine {
         true
     }
 
-    /// `pr-link clear`: drop one URL, or the whole workspace list.
-    pub(crate) fn clear_pr_links(&mut self, workspace: &str, url: Option<&str>) -> usize {
-        let Some(links) = self.pr_links.get_mut(workspace) else {
-            return 0;
-        };
-        let before = links.len();
-        match url {
-            Some(u) => links.retain(|l| l.url != u),
-            None => links.clear(),
+    /// Is this URL tombstoned on this workspace?
+    pub(crate) fn pr_link_dismissed(&self, workspace: &str, url: &str) -> bool {
+        self.pr_dismissed
+            .get(workspace)
+            .is_some_and(|d| d.iter().any(|u| u == url))
+    }
+
+    /// Tombstone a URL on a workspace (most recent LAST, oldest evicted).
+    pub(crate) fn dismiss_pr_link(&mut self, workspace: &str, url: &str) {
+        let set = self.pr_dismissed.entry(workspace.to_string()).or_default();
+        if let Some(pos) = set.iter().position(|u| u == url) {
+            set.remove(pos);
         }
-        let removed = before - links.len();
-        if links.is_empty() {
-            self.pr_links.remove(workspace);
+        set.push(url.to_string());
+        while set.len() > MAX_PR_DISMISSED {
+            set.remove(0);
+        }
+    }
+
+    /// Lift a tombstone — an explicit `pr-link add` always beats a past clear.
+    pub(crate) fn undismiss_pr_link(&mut self, workspace: &str, url: &str) {
+        let Some(set) = self.pr_dismissed.get_mut(workspace) else {
+            return;
+        };
+        set.retain(|u| u != url);
+        if set.is_empty() {
+            self.pr_dismissed.remove(workspace);
+        }
+    }
+
+    /// `pr-link clear`: drop one URL, or the whole workspace list.
+    ///
+    /// Every removed URL is also **dismissed** for that workspace. Without
+    /// that, the next TUI repaint re-scrapes the identical url and the human's
+    /// clear undoes itself within seconds.
+    pub(crate) fn clear_pr_links(&mut self, workspace: &str, url: Option<&str>) -> usize {
+        // A clear of a url we no longer hold is still a dismissal — the human
+        // said "not this one", and the scraper may be about to re-emit it.
+        let dismiss: Vec<String> = match url {
+            Some(u) => vec![u.to_string()],
+            None => self
+                .pr_links
+                .get(workspace)
+                .map(|l| l.iter().map(|l| l.url.clone()).collect())
+                .unwrap_or_default(),
+        };
+        let removed = match self.pr_links.get_mut(workspace) {
+            Some(links) => {
+                let before = links.len();
+                match url {
+                    Some(u) => links.retain(|l| l.url != u),
+                    None => links.clear(),
+                }
+                let removed = before - links.len();
+                if links.is_empty() {
+                    self.pr_links.remove(workspace);
+                }
+                removed
+            }
+            None => 0,
+        };
+        for u in dismiss {
+            self.dismiss_pr_link(workspace, &u);
         }
         removed
     }
@@ -147,6 +205,7 @@ impl Engine {
         self.workspace_output.remove(workspace);
         self.workspace_touch_ms.remove(workspace);
         self.pr_links.remove(workspace);
+        self.pr_dismissed.remove(workspace);
         if self.selected_workspace.as_deref() == Some(workspace) {
             self.selected_workspace = self.panes.first().map(|p| p.workspace.clone());
         }
@@ -157,6 +216,9 @@ impl Engine {
     pub(crate) fn rename_pr_links(&mut self, old: &str, new: &str) {
         if let Some(links) = self.pr_links.remove(old) {
             self.pr_links.insert(new.to_string(), links);
+        }
+        if let Some(dismissed) = self.pr_dismissed.remove(old) {
+            self.pr_dismissed.insert(new.to_string(), dismissed);
         }
     }
 }
