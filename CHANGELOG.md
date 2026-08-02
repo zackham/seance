@@ -15,6 +15,50 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [0.13.0] — 2026-08-01
+
+PR links: the pull request you're waiting on becomes a circle that asks for you.
+
+### Added
+
+- **PR links are scraped, not configured.** The daemon reads every byte of
+  pane output already, so `gh pr create` (or a paste, or an agent echoing a
+  URL) is enough: GitHub PR URLs are pulled out of the raw PTY stream —
+  ANSI stripped, safe across chunk boundaries — and attributed to that pane's
+  workspace, most recent last, capped at 8 per circle. The list persists
+  across daemon restart *and* `seance upgrade` handoff.
+- **A watcher seam maps PR state onto attention.** An external poller owns
+  the judgment and writes `<state-dir>/pr_watch.json`
+  (`{url: {state, attention, label, updated_ms}}`, atomic); the daemon
+  mtime-polls it every 2s and merges verdicts onto links it already scraped —
+  it never decides anything itself. Vita's `gh` loop (every ~3min) is the
+  reference watcher. `needs` (changes requested, CI failing, new comment)
+  lights the circle exactly like an agent asking for help, so a **parked**
+  circle with a red PR resurfaces via the parked dot; approved + green reads
+  as `done`. Pane-needs still outranks it: pane-needs > working > pr-needs >
+  sticky / pr-done.
+- **Header chip, both GUIs.** The selected circle's most recent PR renders as
+  `#N` + the poller's label, colored by verdict; click opens the PR in a
+  browser, the caret (or right-click) opens a popover listing every link plus
+  *clear PR links*.
+- **`seance ctl pr-link add WS URL` / `pr-link clear WS [URL]`** — seed a link
+  by hand (backfill, or a PR nobody printed in a pane) or drop one/all.
+  Cap-checked as `pr_link_add` / `pr_link_clear`.
+
+### Changed
+
+- **Wire addition (additive, not breaking):** `WorkspaceMeta` gains
+  `pr_links: Vec<PrLink>` (`{url, status?, seen_ms}`, `PrStatus` =
+  `{state, attention?, label, updated_ms}`). The field is `#[serde(default)]`,
+  so a 0.12-shaped payload still parses — version lockstep on hello applies as
+  always, but nothing in the old wire changed meaning.
+- **Ctrl+page cycles a stable ring.** Cycling now walks `workspace_order`
+  instead of the recency sort, so the next circle doesn't move under you while
+  panes chatter.
+- **Workspaces that lose their last pane are pruned**, unless they were
+  created explicitly (`extra_workspaces` are exempt). No more empty circles
+  accumulating behind a killed agent.
+
 ## [0.12.0] — 2026-08-01
 
 Subscriptions replace ownership: a circle can be live in every window at once.

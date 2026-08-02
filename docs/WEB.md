@@ -49,6 +49,12 @@ browser (wasm)                      native
   parked row subscribes it. The active set persists in
   `localStorage["seance_active"]` (`{active, seen}`) and is replayed on
   attach; no stored set = subscribe everything.
+- **PR chip**: `#topbar` carries `#pr-chip` — a `button.pr-chip[.needs|.done]`
+  for the selected circle's most recent scraped PR (`#N` + poller label,
+  `title` = the URL), click opens the PR. With more than one link a
+  `#pr-chip-more` (`button.pr-chip-more`, `⌄`) sits beside it; either that or
+  a right-click on the chip opens the all-links popover with *clear PR links*
+  (`PrLinkClear` over the same ctl seam). No links = no chip in the DOM.
 - **Probe**: the `probe` topbar button (or ctrl+shift+P) overlays echo
   p50/p95, paint time, ws rtt, rx rate — same philosophy as the native
   latency probe: performance is measured, not claimed.

@@ -13,18 +13,21 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.12.0
+**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.13.0
 
 Release notes: [`CHANGELOG.md`](CHANGELOG.md).
 
-**New in 0.12**: **subscriptions replace ownership** — a circle can be live
-in every window (desktop, laptop, browser) at once. Each sidebar splits
-**active / parked**: your pinned set renders as before, everything else
-collapses into one parked accordion with the same badges; selecting a parked
-row subscribes it, and the arrangement persists per client. `ctl` spawns land
-parked and badge **needs**. (0.11: `seance web` wasm thin client + 48h
-session-replay DVR with a trim/publish editor — right-click a workspace →
-*share replay…*. See [docs/WEB.md](docs/WEB.md), [docs/REPLAY.md](docs/REPLAY.md).)
+**New in 0.13**: **PR links** — the daemon reads GitHub PR URLs straight out
+of pane output (no config, no hook), keeps them per circle, and an external
+watcher (`pr_watch.json`; vita ships the `gh` poller) maps each PR's state
+onto the same attention machinery your agents use: changes-requested / CI
+failure / new comment lights the circle **needs**, approved+green marks it
+**done** — a parked circle with a red PR resurfaces on its own. A header chip
+shows `#N` + the poller's label, click opens the PR, the popover lists them
+all. `seance ctl pr-link add|clear` seeds or drops links by hand.
+(0.12: **subscriptions replace ownership** — a circle can be live in every
+window at once, each sidebar split **active / parked**, persisted per client.
+See [docs/CONTROL.md](docs/CONTROL.md), [docs/DAEMON.md](docs/DAEMON.md).)
 
 ## Why it exists
 

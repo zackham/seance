@@ -208,6 +208,37 @@ input:focus {
   color: var(--text-dim);
   padding-right: 4px;
 }
+/* PR chip: selected circle's most recent scraped PR, colored by the poller's
+   attention verdict (same palette as the sidebar `.ws-att` badges). */
+.pr-chip,
+.pr-chip-more {
+  flex: 0 0 auto;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0 6px;
+  font: inherit;
+  font-size: var(--fs-xs);
+  line-height: 18px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.pr-chip:hover,
+.pr-chip-more:hover {
+  color: var(--text);
+}
+.pr-chip.needs {
+  color: var(--violet);
+  border-color: var(--violet);
+}
+.pr-chip.done {
+  color: var(--success);
+  border-color: var(--success);
+}
+.pr-chip-more {
+  padding: 0 4px;
+  margin-left: -2px;
+}
 .tb-btn.active {
   color: var(--flame);
   border-color: var(--flame-dim);

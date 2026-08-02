@@ -66,7 +66,14 @@ second windows) is this model leaking.
 - migration: none for data; clients seed active list = previously-owned
   workspaces on first run.
 
-## PR links (rides on top, later)
+## PR links (rides on top, later) — **SHIPPED 0.13.0, 2026-08-01**
+
+*as built: scrape off raw PTY output (ANSI-stripped, chunk-split safe, cap 8,
+persisted across restart + upgrade), watcher seam = state-dir `pr_watch.json`
+mtime-polled at 2s with vita's `gh` poller supplying verdicts, attention
+mapping as designed below, header chip + popover in **both** GUIs, plus
+`seance ctl pr-link add|clear` for manual seeding. See CHANGELOG 0.13.0,
+docs/DAEMON.md, docs/CONTROL.md, docs/WEB.md.*
 
 - daemon scrapes PR URLs from pane output automatically (`gh pr create`
   prints one; we see every byte) → per-workspace link list (handles
@@ -82,8 +89,8 @@ second windows) is this model leaking.
 
 1. this doc argued over ✦ (30 min of your time)
 2. engine: subscriptions replace ownership (one focused session)
-3. both sidebars: active/parked split + persistence
-4. PR links + watcher
+3. both sidebars: active/parked split + persistence ✅ 0.12.0
+4. PR links + watcher ✅ 0.13.0
 
 *(the ✦ popover + elsewhere-label fixes shipping today are forward-compatible
 with all of this — the census UI becomes the multiplayer roster.)*

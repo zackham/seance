@@ -64,14 +64,17 @@ src/app/               the GPUI app, split by surface:
   palette.rs           command palette
   quicklaunch.rs       quicklaunch strip + create/edit modal (daemon-side json)
   workspaces.rs        workspace state ops + WorkspaceAttention + active/parked partition
+  prlinks.rs           PR header chip + all-links popover + pr_attention helper
 src/runtime/engine/    the daemon: mod.rs (~0.6k: Engine, persist, upgrade
                        handoff) + gui.rs (conn registry, state/grid push,
                        handle_gui) + spawn.rs (PTY lifecycle) + control.rs
                        (handle_control) + helpers.rs + tests.rs + gui_tests.rs
+                       + pr_links.rs (per-workspace PR URL list, cap 8)
 src/runtime/           protocol.rs (re-exports seance-core wire types + the
                        native-only handoff types), snapshot.rs (re-export),
                        pty_session.rs (daemon PTY via alacritty_terminal),
-                       recorder.rs
+                       recorder.rs, pr_scrape.rs (PR URLs out of raw PTY
+                       output: ANSI-strip + chunk-split carry)
 src/ctl/               the CLI client: mod.rs, parse.rs, wait.rs, print.rs, phone.rs
 src/control.rs         control-plane wire types + serde
 src/gui_client.rs      GUI→daemon request client + fs-bridge fs_call plumbing
@@ -81,6 +84,7 @@ src/launch.rs          launch preference (local vs remote host, persisted)
 src/picker.rs          startup picker window (choose daemon location)
 src/sysopen.rs         portability helpers (open/xdg-open, ps//proc, getuid)
 src/daemon/fsbridge.rs daemon side of the fs bridge + host widget poller
+src/daemon/prwatch.rs  external PR-poller ingest (`pr_watch.json`, mtime-polled)
 src/remote_term*.rs    daemon-backed terminal model + GPUI view
 src/term_shared.rs     TerminalEvent/Ghost/keystroke_bytes shared by remote path
 ```
@@ -175,7 +179,8 @@ to synchronize.
 (`--badge-only` to skip) with **event-driven wake**; `wait … --cat` /
 `harvest` fan-in harvests pads; `ctl task` / `whoami` re-read inject; exit →
 idle; roster shows **slug**; `--wait-ready` runs profile **boot-clear**;
-`phone` / `prompts` are human-spine ctl surfaces. Cmdlog **survives upgrade**.
+`phone` / `prompts` are human-spine ctl surfaces. `pr-link add|clear` seeds /
+drops scraped PR links (statuses come from the `pr_watch.json` watcher, not ctl). Cmdlog **survives upgrade**.
 `ctl phone` opens a vita telegram topic and **seeds a stage card** — **no**
 `register_participant` claim. Full protocol: `docs/CONTROL.md`.
 

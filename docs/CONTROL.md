@@ -201,6 +201,7 @@ cannot connect (with an "is seance running?" hint).
 | `harvest` | alias: `wait … --status done --cat` |
 | `whoami` | principal + session + active `task_id` |
 | `doctor` / `skill` / `help` | profiles + agent contract |
+| `pr-link` | `seance ctl pr-link add WORKSPACE URL` · `pr-link clear WORKSPACE [URL]` |
 
 Notes:
 
@@ -212,6 +213,14 @@ Notes:
 - **`--cat` / `harvest`**: after success, print each pane's pad body (fan-in).
 - **`finish`**: pad body + status + task close; `done` requires body.
 - **Roster** prefers **slug** when name≠slug (ctl needs slug).
+- **`pr-link`** (0.13): the daemon normally scrapes PR URLs off pane output
+  itself — these verbs are for backfill and hygiene. `add` seeds a link
+  (per-workspace cap 8, most recent last); `clear` drops one URL, or every
+  link on the workspace when `URL` is omitted (`rm` / `remove` alias `clear`).
+  Requests are `PrLinkAdd` / `PrLinkClear`, cap-checked as **`pr_link_add`** /
+  **`pr_link_clear`** (mutating: denied under `locked` without a grant).
+  Statuses are not settable here — those come from the external watcher
+  (`pr_watch.json`, docs/DAEMON.md).
 
 ### Examples
 

@@ -86,10 +86,36 @@ Daemon → client (push):
 - `pane_spawned` / `pane_killed` (process exit auto-kills the pane)
 - `ask` / `status` / `touch` events
 
+## PR links + the watcher seam (0.13)
+
+The PTY io-thread scrapes GitHub PR URLs out of raw output (ANSI stripped,
+with a 256B carry so a URL split across read chunks still matches) and
+attributes them to the pane's workspace — cap 8, most recent last. The list
+rides `WorkspaceMeta.pr_links` and survives daemon restart (state.json) and
+`seance upgrade` (handoff).
+
+The daemon does **not** judge PR state. An external poller (vita's `gh` loop,
+~3min) writes the state dir's `pr_watch.json` atomically:
+
+```json
+{ "https://github.com/o/r/pull/1": {
+    "state": "open", "attention": "needs",
+    "label": "CI ✗", "updated_ms": 1754000000000 } }
+```
+
+`src/daemon/prwatch.rs` re-reads that file only when its mtime moves (2s poll,
+same idiom as the host-widget poller), merges verdicts onto URLs it already
+scraped — never adding new ones — and pushes state when something actually
+changed. Malformed entries are dropped individually, so a poller bug can't
+blank every chip. `attention: "needs"` folds into the normal workspace
+attention machinery (a parked circle lights its dot); `done` reads as
+resolved. Config seam, quicklaunch-style: swap the poller, keep the daemon.
+
 ## Layout on disk
 
 Unchanged paths under `~/.local/share/seance/` (or `SEANCE_STATE_DIR`):
-state.json, scratch/, events.jsonl, `replay/<pane>/<hour>.srr[.gz]` (the 48h
+state.json, `pr_watch.json` (external PR poller drop, above), scratch/,
+events.jsonl, `replay/<pane>/<hour>.srr[.gz]` (the 48h
 ring — docs/REPLAY.md), `web-token` (the `seance web` bearer token, 0600),
 plus `daemon.pid` for the live daemon,
 and **`gui.stderr.log`** — durable GUI stderr (panics/backtraces). Rotates to
