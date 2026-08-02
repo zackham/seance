@@ -55,6 +55,16 @@ browser (wasm)                      native
   `#pr-chip-more` (`button.pr-chip-more`, `⌄`) sits beside it; either that or
   a right-click on the chip opens the all-links popover with *clear PR links*
   (`PrLinkClear` over the same ctl seam). No links = no chip in the DOM.
+  Chip text leads with the repo (`repo#12`), `org/`-prefixed only when the
+  links in view span more than one org.
+- **PR board**: the sidebar carries `#pr-board-btn` (`button.foot-prs`,
+  `PRs (N)`) above the footer, present only when N > 0. It toggles `#pr-board`
+  — a dimmed full-viewport overlay appended to `<body>`, built once and
+  cached, holding `#pr-board-card` (`#pr-board-head` with `#pr-board-counts`
+  and `#pr-board-close`, then `#pr-board-list`). Backdrop click, the ✕, or
+  Escape (`App::escape_topmost`) dismiss it. Grouping/ordering/staleness live
+  in `pr_board.rs`'s pure half, shared in spirit with the native
+  `src/app/prboard.rs`.
 - **Probe**: the `probe` topbar button (or ctrl+shift+P) overlays echo
   p50/p95, paint time, ws rtt, rx rate — same philosophy as the native
   latency probe: performance is measured, not claimed.

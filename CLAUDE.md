@@ -43,7 +43,9 @@ crates/seance-core/    sans-io shared crate — MUST compile native AND wasm32:
 crates/seance-web/     the wasm browser client: lib.rs (app core, rAF loop),
                        renderer.rs (WebGL2 atlas), conn.rs / state.rs / input.rs,
                        ui.rs + menus.rs + keymap.rs + help.rs (chrome),
-                       activity.rs, probe.rs, replay.rs (player),
+                       activity.rs, probe.rs, pr_board.rs (the PR sweep
+                       overlay — pure model + DOM, native prboard.rs twin),
+                       replay.rs (player),
                        replay_edit.rs (editor); dist/ is committed
 src/webbridge.rs       `seance web`: ws↔unix pump, token auth, static files,
                        /ws + /healthz + /replay/{list,manifest,pane,publish}
@@ -65,6 +67,8 @@ src/app/               the GPUI app, split by surface:
   quicklaunch.rs       quicklaunch strip + create/edit modal (daemon-side json)
   workspaces.rs        workspace state ops + WorkspaceAttention + active/parked partition
   prlinks.rs           PR header chip + all-links popover + pr_attention helper
+  prboard.rs           `PRs (N)` sweep overlay: pure board model (grouping,
+                       ordering, staleness, dup annotation) + render half
 src/runtime/engine/    the daemon: mod.rs (~0.6k: Engine, persist, upgrade
                        handoff) + gui.rs (conn registry, state/grid push,
                        handle_gui) + spawn.rs (PTY lifecycle) + control.rs

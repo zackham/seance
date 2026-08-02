@@ -13,20 +13,20 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.13.0
+**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.14.0
 
 Release notes: [`CHANGELOG.md`](CHANGELOG.md).
 
-**New in 0.13**: **PR links** — the daemon reads GitHub PR URLs straight out
-of pane output (no config, no hook), keeps them per circle, and an external
-watcher (`pr_watch.json`; vita ships the `gh` poller) maps each PR's state
-onto the same attention machinery your agents use: changes-requested / CI
-failure / new comment lights the circle **needs**, approved+green marks it
-**done** — a parked circle with a red PR resurfaces on its own. A header chip
-shows `#N` + the poller's label, click opens the PR, the popover lists them
-all. `seance ctl pr-link add|clear` seeds or drops links by hand.
-(0.12: **subscriptions replace ownership** — a circle can be live in every
-window at once, each sidebar split **active / parked**, persisted per client.
+**New in 0.14**: **the PR board** — one **PRs (N)** button in the sidebar opens
+a circle-first sweep of every PR the daemon knows: needs-first sections, each
+row `repo#N` with draft / CI / review glyphs, age, last review or comment, and
+a *push or close* mark once it's gone quiet. Click a row to open the PR, a
+section header to jump to that circle. The watcher now supplies structured
+state (draft, CI pass/fail/running, review required/approved/changes,
+open/review/comment times) instead of one label string, a verdict *change*
+bumps the circle's recency clock, and chips lead with the repo name.
+(0.13: **PR links** — GitHub PR URLs scraped straight out of pane output,
+mapped onto circle attention by an external watcher (`pr_watch.json`).
 See [docs/CONTROL.md](docs/CONTROL.md), [docs/DAEMON.md](docs/DAEMON.md).)
 
 ## Why it exists

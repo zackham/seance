@@ -15,6 +15,39 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [0.14.0] — 2026-08-02
+
+The PR board: every circle's open PRs in one sweep, needs first.
+
+### Added
+
+- **PR board, both GUIs.** A `PRs (N)` button in the sidebar — visible only
+  when something is open — opens a full-content overlay that sweeps every PR
+  link the daemon knows, **circle first**: one section per circle, circles
+  that need you first, and inside each the same order. A row is `repo#N` plus
+  draft / CI / review glyphs, its age, the last review or comment, and a
+  **push or close** mark once it's been quiet four days. Merged and closed PRs
+  stay in the list but read muted; a header counts open / draft / done. The
+  same PR pinned by two circles is a mistake, not a duplicate to hide, so it's
+  annotated *also in <circle>* in both places. Click a row to open the PR,
+  a section header to select that circle; escape or a backdrop click closes.
+- **Structured PR state on the wire.** `PrStatus` gains `is_draft`,
+  `ci` (`pass` / `fail` / `running`), `review` (`required` / `approved` /
+  `changes`), and `opened_ms` / `last_review_ms` / `last_comment_ms` — so the
+  board can sort and age PRs instead of reprinting one label string. All
+  fields are `#[serde(default)]`: a 0.13-shaped `pr_watch.json` still parses,
+  and the vita `gh` poller now supplies them.
+
+### Changed
+
+- **A PR verdict *change* bumps the circle's recency clock**, so a PR going
+  red (or green) floats its circle the way pane activity does. Transitions
+  only — identical re-polls and the neutral backfill at boot never reshuffle
+  the sidebar under you.
+- **Chip and popover lead with the repo name** (`repo#12`), not a bare `#12`.
+  The `org/` prefix appears only when the links in view span more than one
+  org — the common single-org case stays short.
+
 ## [0.13.0] — 2026-08-01
 
 PR links: the pull request you're waiting on becomes a circle that asks for you.

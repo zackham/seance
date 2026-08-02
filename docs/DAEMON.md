@@ -100,8 +100,20 @@ The daemon does **not** judge PR state. An external poller (vita's `gh` loop,
 ```json
 { "https://github.com/o/r/pull/1": {
     "state": "open", "attention": "needs",
-    "label": "CI ✗", "updated_ms": 1754000000000 } }
+    "label": "CI ✗", "updated_ms": 1754000000000,
+    "is_draft": false, "ci": "fail", "review": "changes",
+    "opened_ms": 1753800000000,
+    "last_review_ms": 1753990000000,
+    "last_comment_ms": 1753995000000 } }
 ```
+
+Everything past `updated_ms` is optional (0.14, `#[serde(default)]`) and feeds
+the PR board's sorting, glyphs and age labels: `is_draft`, `ci`
+(`pass` | `fail` | `running`), `review` (`required` | `approved` | `changes`),
+and the three unix-ms stamps (0 = unknown). A 0.13-shaped file still parses;
+a poller that omits them just yields a board with fewer glyphs. A verdict
+*transition* also bumps the workspace's recency clock — identical re-polls and
+the neutral backfill on boot deliberately do not.
 
 `src/daemon/prwatch.rs` re-reads that file only when its mtime moves (2s poll,
 same idiom as the host-widget poller), merges verdicts onto URLs it already
