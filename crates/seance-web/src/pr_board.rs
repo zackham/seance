@@ -249,10 +249,16 @@ fn row_of(link: &PrLink, show_org: bool, also_in: Vec<String>, now: f64) -> Boar
 
     // "push or close": open, nobody has reviewed, and quiet for > 4d — the
     // quiet clock is the last human touch when there is one, else the age.
+    // Unreviewed means review absent OR "required" (github reports the
+    // latter for every open PR nobody has looked at; native matches).
+    let unreviewed = match review.as_deref() {
+        None | Some("required") => true,
+        Some(_) => false,
+    };
     let quiet_from = review_ms.max(comment_ms).max(opened_ms);
     let stale = !done
         && (state.is_empty() || state.eq_ignore_ascii_case("open"))
-        && review.is_none()
+        && unreviewed
         && quiet_from > 0
         && (now - quiet_from as f64) > STALE_MS;
 
@@ -417,7 +423,7 @@ fn row_html(row: &BoardRow) -> String {
             esc(&row.label)
         ));
     }
-    if row.done && !row.state.is_empty() {
+    if row.done && !row.state.is_empty() && !row.state.eq_ignore_ascii_case(&row.label) {
         out.push_str(&format!(
             r#"<span class="prb-state">{}</span>"#,
             esc(&row.state)
@@ -713,6 +719,13 @@ mod tests {
         s.review = Some("approved".into());
         let st = state_with(&[("raid", vec![link("https://github.com/o/r/pull/1", s)])]);
         assert!(!Board::build(&st, NOW).sections[0].rows[0].stale);
+
+        // review "required" = unreviewed (github reports it for every open
+        // PR nobody looked at) → still stale when quiet.
+        let mut s = open_pr(9.0);
+        s.review = Some("required".into());
+        let st = state_with(&[("raid", vec![link("https://github.com/o/r/pull/1", s)])]);
+        assert!(Board::build(&st, NOW).sections[0].rows[0].stale);
 
         // Recent comment quiets the clock.
         let mut s = open_pr(9.0);
