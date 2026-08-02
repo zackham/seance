@@ -62,6 +62,12 @@ pub enum SessionEvent {
         slug: String,
         t_ms: u64,
     },
+    /// A GitHub PR URL was seen in this pane's raw output (scraped on the I/O
+    /// thread by `pr_scrape::PrScraper`, so the engine never sees raw bytes).
+    PrLinkSeen {
+        slug: String,
+        url: String,
+    },
 }
 
 struct Listener {
@@ -744,6 +750,7 @@ fn io_loop(
     rows: Arc<Mutex<u16>>,
 ) {
     let mut parser: Processor = Processor::new();
+    let mut pr_scraper = crate::runtime::pr_scrape::PrScraper::new();
     let mut buf = [0u8; 65536];
     *master_fd_slot.lock().unwrap() = Some(master.as_raw_fd());
     // Once the master EOFs/errors we stop polling it (a HUP'd fd would spin
@@ -829,6 +836,12 @@ fn io_loop(
                     {
                         let mut t = term.lock();
                         parser.advance(&mut *t, &buf[..n]);
+                    }
+                    for url in pr_scraper.feed(&buf[..n]) {
+                        let _ = event_tx.send(SessionEvent::PrLinkSeen {
+                            slug: slug.clone(),
+                            url,
+                        });
                     }
                     let _ = event_tx.send(SessionEvent::Wakeup { slug: slug.clone() });
                 }

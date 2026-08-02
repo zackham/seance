@@ -770,3 +770,63 @@ fn workspace_meta_covers_unsubscribed_workspaces() {
         let _ = std::fs::remove_dir_all(&scratch);
     });
 }
+
+/// PR links ride the State push inside `workspace_meta` — that is the only
+/// path a chip/attention badge can reach either GUI.
+#[test]
+fn state_workspace_meta_carries_pr_links() {
+    with_test_state_dir("gui-pr-meta", || {
+        let scratch = temp_scratch("gui-pr-meta");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        eng.push_stub_pane("worker", "lab");
+        let gui = FakeGui::attach_to(&mut eng);
+        attach_all(&mut eng, &gui.id);
+        gui.drain();
+
+        eng.handle_session_event(SessionEvent::PrLinkSeen {
+            slug: "worker".into(),
+            url: "https://github.com/o/r/pull/11".into(),
+        });
+
+        let meta = gui
+            .drain()
+            .into_iter()
+            .rev()
+            .find_map(|ev| match ev {
+                GuiEvent::State { workspace_meta, .. } => Some(workspace_meta),
+                _ => None,
+            })
+            .expect("a State push followed the scrape");
+        let lab = meta.iter().find(|m| m.workspace == "lab").unwrap();
+        assert_eq!(lab.pr_links.len(), 1);
+        assert_eq!(lab.pr_links[0].url, "https://github.com/o/r/pull/11");
+        assert!(lab.pr_links[0].status.is_none());
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+/// Nit #2, client-visible half: killing the last pane of an implicitly-created
+/// workspace drops the row from the State push (and from subscriptions).
+#[test]
+fn empty_workspace_row_disappears_after_last_pane_dies() {
+    with_test_state_dir("gui-prune", || {
+        let scratch = temp_scratch("gui-prune");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let slug = eng.push_stub_pane("worker", "lab");
+        eng.workspace_order.push("lab".into());
+        let gui = FakeGui::attach_to(&mut eng);
+        let st = attach_all(&mut eng, &gui.id);
+        assert!(st.knows_ws("lab") && st.subscribes("lab"));
+        gui.drain();
+
+        eng.kill_pane(&slug);
+        eng.push_state_to_all();
+
+        let st = gui.last_state().expect("state after kill");
+        assert!(!st.knows_ws("lab"));
+        assert!(!st.subscribes("lab"));
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}

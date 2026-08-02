@@ -339,6 +339,18 @@ pub(crate) fn with_identity(
             scope,
             from,
         },
+        PrLinkAdd { url, workspace, .. } => PrLinkAdd {
+            url,
+            workspace,
+            scope,
+            from,
+        },
+        PrLinkClear { url, workspace, .. } => PrLinkClear {
+            url,
+            workspace,
+            scope,
+            from,
+        },
         Seize { pane, as_owner, .. } => Seize {
             pane,
             as_owner,
@@ -962,6 +974,47 @@ pub(crate) fn parse_policy(args: Vec<String>) -> Result<ControlRequest, String> 
             scope: None,
             from: None,
         })
+    }
+}
+
+/// `pr-link add WORKSPACE URL` · `pr-link clear WORKSPACE [URL]`
+///
+/// Manual hygiene + backfill seeding on top of the daemon's own scraper.
+pub(crate) fn parse_pr_link(args: Vec<String>) -> Result<ControlRequest, String> {
+    let mut it = args.into_iter();
+    let action = it
+        .next()
+        .ok_or("pr-link: expected 'add' or 'clear'")?
+        .to_string();
+    let mut workspace = None;
+    let mut positionals: Vec<String> = Vec::new();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--workspace" | "--ws" => workspace = Some(take_value(&mut it, "--workspace")?),
+            other => positionals.push(other.to_string()),
+        }
+    }
+    // Positional form: WORKSPACE first, then the URL.
+    if workspace.is_none() && !positionals.is_empty() {
+        workspace = Some(positionals.remove(0));
+    }
+    match action.as_str() {
+        "add" => Ok(ControlRequest::PrLinkAdd {
+            url: positionals
+                .first()
+                .cloned()
+                .ok_or("pr-link add: expected WORKSPACE URL")?,
+            workspace,
+            scope: None,
+            from: None,
+        }),
+        "clear" | "rm" | "remove" => Ok(ControlRequest::PrLinkClear {
+            url: positionals.first().cloned(),
+            workspace,
+            scope: None,
+            from: None,
+        }),
+        other => Err(format!("pr-link: unknown action '{other}' (add|clear)")),
     }
 }
 

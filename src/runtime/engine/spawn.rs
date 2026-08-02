@@ -241,6 +241,7 @@ impl Engine {
     pub fn kill_pane(&mut self, slug: &str) {
         if let Some(idx) = self.panes.iter().position(|p| p.slug == slug) {
             let mut pane = self.panes.remove(idx);
+            let workspace = pane.workspace.clone();
             if let Some(s) = pane.session.take() {
                 s.shutdown();
             }
@@ -249,6 +250,10 @@ impl Engine {
             if self.focused_pane.as_deref() == Some(slug) {
                 self.focused_pane = self.panes.first().map(|p| p.slug.clone());
             }
+            // Last pane gone and nobody created this circle on purpose → drop
+            // the row (order/clocks/pr_links/subscriptions) instead of leaving
+            // an empty one in both sidebars.
+            self.prune_workspace_if_empty(&workspace);
             events::log("daemon", None, Some(slug), "pane_killed", "killed".into());
         }
     }

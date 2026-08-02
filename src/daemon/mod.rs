@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::{bail, Context as _, Result};
 
 pub mod fsbridge;
+pub mod prwatch;
 
 use crate::control::{self, ControlRequest, ControlResponse};
 use crate::runtime::engine::{Engine, OwnedFdAdopt};
@@ -115,6 +116,9 @@ fn run_daemon_inner(args: Vec<String>) -> Result<()> {
 
     // Daemon-side host widget poller (thin clients see this machine's chips).
     fsbridge::start_host_poller(Arc::clone(&engine));
+
+    // External PR-watcher ingest (pr_watch.json → PrLink.status).
+    prwatch::start_pr_watch_poller(Arc::clone(&engine));
 
     // Write pid file.
     let pid_path = daemon_pid_path();

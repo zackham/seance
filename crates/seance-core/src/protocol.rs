@@ -458,6 +458,40 @@ pub struct WorkspaceMeta {
     /// Last human input (keystroke / inject) into any pane here.
     #[serde(default)]
     pub last_touch_ms: u64,
+    /// PR links scraped from this workspace's pane output, most-recently-seen
+    /// LAST. Statuses are filled in by an external poller through
+    /// `<state_dir>/pr_watch.json` — the daemon only owns the URL list.
+    #[serde(default)]
+    pub pr_links: Vec<PrLink>,
+}
+
+/// One PR URL observed in a workspace's pane output.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PrLink {
+    /// Canonical `https://github.com/OWNER/REPO/pull/N` URL.
+    pub url: String,
+    /// Latest poller verdict, when the watcher has seen this URL.
+    #[serde(default)]
+    pub status: Option<PrStatus>,
+    /// When the URL was last seen in pane output (unix ms).
+    #[serde(default)]
+    pub seen_ms: u64,
+}
+
+/// External-poller view of one PR (written to `pr_watch.json`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PrStatus {
+    /// Freeform: `open` | `draft` | `merged` | `closed` | …
+    pub state: String,
+    /// `needs` (resurface the workspace) | `done` | None.
+    #[serde(default)]
+    pub attention: Option<String>,
+    /// Short chip text, e.g. `CI ✗`, `approved ✓`, `2 comments`.
+    #[serde(default)]
+    pub label: String,
+    /// Poller's last refresh (unix ms).
+    #[serde(default)]
+    pub updated_ms: u64,
 }
 
 /// Pad rev + bytes recorded at last inject — wait uses this for since-inject evidence.
@@ -575,6 +609,34 @@ mod workspace_meta_tests {
             GuiEvent::State { subscriptions, .. } => assert!(subscriptions.is_empty()),
             _ => panic!("expected State"),
         }
+    }
+
+    /// `pr_links` is additive: a 0.12 payload (and a 0.12 client) still parse.
+    #[test]
+    fn workspace_meta_pr_links_are_optional_and_roundtrip() {
+        let old: WorkspaceMeta =
+            serde_json::from_str(r#"{"workspace":"lab","last_output_ms":1,"last_touch_ms":2}"#)
+                .unwrap();
+        assert!(old.pr_links.is_empty());
+
+        let meta = WorkspaceMeta {
+            workspace: "lab".into(),
+            last_output_ms: 1,
+            last_touch_ms: 2,
+            pr_links: vec![PrLink {
+                url: "https://github.com/o/r/pull/3".into(),
+                status: Some(PrStatus {
+                    state: "open".into(),
+                    attention: Some("needs".into()),
+                    label: "CI x".into(),
+                    updated_ms: 9,
+                }),
+                seen_ms: 5,
+            }],
+        };
+        let back: WorkspaceMeta =
+            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        assert_eq!(back.pr_links, meta.pr_links);
     }
 
     #[test]

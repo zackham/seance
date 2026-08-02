@@ -3,6 +3,7 @@
 mod control;
 mod gui;
 pub(crate) mod helpers;
+mod pr_links;
 mod spawn;
 
 #[cfg(test)]
@@ -118,6 +119,9 @@ pub struct Engine {
     /// workspace → last human input (unix ms). Same durability story; drives
     /// the sidebar's recency sort. Agent/ctl sends deliberately do NOT bump.
     pub workspace_touch_ms: HashMap<String, u64>,
+    /// workspace → PR links scraped from pane output (most recent LAST).
+    /// Statuses are merged in from the external watcher; see `pr_links.rs`.
+    pub pr_links: HashMap<String, Vec<PrLink>>,
     /// Test-only: panes `record_grid_tap` was entered for, in order. Recording
     /// must be independent of GUI fan-out (a pane nobody subscribes to still
     /// belongs in the replay ring), and that is otherwise unobservable without
@@ -162,6 +166,7 @@ impl Engine {
             last_grid_cells: HashMap::new(),
             workspace_output: HashMap::new(),
             workspace_touch_ms: HashMap::new(),
+            pr_links: HashMap::new(),
             record_tap_log: Vec::new(),
         };
         (eng, event_rx)
@@ -224,12 +229,14 @@ impl Engine {
             last_grid_cells: HashMap::new(),
             workspace_output: HashMap::new(),
             workspace_touch_ms: HashMap::new(),
+            pr_links: HashMap::new(),
             #[cfg(test)]
             record_tap_log: Vec::new(),
         };
 
         eng.workspace_output = state.workspace_output.iter().cloned().collect();
         eng.workspace_touch_ms = state.workspace_touch_ms.iter().cloned().collect();
+        eng.pr_links = state.pr_links.iter().cloned().collect();
 
         for t in state.tasks {
             eng.tasks.insert(t.id.clone(), t);
@@ -355,6 +362,7 @@ impl Engine {
             // every circle's "time since update" to unknown.
             workspace_output: bundle.workspace_output.into_iter().collect(),
             workspace_touch_ms: bundle.workspace_touch_ms.into_iter().collect(),
+            pr_links: bundle.pr_links.into_iter().collect(),
             #[cfg(test)]
             record_tap_log: Vec::new(),
         };
@@ -529,6 +537,11 @@ impl Engine {
                 .iter()
                 .map(|(k, v)| (k.clone(), *v))
                 .collect(),
+            pr_links: self
+                .pr_links
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         };
         let _ = state.save();
     }
@@ -647,6 +660,11 @@ impl Engine {
                 .workspace_touch_ms
                 .iter()
                 .map(|(k, v)| (k.clone(), *v))
+                .collect(),
+            pr_links: self
+                .pr_links
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         };
         Ok((bundle, fds))

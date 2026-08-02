@@ -328,3 +328,226 @@ fn seize_release_drive_agency() {
         let _ = std::fs::remove_dir_all(&scratch);
     });
 }
+
+// ── PR links (scrape list + watcher ingest + hygiene) ──────────────────────
+
+#[test]
+fn pr_link_dedup_moves_to_most_recent_and_caps_at_eight() {
+    with_test_state_dir("pr-cap", || {
+        let scratch = temp_scratch("pr-cap");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+
+        for n in 1..=10 {
+            eng.record_pr_link("lab", &format!("https://github.com/o/r/pull/{n}"), n);
+        }
+        let links = &eng.pr_links["lab"];
+        assert_eq!(links.len(), super::pr_links::MAX_PR_LINKS);
+        // Oldest two evicted, ordering preserved (most recent LAST).
+        assert_eq!(links[0].url, "https://github.com/o/r/pull/3");
+        assert_eq!(links[7].url, "https://github.com/o/r/pull/10");
+
+        // Re-seeing an older URL promotes it and refreshes seen_ms.
+        assert!(eng.record_pr_link("lab", "https://github.com/o/r/pull/3", 99));
+        let links = &eng.pr_links["lab"];
+        assert_eq!(links.len(), 8);
+        assert_eq!(links[7].url, "https://github.com/o/r/pull/3");
+        assert_eq!(links[7].seen_ms, 99);
+        // Re-seeing the already-most-recent one is not a client-visible change.
+        assert!(!eng.record_pr_link("lab", "https://github.com/o/r/pull/3", 100));
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn pr_watch_ingest_sets_and_clears_statuses() {
+    with_test_state_dir("pr-ingest", || {
+        let scratch = temp_scratch("pr-ingest");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        eng.record_pr_link("lab", "https://github.com/o/r/pull/1", 1);
+        eng.record_pr_link("lab", "https://github.com/o/r/pull/2", 2);
+
+        let mut watch = std::collections::HashMap::new();
+        watch.insert(
+            "https://github.com/o/r/pull/1".to_string(),
+            PrStatus {
+                state: "open".into(),
+                attention: Some("needs".into()),
+                label: "CI x".into(),
+                updated_ms: 5,
+            },
+        );
+        // An unknown URL in the watch file is ignored (scrape list is truth).
+        watch.insert(
+            "https://github.com/other/x/pull/9".to_string(),
+            PrStatus::default(),
+        );
+
+        assert!(eng.ingest_pr_watch(&watch));
+        let links = &eng.pr_links["lab"];
+        assert_eq!(
+            links[0].status.as_ref().unwrap().attention.as_deref(),
+            Some("needs")
+        );
+        assert!(links[1].status.is_none());
+        assert_eq!(links.len(), 2);
+
+        // Idempotent: same map twice = no change, no state push.
+        assert!(!eng.ingest_pr_watch(&watch));
+        // Poller dropping a URL clears its status.
+        assert!(eng.ingest_pr_watch(&std::collections::HashMap::new()));
+        assert!(eng.pr_links["lab"][0].status.is_none());
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn pr_link_ctl_add_and_clear() {
+    with_test_state_dir("pr-ctl", || {
+        let scratch = temp_scratch("pr-ctl");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+
+        let r = eng.handle_control(ControlRequest::PrLinkAdd {
+            url: "https://github.com/o/r/pull/1".into(),
+            workspace: Some("lab".into()),
+            scope: None,
+            from: None,
+        });
+        assert!(r.ok, "{:?}", r.error);
+        assert_eq!(eng.pr_links["lab"].len(), 1);
+
+        // Not a PR url → rejected, list untouched.
+        let bad = eng.handle_control(ControlRequest::PrLinkAdd {
+            url: "https://github.com/o/r/issues/1".into(),
+            workspace: Some("lab".into()),
+            scope: None,
+            from: None,
+        });
+        assert!(!bad.ok);
+        assert_eq!(eng.pr_links["lab"].len(), 1);
+
+        // Workspace falls back to the caller's scope.
+        let scoped = eng.handle_control(ControlRequest::PrLinkAdd {
+            url: "https://github.com/o/r/pull/2".into(),
+            workspace: None,
+            scope: Some("lab".into()),
+            from: None,
+        });
+        assert!(scoped.ok);
+        assert_eq!(eng.pr_links["lab"].len(), 2);
+
+        // Clear one, then the rest.
+        let one = eng.handle_control(ControlRequest::PrLinkClear {
+            url: Some("https://github.com/o/r/pull/1".into()),
+            workspace: Some("lab".into()),
+            scope: None,
+            from: None,
+        });
+        assert!(one.ok);
+        assert_eq!(eng.pr_links["lab"].len(), 1);
+
+        let all = eng.handle_control(ControlRequest::PrLinkClear {
+            url: None,
+            workspace: Some("lab".into()),
+            scope: None,
+            from: None,
+        });
+        assert!(all.ok);
+        assert!(!eng.pr_links.contains_key("lab"));
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn pr_links_survive_persist_and_reload() {
+    with_test_state_dir("pr-persist", || {
+        let scratch = temp_scratch("pr-persist");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        eng.push_stub_pane("worker", "lab");
+        eng.record_pr_link("lab", "https://github.com/o/r/pull/7", 42);
+        eng.persist();
+
+        let state = crate::state::AppState::load();
+        assert_eq!(state.pr_links.len(), 1);
+        assert_eq!(state.pr_links[0].0, "lab");
+        assert_eq!(state.pr_links[0].1[0].url, "https://github.com/o/r/pull/7");
+        assert_eq!(state.pr_links[0].1[0].seen_ms, 42);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn scraped_url_lands_on_the_pane_workspace() {
+    with_test_state_dir("pr-seen", || {
+        let scratch = temp_scratch("pr-seen");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let slug = eng.push_stub_pane("worker", "lab");
+
+        eng.handle_session_event(crate::runtime::pty_session::SessionEvent::PrLinkSeen {
+            slug: slug.clone(),
+            url: "https://github.com/o/r/pull/3".into(),
+        });
+        assert_eq!(eng.pr_links["lab"][0].url, "https://github.com/o/r/pull/3");
+
+        // Unknown pane → no ghost workspace.
+        eng.handle_session_event(crate::runtime::pty_session::SessionEvent::PrLinkSeen {
+            slug: "ghost".into(),
+            url: "https://github.com/o/r/pull/4".into(),
+        });
+        assert_eq!(eng.pr_links.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn rename_workspace_carries_pr_links() {
+    with_test_state_dir("pr-rename", || {
+        let scratch = temp_scratch("pr-rename");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        eng.push_stub_pane("worker", "lab");
+        eng.record_pr_link("lab", "https://github.com/o/r/pull/1", 1);
+
+        eng.rename_pr_links("lab", "atelier");
+        assert!(!eng.pr_links.contains_key("lab"));
+        assert_eq!(eng.pr_links["atelier"].len(), 1);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
+fn last_pane_death_prunes_the_workspace_but_spares_created_circles() {
+    with_test_state_dir("pr-prune", || {
+        let scratch = temp_scratch("pr-prune");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+
+        // Implicit circle (born with its pane) → pruned when the pane dies.
+        let a = eng.push_stub_pane("worker-a", "lab");
+        eng.workspace_order.push("lab".into());
+        eng.workspace_output.insert("lab".into(), 1);
+        eng.workspace_touch_ms.insert("lab".into(), 2);
+        eng.record_pr_link("lab", "https://github.com/o/r/pull/1", 1);
+
+        // Explicitly created empty circle → keeps its row.
+        let b = eng.push_stub_pane("worker-b", "studio");
+        eng.extra_workspaces.push("studio".into());
+        eng.workspace_order.push("studio".into());
+        eng.record_pr_link("studio", "https://github.com/o/r/pull/2", 2);
+
+        eng.kill_pane(&a);
+        assert!(!eng.pr_links.contains_key("lab"));
+        assert!(!eng.workspace_order.iter().any(|w| w == "lab"));
+        assert!(!eng.workspace_output.contains_key("lab"));
+        assert!(!eng.workspace_touch_ms.contains_key("lab"));
+
+        eng.kill_pane(&b);
+        assert!(eng.workspace_order.iter().any(|w| w == "studio"));
+        assert_eq!(eng.pr_links["studio"].len(), 1);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}

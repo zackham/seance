@@ -788,6 +788,52 @@ impl Engine {
                 );
                 ok(json!({"revoked": n}))
             }
+            PrLinkAdd {
+                url,
+                workspace,
+                scope,
+                from,
+            } => {
+                let Some(ws) = workspace.or(scope) else {
+                    return err("pr-link add: expected WORKSPACE".into());
+                };
+                if !url.contains("/pull/") {
+                    return err(format!("pr-link add: '{url}' is not a PR url"));
+                }
+                self.record_pr_link(&ws, &url, now_ms());
+                let n = self.pr_links.get(&ws).map(|l| l.len()).unwrap_or(0);
+                self.persist();
+                self.push_state_to_all();
+                events::log(
+                    &actor(&from),
+                    Some(&ws),
+                    None,
+                    "pr_link_add",
+                    format!("seeded {url}"),
+                );
+                ok(json!({"workspace": ws, "url": url, "links": n}))
+            }
+            PrLinkClear {
+                url,
+                workspace,
+                scope,
+                from,
+            } => {
+                let Some(ws) = workspace.or(scope) else {
+                    return err("pr-link clear: expected WORKSPACE".into());
+                };
+                let removed = self.clear_pr_links(&ws, url.as_deref());
+                self.persist();
+                self.push_state_to_all();
+                events::log(
+                    &actor(&from),
+                    Some(&ws),
+                    None,
+                    "pr_link_clear",
+                    format!("cleared {removed} link(s)"),
+                );
+                ok(json!({"workspace": ws, "removed": removed}))
+            }
             PolicyGet {
                 workspace, scope, ..
             } => {

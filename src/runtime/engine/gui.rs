@@ -171,7 +171,7 @@ impl Engine {
         None
     }
 
-    pub(super) fn push_state_to_all(&mut self) {
+    pub(crate) fn push_state_to_all(&mut self) {
         self.prune_dead_guis();
         let ids: Vec<String> = self.gui_conns.iter().map(|c| c.id.clone()).collect();
         for id in ids {
@@ -299,6 +299,7 @@ impl Engine {
             .workspace_output
             .keys()
             .chain(self.workspace_touch_ms.keys())
+            .chain(self.pr_links.keys())
             .cloned()
         {
             if !meta_names.iter().any(|m| *m == ws) {
@@ -310,6 +311,7 @@ impl Engine {
             .map(|ws| WorkspaceMeta {
                 last_output_ms: self.workspace_output.get(&ws).copied().unwrap_or(0),
                 last_touch_ms: self.workspace_touch_ms.get(&ws).copied().unwrap_or(0),
+                pr_links: self.pr_links.get(&ws).cloned().unwrap_or_default(),
                 workspace: ws,
             })
             .collect();
@@ -325,6 +327,17 @@ impl Engine {
             windows: self.window_infos(),
             subscriptions: subs,
             workspace_meta,
+        }
+    }
+
+    /// Drop a workspace from every window's subscription/selection state —
+    /// used when the workspace ceases to exist (kill or empty-prune).
+    pub(super) fn drop_workspace_subs(&mut self, workspace: &str) {
+        for c in &mut self.gui_conns {
+            c.subscriptions.remove(workspace);
+            if c.selected_workspace.as_deref() == Some(workspace) {
+                c.selected_workspace = None;
+            }
         }
     }
 
@@ -598,6 +611,10 @@ impl Engine {
                         });
                     }
                 }
+            }
+            SessionEvent::PrLinkSeen { slug, url } => {
+                let (slug, url) = (slug.clone(), url.clone());
+                self.on_pr_link_seen(&slug, &url);
             }
             SessionEvent::Title { slug, title } => {
                 self.record_event(
@@ -1226,6 +1243,7 @@ impl Engine {
                 if let Some(t) = self.workspace_touch_ms.remove(&old) {
                     self.workspace_touch_ms.insert(new.clone(), t);
                 }
+                self.rename_pr_links(&old, &new);
                 if self.selected_workspace.as_deref() == Some(old.as_str()) {
                     self.selected_workspace = Some(new.clone());
                 }
@@ -1274,16 +1292,7 @@ impl Engine {
                     self.broadcast(GuiEvent::PaneKilled { slug: s });
                 }
                 self.extra_workspaces.retain(|w| w != &workspace);
-                self.workspace_order.retain(|w| w != &workspace);
-                if self.selected_workspace.as_deref() == Some(workspace.as_str()) {
-                    self.selected_workspace = self.panes.first().map(|p| p.workspace.clone());
-                }
-                for c in &mut self.gui_conns {
-                    c.subscriptions.remove(&workspace);
-                    if c.selected_workspace.as_deref() == Some(workspace.as_str()) {
-                        c.selected_workspace = None;
-                    }
-                }
+                self.forget_workspace(&workspace);
                 self.persist();
                 self.push_state_to_all();
                 None

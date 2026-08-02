@@ -130,6 +130,9 @@ pub struct AppState {
     /// workspace → last human input (unix ms) — sidebar recency sort key.
     #[serde(default)]
     pub workspace_touch_ms: Vec<(String, u64)>,
+    /// workspace → scraped PR links (0.13 — survive upgrade).
+    #[serde(default)]
+    pub pr_links: Vec<(String, Vec<crate::runtime::protocol::PrLink>)>,
 }
 
 fn default_split_ratio() -> f32 {
@@ -225,7 +228,7 @@ impl AppState {
 ///
 /// Honors `SEANCE_STATE_DIR` (with `~`/env expansion); otherwise falls back to
 /// `~/.local/share/seance`.
-fn state_dir() -> anyhow::Result<PathBuf> {
+pub(crate) fn state_dir() -> anyhow::Result<PathBuf> {
     if let Ok(dir) = std::env::var("SEANCE_STATE_DIR") {
         if !dir.is_empty() {
             let expanded = shellexpand::full(&dir)
@@ -434,6 +437,14 @@ mod tests {
             cmd_log: crate::cmdlog::CommandLog::new(),
             workspace_output: vec![("main".to_string(), 1_700_000_000_000)],
             workspace_touch_ms: vec![("main".to_string(), 1_700_000_000_500)],
+            pr_links: vec![(
+                "main".to_string(),
+                vec![crate::runtime::protocol::PrLink {
+                    url: "https://github.com/o/r/pull/5".into(),
+                    status: None,
+                    seen_ms: 1_700_000_000_900,
+                }],
+            )],
         };
 
         state.save().expect("save should succeed");
@@ -446,6 +457,9 @@ mod tests {
             loaded.workspace_touch_ms,
             vec![("main".to_string(), 1_700_000_000_500)]
         );
+        assert_eq!(loaded.pr_links.len(), 1);
+        assert_eq!(loaded.pr_links[0].0, "main");
+        assert_eq!(loaded.pr_links[0].1[0].url, "https://github.com/o/r/pull/5");
 
         assert_eq!(loaded.panes.len(), 2);
         assert_eq!(loaded.panes[0].name, "Vita");

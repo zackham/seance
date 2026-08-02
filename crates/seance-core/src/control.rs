@@ -425,6 +425,30 @@ pub enum ControlRequest {
         from: Option<String>,
     },
 
+    /// Seed a PR link onto a workspace by hand (backfill / manual hygiene).
+    /// The daemon normally scrapes these off pane output itself.
+    PrLinkAdd {
+        url: String,
+        #[serde(default)]
+        workspace: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
+    /// Drop one PR link (`url` set) or all of a workspace's links.
+    PrLinkClear {
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        workspace: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
     /// One-shot workspace brief for orchestrators (dense pane rows + focus).
     Brief {
         #[serde(default)]
@@ -557,6 +581,8 @@ impl ControlRequest {
             | Self::Note { from, .. }
             | Self::Finish { from, .. }
             | Self::Roster { from, .. }
+            | Self::PrLinkAdd { from, .. }
+            | Self::PrLinkClear { from, .. }
             | Self::Task { from, .. } => from,
         }
     }
@@ -580,6 +606,12 @@ impl ControlRequest {
                 workspace, scope, ..
             }
             | Self::CapsRevoke {
+                workspace, scope, ..
+            }
+            | Self::PrLinkAdd {
+                workspace, scope, ..
+            }
+            | Self::PrLinkClear {
                 workspace, scope, ..
             } => workspace.as_deref().or(scope.as_deref()),
             Self::List { scope, .. }
