@@ -242,7 +242,22 @@ pub(crate) fn resolve_dist(explicit: Option<PathBuf>) -> Result<PathBuf> {
     }
     let exe = std::env::current_exe().context("resolving current exe for dist fallback")?;
     let dir = exe.parent().unwrap_or_else(|| Path::new("."));
-    Ok(dir.join("../share/seance/web"))
+    // Source-tree binary (target/release/seance) launched from an arbitrary
+    // cwd — every path 404s without this, and the failure is silent.
+    let tree_dist = dir.join("../../crates/seance-web/dist");
+    if tree_dist.is_dir() {
+        return Ok(tree_dist);
+    }
+    let installed = dir.join("../share/seance/web");
+    if installed.is_dir() {
+        return Ok(installed);
+    }
+    Err(anyhow!(
+        "no web dist found: tried ./crates/seance-web/dist, {}, {} — \
+         set SEANCE_WEB_DIST or pass --dist",
+        tree_dist.display(),
+        installed.display()
+    ))
 }
 
 // ---------------------------------------------------------------------------
