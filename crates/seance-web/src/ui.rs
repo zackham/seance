@@ -513,7 +513,8 @@ impl Chrome {
                 let w = ws.to_string();
                 bind_ctx(&chip, &mut self.structural, move |ev| {
                     ev.prevent_default();
-                    close_pr_tip();
+                    // Tip stays up through a right-click (owner decision) —
+                    // only mouseleave hides it.
                     open_pr_chip_menu(&actions, &w, &one, &ev);
                 })?;
             }

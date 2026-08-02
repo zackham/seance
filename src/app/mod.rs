@@ -207,7 +207,12 @@ pub struct SeanceApp {
     /// Daemon-scraped PR links per workspace (most-recently-seen LAST) —
     /// a pure mirror of `WorkspaceMeta.pr_links`, rebuilt on every State.
     pr_links: std::collections::HashMap<String, Vec<seance_core::protocol::PrLink>>,
-    /// Header-chip popover listing every PR link of the selected circle.
+    /// URL of the PR chip whose details popover is showing (hover-driven,
+    /// zero delay). `None` = no popover.
+    pr_tip: Option<String>,
+    /// The popover is pinned open because that chip's context menu is up —
+    /// hover-out must not close it while the menu is being used.
+    pr_tip_pinned: bool,
     /// Full-content PR board overlay (sidebar `PRs (N)` button).
     pr_board: bool,
     /// Render-safe cache of daemon-side files (pad sidecars, phone binds,
@@ -392,6 +397,8 @@ impl SeanceApp {
             quicklaunch_editor: None,
             gui_menu_open: false,
             pr_links: std::collections::HashMap::new(),
+            pr_tip: None,
+            pr_tip_pinned: false,
             pr_board: false,
             remote_cache,
             render_probe: RenderProbe::default(),

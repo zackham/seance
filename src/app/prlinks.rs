@@ -112,20 +112,32 @@ pub(super) fn pr_tooltip_lines(link: &PrLink, with_org: bool, now: u64) -> Vec<S
     out
 }
 
-/// Tooltip builder for a set of lines (gpui-component `Tooltip::element`).
-fn tip_lines_view(
-    lines: Vec<String>,
-) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
-    move |window, cx| {
-        let lines = lines.clone();
-        gpui_component::tooltip::Tooltip::element(move |_, _| {
-            div()
-                .flex()
-                .flex_col()
-                .children(lines.iter().map(|l| div().child(l.clone())))
-        })
-        .build(window, cx)
-    }
+/// The hover details card, rendered as an absolutely-positioned child of the
+/// chip itself so it sits directly under it (no mouse-relative offset, no
+/// tooltip delay). `deferred` keeps it painted above the panes below without
+/// changing where it is laid out; it carries no id and no mouse handlers, so
+/// it has no hitbox and can't steal hover from what it overlaps.
+fn pr_tip_card(lines: Vec<String>) -> gpui::AnyElement {
+    gpui::deferred(
+        div()
+            .absolute()
+            .top_full()
+            .left_0()
+            .mt(gpui::px(4.))
+            .w(gpui::px(340.))
+            .flex()
+            .flex_col()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(SeancePalette::border())
+            .bg(SeancePalette::bg_elevated())
+            .text_xs()
+            .text_color(SeancePalette::text())
+            .children(lines.into_iter().map(|l| div().child(l)))
+            .into_any_element(),
+    )
+    .into_any_element()
 }
 
 impl SeanceApp {
@@ -180,7 +192,14 @@ impl SeanceApp {
             .into_any_element()
     }
 
-    /// One chip: open on click, details on hover, actions on right-click.
+    /// One chip: open on click, details on hover (instant, anchored under the
+    /// chip), actions on right-click.
+    ///
+    /// Popover state machine: hover-in shows, hover-out hides — *unless* this
+    /// chip's context menu is up (a right-click pins it, so using the menu
+    /// doesn't yank the details away). The pin, and the popover with it, are
+    /// dropped by the next mouse-down anywhere outside the chip, which is both
+    /// how a menu item is chosen and how a click-away dismissal happens.
     fn render_pr_link_chip(
         &self,
         ws: &str,
@@ -194,8 +213,12 @@ impl SeanceApp {
         let tip_lines = pr_tooltip_lines(link, with_org, now);
         let menu_url = url.clone();
         let menu_ws = ws.to_string();
+        let hover_url = url.clone();
+        let pin_url = url.clone();
+        let showing = self.pr_tip.as_deref() == Some(url.as_str());
         div()
             .id(SharedString::from(format!("pr-chip-{url}")))
+            .relative()
             .flex_none()
             .px_2()
             .py_0p5()
@@ -207,10 +230,41 @@ impl SeanceApp {
             .text_color(link_color(link))
             .cursor_pointer()
             .hover(|s| s.bg(SeancePalette::border()))
-            .tooltip(tip_lines_view(tip_lines))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    if this.pr_tip.as_deref() != Some(hover_url.as_str()) {
+                        this.pr_tip = Some(hover_url.clone());
+                        this.pr_tip_pinned = false;
+                        cx.notify();
+                    }
+                } else if !this.pr_tip_pinned && this.pr_tip.as_deref() == Some(hover_url.as_str())
+                {
+                    this.pr_tip = None;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, _, _, cx| {
+                    // The context menu is about to open on this chip: keep the
+                    // details visible for as long as it's up.
+                    this.pr_tip = Some(pin_url.clone());
+                    this.pr_tip_pinned = true;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                // Menu item chosen, or click-away dismissal: unpin and close.
+                if this.pr_tip_pinned {
+                    this.pr_tip_pinned = false;
+                    this.pr_tip = None;
+                    cx.notify();
+                }
+            }))
             .on_click(cx.listener(move |_this, _, _, _| {
                 crate::sysopen::open_detached(&open_url);
             }))
+            .when(showing, |d| d.child(pr_tip_card(tip_lines)))
             .context_menu(move |menu, _, _| {
                 menu.menu("open PR", Box::new(ActOpenPrLink(menu_url.clone())))
                     .menu(
