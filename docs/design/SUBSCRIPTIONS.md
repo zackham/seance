@@ -1,6 +1,10 @@
 # design: workspaces as subscriptions (killing exclusive ownership)
 
-*draft for discussion — silicon-zack, 2026-08-01. nothing here is built.*
+*silicon-zack, 2026-08-01. **APPROVED by zack 2026-08-01 — including every
+recommendation in "decisions that are yours"** (per-connection focus; orphans
+to the spawning GUI, ctl spawns parked+needs; ctrl+page cycles active only;
+delete CollectAll/Transfer/ownership outright). Build handoff:
+[SUBSCRIPTIONS-HANDOFF.md](SUBSCRIPTIONS-HANDOFF.md).*
 
 ## the problem
 
