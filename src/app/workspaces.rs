@@ -476,10 +476,6 @@ impl SeanceApp {
         }
         // Selecting a circle clears sticky "done/needs" unread — does NOT bump touch.
         self.workspace_unread.remove(workspace);
-        // The PR popover belongs to the circle it was opened on.
-        if changed {
-            self.pr_menu_open = false;
-        }
         // When entering a circle that was off-screen, zero local revs for its
         // panes so the daemon's full flush can't be dropped as "stale". The
         // daemon also sends FULL frames on workspace change.
@@ -645,4 +641,3 @@ impl SeanceApp {
         cx.notify();
     }
 }
-

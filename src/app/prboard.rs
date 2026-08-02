@@ -84,13 +84,13 @@ pub(super) fn ci_glyph(ci: Option<&str>) -> &'static str {
 }
 
 /// `now - t` as a coarse label; None when the stamp is unknown (0) or ahead.
-fn since(now: u64, t: u64) -> Option<String> {
+pub(super) fn since(now: u64, t: u64) -> Option<String> {
     (t != 0 && now >= t).then(|| rel_label(now - t))
 }
 
 /// Latest human touch on the PR: `("review" | "comment", ms)`, review winning
 /// ties. None when both stamps are unknown.
-fn latest_touch(review_ms: u64, comment_ms: u64) -> Option<(&'static str, u64)> {
+pub(super) fn latest_touch(review_ms: u64, comment_ms: u64) -> Option<(&'static str, u64)> {
     match (review_ms, comment_ms) {
         (0, 0) => None,
         (r, c) if r >= c => Some(("review", r)),

@@ -113,3 +113,21 @@ pub struct ActQuickLaunchEdit(pub String);
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]
 pub struct ActQuickLaunchRemove(pub String);
+
+/// Open one PR link in the browser (header PR chip context menu).
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActOpenPrLink(pub String);
+
+/// Drop one PR ref from one circle (sticky dismissal) — PR chip context menu.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActRemovePrLink {
+    pub url: String,
+    pub workspace: String,
+}
+
+/// Drop every PR ref on one circle — PR chip context menu.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActClearPrLinks(pub String);

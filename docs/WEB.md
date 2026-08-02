@@ -49,14 +49,15 @@ browser (wasm)                      native
   parked row subscribes it. The active set persists in
   `localStorage["seance_active"]` (`{active, seen}`) and is replayed on
   attach; no stored set = subscribe everything.
-- **PR chip**: `#topbar` carries `#pr-chip` — a `button.pr-chip[.needs|.done]`
-  for the selected circle's most recent scraped PR (`#N` + poller label,
-  `title` = the URL), click opens the PR. With more than one link a
-  `#pr-chip-more` (`button.pr-chip-more`, `⌄`) sits beside it; either that or
-  a right-click on the chip opens the all-links popover with *clear PR links*
-  (`PrLinkClear` over the same ctl seam). No links = no chip in the DOM.
-  Chip text leads with the repo (`repo#12`), `org/`-prefixed only when the
-  links in view span more than one org.
+- **PR chips**: `#topbar` carries `#pr-chips` (`div.pr-chips`, horizontal
+  scroll) — one `button.pr-chip[.needs|.done]` per scraped PR of the selected
+  circle, most recent first (that chip keeps `id="pr-chip"`). Click opens the
+  PR; hover shows a `div.pr-tip` details popover (URL, state, ci, review,
+  age, last review/comment); right-click opens a menu: *open PR* · *remove
+  this PR ref* (sticky dismissal) · *clear all PR refs* (`PrLinkClear` over
+  the ctl seam). No links = no chips in the DOM. Chip text leads with the
+  repo (`repo#12`), `org/`-prefixed only when the links in view span more
+  than one org.
 - **PR board**: the sidebar carries `#pr-board-btn` (`button.foot-prs`,
   `PRs (N)`) above the footer, present only when N > 0. It toggles `#pr-board`
   — a dimmed full-viewport overlay appended to `<body>`, built once and

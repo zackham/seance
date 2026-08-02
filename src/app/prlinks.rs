@@ -1,19 +1,24 @@
-//! PR links surface: the header chip for the selected workspace's most recent
-//! scraped GitHub PR, its all-links popover ("clear PR links" lives there),
-//! and the pure helpers the sidebar attention machinery folds in.
+//! PR links surface: the header chip row for the selected workspace's scraped
+//! GitHub PRs (one chip per link, most recent first — open on click, details
+//! on hover, actions on right-click) and the pure helpers the sidebar
+//! attention machinery folds in.
 //!
 //! The daemon owns the URL list (scraped from pane output) and an external
 //! poller fills in `PrStatus` through `pr_watch.json`; this module is a pure
 //! mirror + renderer — it never touches the network or the filesystem.
 
-use gpui::{div, prelude::*, px, Context, SharedString};
+use gpui::{div, prelude::*, Context, SharedString};
+
+use gpui_component::menu::ContextMenuExt as _;
 
 use seance_core::protocol::PrLink;
 
 use crate::runtime::protocol::GuiRequest;
 use crate::theme::SeancePalette;
 
-use super::util::{tip, tip_s};
+use super::actions::{ActClearPrLinks, ActOpenPrLink, ActRemovePrLink};
+use super::prboard::{ci_glyph, latest_touch, repo_ref, since};
+use super::util::now_ms;
 use super::workspaces::WorkspaceAttention;
 use super::SeanceApp;
 
@@ -72,6 +77,57 @@ fn chip_label(link: &PrLink, with_org: bool) -> String {
     }
 }
 
+/// Multi-line hover tooltip for one PR chip: full URL, then the poller's read
+/// (state/draft/ci/review) and the two clocks (age, last human touch). Pure —
+/// the render half just paints these lines.
+pub(super) fn pr_tooltip_lines(link: &PrLink, with_org: bool, now: u64) -> Vec<String> {
+    let mut out = vec![repo_ref(&link.url, with_org), link.url.clone()];
+    let Some(st) = link.status.as_ref() else {
+        out.push("no poller status yet".into());
+        return out;
+    };
+    let mut state = if st.state.is_empty() {
+        "state unknown".to_string()
+    } else {
+        st.state.clone()
+    };
+    if st.is_draft {
+        state.push_str(" · draft");
+    }
+    out.push(state);
+    if let Some(ci) = st.ci.as_deref() {
+        out.push(format!("ci {ci} {}", ci_glyph(Some(ci))).trim_end().into());
+    }
+    if let Some(review) = st.review.as_deref() {
+        out.push(format!("review {review}"));
+    }
+    if let Some(age) = since(now, st.opened_ms) {
+        out.push(format!("opened {age} ago"));
+    }
+    if let Some((word, ms)) = latest_touch(st.last_review_ms, st.last_comment_ms) {
+        if let Some(rel) = since(now, ms) {
+            out.push(format!("last {word} {rel} ago"));
+        }
+    }
+    out
+}
+
+/// Tooltip builder for a set of lines (gpui-component `Tooltip::element`).
+fn tip_lines_view(
+    lines: Vec<String>,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    move |window, cx| {
+        let lines = lines.clone();
+        gpui_component::tooltip::Tooltip::element(move |_, _| {
+            div()
+                .flex()
+                .flex_col()
+                .children(lines.iter().map(|l| div().child(l.clone())))
+        })
+        .build(window, cx)
+    }
+}
+
 impl SeanceApp {
     /// This window's mirror of the daemon-owned link list for `ws`.
     pub(super) fn pr_links_for(&self, ws: &str) -> &[PrLink] {
@@ -89,23 +145,27 @@ impl SeanceApp {
         )
     }
 
-    /// Header strip: chip for the selected workspace's most recent PR link,
-    /// plus (when >1) a `▾` popover listing every link and a clear affordance.
-    /// Renders nothing at all when the circle has no links.
+    /// Header strip: one chip per PR link on the selected circle, most recent
+    /// first. Left-click opens the PR, hover shows the details tooltip,
+    /// right-click opens the per-chip context menu. Renders nothing at all when
+    /// the circle has no links.
     pub(super) fn render_pr_chip(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let Some(ws) = self.selected_workspace.clone() else {
             return div().flex_none().into_any_element();
         };
         let links = self.pr_links_for(&ws);
-        let Some(latest) = links.last() else {
+        if links.is_empty() {
             return div().flex_none().into_any_element();
-        };
-        let count = links.len();
+        }
         let with_org = self.pr_links_span_orgs();
-        let url = latest.url.clone();
-        let open_url = url.clone();
-        let expanded = self.pr_menu_open;
-        let mut row = div()
+        let now = now_ms();
+        // Most recent link leftmost (the daemon appends newest last).
+        let chips: Vec<gpui::AnyElement> = links
+            .iter()
+            .rev()
+            .map(|l| self.render_pr_link_chip(&ws, l, with_org, now, cx))
+            .collect();
+        div()
             .id("pr-strip")
             .flex_none()
             .w_full()
@@ -113,159 +173,60 @@ impl SeanceApp {
             .pt_1()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .gap_1()
-            .child(
-                div()
-                    .id("pr-chip")
-                    .flex_none()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(SeancePalette::border())
-                    .bg(SeancePalette::surface())
-                    .text_xs()
-                    .text_color(link_color(latest))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(SeancePalette::border()))
-                    .tooltip(tip_s(url.clone()))
-                    .on_click(cx.listener(move |_this, _, _, _| {
-                        crate::sysopen::open_detached(&open_url);
-                    }))
-                    .child(chip_label(latest, with_org)),
-            );
-        if count > 1 {
-            row = row.child(
-                div()
-                    .id("pr-more")
-                    .flex_none()
-                    .px_1()
-                    .py_0p5()
-                    .rounded_md()
-                    .text_xs()
-                    .text_color(SeancePalette::text_dim())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(SeancePalette::border()))
-                    .tooltip(tip_s(format!("{count} PR links")))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.pr_menu_open = !this.pr_menu_open;
-                        cx.notify();
-                    }))
-                    .child(if expanded { "▴" } else { "▾" }),
-            );
-        }
-        if !(expanded && count > 1) {
-            return row.into_any_element();
-        }
-        let ws_for_clear = ws.clone();
-        let rows: Vec<gpui::AnyElement> = links
-            .iter()
-            .rev()
-            .map(|l| {
-                let target = l.url.clone();
-                let drop_url = l.url.clone();
-                let ws_for_drop = ws.clone();
-                let group = SharedString::from(format!("pr-item-grp-{}", l.url));
-                let state = l
-                    .status
-                    .as_ref()
-                    .map(|s| s.state.clone())
-                    .unwrap_or_default();
-                div()
-                    .id(SharedString::from(format!("pr-item-{}", l.url)))
-                    .group(group.clone())
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(link_color(l))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(SeancePalette::border()))
-                    .tooltip(tip_s(l.url.clone()))
-                    .on_click(cx.listener(move |_this, _, _, _| {
-                        crate::sysopen::open_detached(&target);
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(if state.is_empty() {
-                                chip_label(l, with_org)
-                            } else {
-                                format!("{} · {state}", chip_label(l, with_org))
-                            }),
-                    )
-                    .child(
-                        // Per-row remove ✕, revealed on row hover like the
-                        // sidebar banish ×.
-                        div()
-                            .id(SharedString::from(format!("pr-item-x-{}", l.url)))
-                            .flex_none()
-                            .px_1()
-                            .rounded_sm()
-                            .text_color(gpui::transparent_black())
-                            .group_hover(group, |s| s.text_color(SeancePalette::text_faint()))
-                            .hover(|s| {
-                                s.text_color(SeancePalette::danger())
-                                    .bg(SeancePalette::surface())
-                            })
-                            .cursor_pointer()
-                            .tooltip(tip(PR_REMOVE_TIP))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.remove_pr_link(&ws_for_drop, &drop_url, cx);
-                                cx.stop_propagation();
-                            }))
-                            .child("✕"),
-                    )
-                    .into_any_element()
-            })
-            .chain(std::iter::once(
-                div()
-                    .id("pr-clear")
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .text_xs()
-                    .text_color(SeancePalette::text_faint())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(SeancePalette::border()))
-                    .tooltip(tip_s("drop every PR link on this circle"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.clear_pr_links(&ws_for_clear, cx);
-                    }))
-                    .child("clear PR links")
-                    .into_any_element(),
-            ))
-            .collect();
+            .children(chips)
+            .into_any_element()
+    }
+
+    /// One chip: open on click, details on hover, actions on right-click.
+    fn render_pr_link_chip(
+        &self,
+        ws: &str,
+        link: &PrLink,
+        with_org: bool,
+        now: u64,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let url = link.url.clone();
+        let open_url = url.clone();
+        let tip_lines = pr_tooltip_lines(link, with_org, now);
+        let menu_url = url.clone();
+        let menu_ws = ws.to_string();
         div()
+            .id(SharedString::from(format!("pr-chip-{url}")))
             .flex_none()
-            .w_full()
-            .flex()
-            .flex_col()
-            .child(row)
-            .child(
-                div()
-                    .id("pr-menu")
-                    .flex_none()
-                    .mx_1()
-                    .mt_0p5()
-                    .w(px(320.))
-                    .flex()
-                    .flex_col()
-                    .gap_0p5()
-                    .p_1()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(SeancePalette::border())
-                    .bg(SeancePalette::bg_elevated())
-                    .children(rows),
-            )
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(SeancePalette::border())
+            .bg(SeancePalette::surface())
+            .text_xs()
+            .text_color(link_color(link))
+            .cursor_pointer()
+            .hover(|s| s.bg(SeancePalette::border()))
+            .tooltip(tip_lines_view(tip_lines))
+            .on_click(cx.listener(move |_this, _, _, _| {
+                crate::sysopen::open_detached(&open_url);
+            }))
+            .context_menu(move |menu, _, _| {
+                menu.menu("open PR", Box::new(ActOpenPrLink(menu_url.clone())))
+                    .menu(
+                        PR_REMOVE_TIP,
+                        Box::new(ActRemovePrLink {
+                            url: menu_url.clone(),
+                            workspace: menu_ws.clone(),
+                        }),
+                    )
+                    .separator()
+                    .menu(
+                        "clear all PR refs",
+                        Box::new(ActClearPrLinks(menu_ws.clone())),
+                    )
+            })
+            .child(chip_label(link, with_org))
             .into_any_element()
     }
 
@@ -285,7 +246,6 @@ impl SeanceApp {
         let left = without_url(self.pr_links_for(ws), url);
         if left.is_empty() {
             self.pr_links.remove(ws);
-            self.pr_menu_open = false;
         } else {
             self.pr_links.insert(ws.to_string(), left);
         }
@@ -294,7 +254,7 @@ impl SeanceApp {
 
     /// `pr-link clear <workspace>` over the GUI's ctl seam. The daemon persists
     /// and pushes State back, which re-seeds our mirror.
-    fn clear_pr_links(&mut self, ws: &str, cx: &mut Context<Self>) {
+    pub(super) fn clear_pr_links(&mut self, ws: &str, cx: &mut Context<Self>) {
         let _ = self.client.send(GuiRequest::Ctl(
             seance_core::control::ControlRequest::PrLinkClear {
                 url: None,
@@ -304,7 +264,6 @@ impl SeanceApp {
             },
         ));
         self.pr_links.remove(ws);
-        self.pr_menu_open = false;
         cx.notify();
     }
 }
@@ -359,6 +318,48 @@ mod tests {
             Some(WorkspaceAttention::NeedsHuman)
         );
         assert_eq!(pr_attention(&[link("u/pull/1", Some("weird"))]), None);
+    }
+
+    #[test]
+    fn tooltip_lines_carry_url_state_and_clocks() {
+        let mut l = link("https://github.com/o/r/pull/42", Some("needs"));
+        {
+            let st = l.status.as_mut().unwrap();
+            st.is_draft = true;
+            st.ci = Some("fail".into());
+            st.review = Some("changes".into());
+            st.opened_ms = 1_000;
+            st.last_review_ms = 2_000;
+            st.last_comment_ms = 1_500;
+        }
+        let now = 2_000 + 3 * 3_600_000;
+        assert_eq!(
+            pr_tooltip_lines(&l, false, now),
+            vec![
+                "r#42".to_string(),
+                "https://github.com/o/r/pull/42".into(),
+                "open · draft".into(),
+                "ci fail ✗".into(),
+                "review changes".into(),
+                format!(
+                    "opened {} ago",
+                    super::super::workspaces::rel_label(now - 1_000)
+                ),
+                "last review 3h ago".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tooltip_lines_degrade_without_a_poller_status() {
+        assert_eq!(
+            pr_tooltip_lines(&link("https://github.com/o/r/pull/7", None), true, 9),
+            vec![
+                "o/r#7".to_string(),
+                "https://github.com/o/r/pull/7".into(),
+                "no poller status yet".into(),
+            ]
+        );
     }
 
     #[test]

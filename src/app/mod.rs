@@ -208,7 +208,6 @@ pub struct SeanceApp {
     /// a pure mirror of `WorkspaceMeta.pr_links`, rebuilt on every State.
     pr_links: std::collections::HashMap<String, Vec<seance_core::protocol::PrLink>>,
     /// Header-chip popover listing every PR link of the selected circle.
-    pr_menu_open: bool,
     /// Full-content PR board overlay (sidebar `PRs (N)` button).
     pr_board: bool,
     /// Render-safe cache of daemon-side files (pad sidecars, phone binds,
@@ -393,7 +392,6 @@ impl SeanceApp {
             quicklaunch_editor: None,
             gui_menu_open: false,
             pr_links: std::collections::HashMap::new(),
-            pr_menu_open: false,
             pr_board: false,
             remote_cache,
             render_probe: RenderProbe::default(),
@@ -2285,6 +2283,15 @@ impl Render for SeanceApp {
             }))
             .on_action(cx.listener(|_this, act: &ActShareReplay, _, _cx| {
                 share_replay_open(&act.0);
+            }))
+            .on_action(cx.listener(|_this, act: &ActOpenPrLink, _, _cx| {
+                crate::sysopen::open_detached(&act.0);
+            }))
+            .on_action(cx.listener(|this, act: &ActRemovePrLink, _, cx| {
+                this.remove_pr_link(&act.workspace.clone(), &act.url.clone(), cx);
+            }))
+            .on_action(cx.listener(|this, act: &ActClearPrLinks, _, cx| {
+                this.clear_pr_links(&act.0.clone(), cx);
             }))
             .on_action(cx.listener(|this, act: &ActParkWorkspace, window, cx| {
                 this.park_workspace(&act.0.clone(), window, cx);

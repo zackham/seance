@@ -210,8 +210,19 @@ input:focus {
 }
 /* PR chip: selected circle's most recent scraped PR, colored by the poller's
    attention verdict (same palette as the sidebar `.ws-att` badges). */
-.pr-chip,
-.pr-chip-more {
+.pr-chips {
+  flex: 0 1 auto;
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.pr-chips::-webkit-scrollbar {
+  display: none;
+}
+.pr-chip {
   flex: 0 0 auto;
   background: none;
   border: 1px solid var(--border);
@@ -220,11 +231,11 @@ input:focus {
   font: inherit;
   font-size: var(--fs-xs);
   line-height: 18px;
+  white-space: nowrap;
   color: var(--text-dim);
   cursor: pointer;
 }
-.pr-chip:hover,
-.pr-chip-more:hover {
+.pr-chip:hover {
   color: var(--text);
 }
 .pr-chip.needs {
@@ -235,9 +246,26 @@ input:focus {
   color: var(--success);
   border-color: var(--success);
 }
-.pr-chip-more {
-  padding: 0 4px;
-  margin-left: -2px;
+/* Hover details popover. pointer-events:none — it can never steal the hover,
+   so the chip's mouseleave is the only thing that closes it (no flicker). */
+.pr-tip {
+  position: fixed;
+  z-index: 1100;
+  pointer-events: none;
+  max-width: 420px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  white-space: nowrap;
+}
+.pr-tip-url {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .tb-btn.active {
   color: var(--flame);
