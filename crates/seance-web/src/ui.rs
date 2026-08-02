@@ -101,7 +101,8 @@ use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{Document, Element, HtmlInputElement, KeyboardEvent, MouseEvent, Window};
 
-use seance_core::protocol::{FsOp, GuiRequest, PaneInfo};
+use seance_core::control::ControlRequest;
+use seance_core::protocol::{FsOp, GuiRequest, PaneInfo, PrLink};
 
 use crate::app_api::Actions;
 use crate::menus::{close_menu, open_menu, MenuEntry};
@@ -419,7 +420,7 @@ impl Chrome {
             .clone()
             .or_else(|| active.first().cloned());
 
-        self.build_topbar(selected.as_deref())?;
+        self.build_topbar(state, selected.as_deref())?;
         self.build_sidebar(state, &active, &parked, selected.as_deref())?;
         self.build_tiles(state, selected.as_deref())?;
         self.render_asks(state)?;
@@ -430,12 +431,15 @@ impl Chrome {
     }
 
     /// Slim status strip. WEB DIVERGENCE #4: native has no topbar.
-    fn build_topbar(&mut self, selected: Option<&str>) -> Result<(), JsValue> {
+    fn build_topbar(&mut self, state: &ClientState, selected: Option<&str>) -> Result<(), JsValue> {
         let doc = self.doc.clone();
         self.topbar.set_inner_html("");
 
         let title = text_el(&doc, "div", "tb-title", selected.unwrap_or("no workspace"))?;
         self.topbar.append_child(&title)?;
+        if let Some(ws) = selected {
+            self.build_pr_chip(state, ws)?;
+        }
         self.topbar
             .append_child(mk(&doc, "div", "tb-spacer")?.unchecked_ref())?;
 
@@ -461,6 +465,53 @@ impl Chrome {
         // Re-apply the last known connection status to the fresh nodes.
         let (label, ok) = self.conn.clone();
         self.paint_conn(&label, ok);
+        Ok(())
+    }
+
+    /// PR chip for the selected circle's MOST RECENT link: `#123 <label>`,
+    /// colored by the poller's attention verdict. Click opens the PR; a `⌄`
+    /// caret (or right-click on the chip) lists every link + "clear PR links".
+    fn build_pr_chip(&mut self, state: &ClientState, ws: &str) -> Result<(), JsValue> {
+        let links: Vec<PrLink> = state.pr_links(ws).to_vec();
+        let Some(latest) = links.last().cloned() else {
+            return Ok(());
+        };
+        let doc = self.doc.clone();
+        let status = latest.status.clone();
+        let att = status.as_ref().and_then(|s| s.attention.as_deref());
+        let class = match att {
+            Some("needs") => "pr-chip needs",
+            Some("done") => "pr-chip done",
+            _ => "pr-chip",
+        };
+        let chip = text_el(&doc, "button", class, &pr_chip_text(&latest))?;
+        chip.set_id("pr-chip");
+        chip.set_attribute("title", &latest.url)?;
+        self.topbar.append_child(&chip)?;
+        {
+            let url = latest.url.clone();
+            bind_click(&chip, &mut self.structural, move |_| open_url(&url))?;
+        }
+        {
+            let all = links.clone();
+            let actions = self.actions.clone();
+            let w = ws.to_string();
+            bind_ctx(&chip, &mut self.structural, move |ev| {
+                ev.prevent_default();
+                open_pr_menu(&actions, &w, &all, &ev);
+            })?;
+        }
+        if links.len() > 1 {
+            let more = text_el(&doc, "button", "pr-chip-more", "⌄")?;
+            more.set_id("pr-chip-more");
+            more.set_attribute("title", &format!("{} PR links", links.len()))?;
+            self.topbar.append_child(&more)?;
+            let actions = self.actions.clone();
+            let w = ws.to_string();
+            bind_click(&more, &mut self.structural, move |ev| {
+                open_pr_menu(&actions, &w, &links, &ev);
+            })?;
+        }
         Ok(())
     }
 
@@ -2332,6 +2383,50 @@ fn gui_menu_render(
 fn need(doc: &Document, id: &str) -> Result<Element, JsValue> {
     doc.get_element_by_id(id)
         .ok_or_else(|| JsValue::from_str(&format!("missing #{id} in index.html")))
+}
+
+/// `#123 approved ✓` (label omitted when the poller hasn't spoken yet).
+fn pr_chip_text(link: &PrLink) -> String {
+    let num = crate::state::pr_number(&link.url)
+        .map(|n| format!("#{n}"))
+        .unwrap_or_else(|| "PR".to_string());
+    let label = link.status.as_ref().map(|s| s.label.trim()).unwrap_or("");
+    if label.is_empty() {
+        num
+    } else {
+        format!("{num} {label}")
+    }
+}
+
+/// New tab, never navigating away from a live session.
+fn open_url(url: &str) {
+    if let Some(win) = web_sys::window() {
+        let _ = win.open_with_url_and_target(url, "_blank");
+    }
+}
+
+/// All links for the circle, each clickable, plus the clear affordance.
+fn open_pr_menu(actions: &Rc<dyn Actions>, ws: &str, links: &[PrLink], ev: &MouseEvent) {
+    let mut entries: Vec<MenuEntry> = Vec::new();
+    // Most recent first in the list (the chip's link on top).
+    for link in links.iter().rev() {
+        let url = link.url.clone();
+        entries.push(MenuEntry::item(pr_chip_text(link), move || open_url(&url)));
+    }
+    entries.push(MenuEntry::Separator);
+    {
+        let a = actions.clone();
+        let w = ws.to_string();
+        entries.push(MenuEntry::danger("clear PR links", move || {
+            a.send(GuiRequest::Ctl(ControlRequest::PrLinkClear {
+                url: None,
+                workspace: Some(w),
+                scope: None,
+                from: Some("web".into()),
+            }))
+        }));
+    }
+    open_menu(ev.client_x() as f64, ev.client_y() as f64, entries);
 }
 
 fn mk(doc: &Document, tag: &str, class: &str) -> Result<Element, JsValue> {

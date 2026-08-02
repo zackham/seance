@@ -21,6 +21,26 @@ pub(super) fn rel_label(delta_ms: u64) -> String {
 }
 use super::{RenameTarget, SeanceApp};
 
+/// Cycling order for ctrl+page: the active set ordered by `workspace_order`
+/// (the daemon's stable creation order), with anything unknown to that order
+/// appended alphabetically. Sidebar display order is untouched.
+pub(super) fn stable_ring(active: &[String], order: &[String]) -> Vec<String> {
+    let mut known: Vec<&String> = Vec::new();
+    let mut rest: Vec<&String> = Vec::new();
+    for ws in order {
+        if active.contains(ws) && !known.contains(&ws) {
+            known.push(ws);
+        }
+    }
+    for ws in active {
+        if !known.contains(&ws) && !rest.contains(&ws) {
+            rest.push(ws);
+        }
+    }
+    rest.sort();
+    known.into_iter().chain(rest).cloned().collect()
+}
+
 /// Badge on an *inactive* workspace header in the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WorkspaceAttention {
@@ -352,10 +372,18 @@ impl SeanceApp {
         if needs {
             return Some(WorkspaceAttention::NeedsHuman);
         }
+        // A live working spinner outranks PR attention — an agent actively in
+        // the circle is usually already on the red PR; the chip stays visible
+        // regardless. On idle circles a `needs` PR resurfaces the row exactly
+        // like an agent asking for help (web client mirrors this order).
         if self.workspace_has_working_agent(workspace, cx) {
             return Some(WorkspaceAttention::Working);
         }
-        self.workspace_unread.get(workspace).copied()
+        let pr = super::prlinks::pr_attention(self.pr_links_for(workspace));
+        if pr == Some(WorkspaceAttention::NeedsHuman) {
+            return Some(WorkspaceAttention::NeedsHuman);
+        }
+        self.workspace_unread.get(workspace).copied().or(pr)
     }
 
     /// Sidebar right-edge label: relative time since the last pane output in
@@ -468,6 +496,10 @@ impl SeanceApp {
         }
         // Selecting a circle clears sticky "done/needs" unread — does NOT bump touch.
         self.workspace_unread.remove(workspace);
+        // The PR popover belongs to the circle it was opened on.
+        if changed {
+            self.pr_menu_open = false;
+        }
         // When entering a circle that was off-screen, zero local revs for its
         // panes so the daemon's full flush can't be dropped as "stale". The
         // daemon also sends FULL frames on workspace change.
@@ -531,8 +563,10 @@ impl SeanceApp {
         cx: &mut Context<Self>,
     ) {
         // Parked circles are deliberately out of the rotation — that's the
-        // point of parking them.
-        let list = self.active_workspaces(cx);
+        // point of parking them. The ring is STABLE (creation order, alpha
+        // fallback): the sidebar's recency sort would make ctrl+page
+        // non-monotonic, since selecting bumps recency.
+        let list = stable_ring(&self.active_workspaces(cx), &self.workspace_order);
         if list.is_empty() {
             return;
         }
@@ -628,5 +662,43 @@ impl SeanceApp {
         }
         let _ = self.client.kill_workspace(workspace);
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stable_ring;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn ring_follows_workspace_order_not_the_display_sort() {
+        let active = v(&["c", "a", "b"]); // recency-sorted sidebar order
+        let order = v(&["a", "b", "c", "d"]);
+        assert_eq!(stable_ring(&active, &order), v(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn ring_appends_unordered_workspaces_alphabetically() {
+        let active = v(&["zeta", "b", "alpha"]);
+        let order = v(&["b"]);
+        assert_eq!(stable_ring(&active, &order), v(&["b", "alpha", "zeta"]));
+    }
+
+    #[test]
+    fn ring_is_stable_across_recency_reshuffles() {
+        let order = v(&["a", "b", "c"]);
+        let first = stable_ring(&v(&["a", "b", "c"]), &order);
+        let after_select = stable_ring(&v(&["b", "c", "a"]), &order);
+        assert_eq!(first, after_select);
+    }
+
+    #[test]
+    fn ring_drops_parked_and_duplicate_order_entries() {
+        let active = v(&["a", "c"]);
+        let order = v(&["a", "b", "a", "c"]);
+        assert_eq!(stable_ring(&active, &order), v(&["a", "c"]));
     }
 }

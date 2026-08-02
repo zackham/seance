@@ -34,6 +34,7 @@ mod layout;
 mod overview;
 mod pads;
 mod palette;
+mod prlinks;
 mod quicklaunch;
 mod sidebar;
 mod tiles;
@@ -202,6 +203,11 @@ pub struct SeanceApp {
     quicklaunch_editor: Option<quicklaunch::QuickLaunchEditor>,
     /// `✦` popover: census of the GUI windows attached to this daemon.
     gui_menu_open: bool,
+    /// Daemon-scraped PR links per workspace (most-recently-seen LAST) —
+    /// a pure mirror of `WorkspaceMeta.pr_links`, rebuilt on every State.
+    pr_links: std::collections::HashMap<String, Vec<seance_core::protocol::PrLink>>,
+    /// Header-chip popover listing every PR link of the selected circle.
+    pr_menu_open: bool,
     /// Render-safe cache of daemon-side files (pad sidecars, phone binds,
     /// prompt library) — refreshed by a ~2s background loop.
     remote_cache: Arc<crate::remote_cache::RemoteCache>,
@@ -383,6 +389,8 @@ impl SeanceApp {
             quicklaunch_checked: None,
             quicklaunch_editor: None,
             gui_menu_open: false,
+            pr_links: std::collections::HashMap::new(),
+            pr_menu_open: false,
             remote_cache,
             render_probe: RenderProbe::default(),
         };
@@ -686,7 +694,13 @@ impl SeanceApp {
                 // Daemon-owned activity clocks are the durable copy: seed the
                 // local mirrors with a MAX merge (both are unix ms, so they
                 // compare directly). Local stamping stays for instant feedback.
+                // pr_links arrive for every known workspace: rebuild the
+                // mirror wholesale so cleared/renamed circles drop out.
+                let mut links = std::collections::HashMap::new();
                 for m in workspace_meta {
+                    if !m.pr_links.is_empty() {
+                        links.insert(m.workspace.clone(), m.pr_links.clone());
+                    }
                     if m.last_output_ms > 0 {
                         let cur = self
                             .workspace_activity
@@ -705,6 +719,7 @@ impl SeanceApp {
                         }
                     }
                 }
+                self.pr_links = links;
                 // active_slug from daemon; repair if missing / not in selected
                 // workspace. Keyboard recovery is render-side (ensure_keyboard_focus)
                 // so we don't steal focus from whisper / rename / palette here.
@@ -2199,6 +2214,7 @@ impl Render for SeanceApp {
             .collect();
         let shelf_el = self.render_minimize_shelf(active, cx).into_any_element();
         let stage_el = self.render_stage_strip(active, cx).into_any_element();
+        let pr_el = self.render_pr_chip(cx);
         let t2 = std::time::Instant::now();
         let tiles_el = self.render_tiles(active, cx).into_any_element();
         let t3 = std::time::Instant::now();
@@ -2365,6 +2381,7 @@ impl Render for SeanceApp {
                     .flex_col()
                     .children(asks_el)
                     .child(shelf_el)
+                    .child(pr_el)
                     .child(stage_el)
                     .child(tiles_el),
             )

@@ -594,7 +594,8 @@ impl App {
     /// that is the point of parking them.
     fn cycle_workspace(self: &Rc<Self>, dir: i32) {
         let st = self.state.borrow();
-        let wss = st.active_workspaces();
+        // Stable ring (0.13): daemon order, not the recency-sorted sidebar.
+        let wss = st.cycle_ring();
         drop(st);
         if wss.is_empty() {
             return;

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use base64::Engine as _;
-use seance_core::protocol::{AskInfo, GuiEvent, PaneInfo, StatusInfo, WindowInfo};
+use seance_core::protocol::{AskInfo, GuiEvent, PaneInfo, PrLink, StatusInfo, WindowInfo};
 use seance_core::snapshot::{decode_grid_bin_onto, GridSnapshot};
 
 use crate::subs::SubPrefs;
@@ -85,6 +85,9 @@ pub struct ClientState {
     pub workspace_activity: HashMap<String, f64>,
     /// When each workspace entered the working band (stable sort key there).
     pub workspace_working_since: HashMap<String, f64>,
+    /// PR links per workspace, daemon-owned (`WorkspaceMeta.pr_links`),
+    /// most-recently-seen LAST. Statuses come from the external poller.
+    pub workspace_pr_links: HashMap<String, Vec<PrLink>>,
     /// `Date.now() - performance.now()` at boot. Both local clocks above live
     /// in the `performance.now()` domain; the daemon's are unix ms, so every
     /// ingested daemon stamp is converted with `perf = unix - offset`. Set
@@ -168,6 +171,13 @@ pub fn rel_label(delta_ms: f64) -> String {
         3600..=86_399 => format!("{}h", s / 3600),
         _ => format!("{}d", s / 86_400),
     }
+}
+
+/// `…/pull/123` → `123`. Tolerates trailing path/query (`/files`, `#issue`).
+pub fn pr_number(url: &str) -> Option<u64> {
+    let tail = url.split("/pull/").nth(1)?;
+    let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 /// Busy TUI title: braille spinner (U+2800..=U+28FF) as first non-space char —
@@ -312,7 +322,59 @@ impl ClientState {
         if self.workspace_has_working_agent(workspace) {
             return Some(Attention::Working);
         }
+        // PR verdicts from the external poller: a red PR resurfaces a parked
+        // circle exactly like an agent asking for help. Live work still wins.
+        if let Some(a) = self.pr_attention(workspace) {
+            return Some(a);
+        }
         self.workspace_unread.get(workspace).copied()
+    }
+
+    /// PR links for a workspace, most-recently-seen LAST.
+    pub fn pr_links(&self, workspace: &str) -> &[PrLink] {
+        self.workspace_pr_links
+            .get(workspace)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The chip's link: the most recently seen one.
+    pub fn latest_pr_link(&self, workspace: &str) -> Option<&PrLink> {
+        self.pr_links(workspace).last()
+    }
+
+    /// Attention contributed by this workspace's PR links: any `needs` wins,
+    /// else any `done`.
+    pub fn pr_attention(&self, workspace: &str) -> Option<Attention> {
+        let mut done = false;
+        for l in self.pr_links(workspace) {
+            match l.status.as_ref().and_then(|s| s.attention.as_deref()) {
+                Some("needs") => return Some(Attention::NeedsHuman),
+                Some("done") => done = true,
+                _ => {}
+            }
+        }
+        done.then_some(Attention::Done)
+    }
+
+    /// Stable ctrl+PageUp/Down ring: the ACTIVE set in daemon
+    /// `workspace_order` (alpha for anything not in it), NOT the
+    /// recency-sorted sidebar list — selection bumps made that ring
+    /// non-monotonic. Display sort is unchanged.
+    pub fn cycle_ring(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .workspaces()
+            .into_iter()
+            .filter(|w| self.subs.is_active(w))
+            .collect();
+        let rank = |ws: &str| {
+            self.workspace_order
+                .iter()
+                .position(|o| o == ws)
+                .unwrap_or(usize::MAX)
+        };
+        out.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+        out
     }
 
     /// Bump recency (human typing here / context-menu touch / fresh spawn).
@@ -487,9 +549,17 @@ impl ClientState {
                 // Daemon-owned clocks are the durable copy — mirror them
                 // (converted to the perf domain, max-merged so a local stamp
                 // from a frame we already painted is never walked back).
+                // pr_links ride on the same meta rows and arrive for EVERY
+                // known workspace, so the map is rebuilt (not merged) — a
+                // cleared list must actually clear.
+                self.workspace_pr_links.clear();
                 for m in workspace_meta {
                     self.merge_activity(&m.workspace, m.last_output_ms);
                     self.merge_touch(&m.workspace, m.last_touch_ms);
+                    if !m.pr_links.is_empty() {
+                        self.workspace_pr_links
+                            .insert(m.workspace.clone(), m.pr_links);
+                    }
                 }
                 // Active/parked bookkeeping: first State seeds the list
                 // (migration), every State folds daemon-side auto-subscribes
@@ -817,6 +887,105 @@ mod tests {
                 "asks":[],"statuses":[],"subscriptions":["lab"]}"#,
         )
         .unwrap()
+    }
+
+    /// Both circles active, `raid` carrying a PR link with `attention`.
+    fn pr_state_event(attention: &str) -> GuiEvent {
+        let att = if attention.is_empty() {
+            "null".to_string()
+        } else {
+            format!("\"{attention}\"")
+        };
+        serde_json::from_str(&format!(
+            r#"{{"event":"state","panes":[
+                {{"kind":"term","name":"r","slug":"r-1","workspace":"raid",
+                 "command":"bash","cwd":"/","tiled":true,"running":true,
+                 "title":null,"scratchpad":"/tmp/r"}}],
+                "selected_workspace":"raid","focused_pane":"r-1",
+                "extra_workspaces":["lab"],"workspace_order":["lab","raid"],
+                "asks":[],"statuses":[],"subscriptions":["lab","raid"],
+                "workspace_meta":[{{"workspace":"raid","last_output_ms":0,
+                  "last_touch_ms":0,"pr_links":[
+                    {{"url":"https://github.com/o/r/pull/7","seen_ms":1,
+                      "status":{{"state":"open","attention":null,
+                        "label":"2 comments","updated_ms":1}}}},
+                    {{"url":"https://github.com/o/r/pull/42","seen_ms":2,
+                      "status":{{"state":"open","attention":{att},
+                        "label":"CI ✗","updated_ms":2}}}}]}}]}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn pr_number_parses_trailing_paths() {
+        assert_eq!(pr_number("https://github.com/o/r/pull/42"), Some(42));
+        assert_eq!(pr_number("https://github.com/o/r/pull/42/files"), Some(42));
+        assert_eq!(pr_number("https://github.com/o/r/issues/42"), None);
+        assert_eq!(pr_number("https://github.com/o/r/pull/x"), None);
+    }
+
+    #[test]
+    fn pr_links_land_per_workspace_most_recent_last() {
+        let mut st = ClientState::default();
+        st.apply_event(pr_state_event("needs"), 0.0);
+        assert_eq!(st.pr_links("raid").len(), 2);
+        assert_eq!(
+            st.latest_pr_link("raid").map(|l| l.url.as_str()),
+            Some("https://github.com/o/r/pull/42")
+        );
+        assert!(st.pr_links("lab").is_empty());
+        // A State with no links must actually clear them (rebuild, not merge).
+        st.apply_event(global_state_event(), 0.0);
+        assert!(st.pr_links("raid").is_empty());
+    }
+
+    #[test]
+    fn pr_attention_needs_beats_done_and_live_work_beats_both() {
+        let mut st = ClientState::default();
+        st.apply_event(pr_state_event("needs"), 0.0);
+        st.subs.mark_seen("raid");
+        assert_eq!(st.pr_attention("raid"), Some(Attention::NeedsHuman));
+        assert_eq!(st.row_attention("raid"), Some(Attention::NeedsHuman));
+
+        st.apply_event(pr_state_event("done"), 0.0);
+        st.subs.mark_seen("raid");
+        assert_eq!(st.row_attention("raid"), Some(Attention::Done));
+
+        // Live working outranks a done PR.
+        st.statuses.insert(
+            "r-1".into(),
+            serde_json::from_str(r#"{"slug":"r-1","state":"working","note":null}"#).unwrap(),
+        );
+        assert_eq!(st.row_attention("raid"), Some(Attention::Working));
+
+        // No verdict at all → no PR-driven badge.
+        st.statuses.clear();
+        st.apply_event(pr_state_event(""), 0.0);
+        st.subs.mark_seen("raid");
+        assert_eq!(st.pr_attention("raid"), None);
+    }
+
+    #[test]
+    fn cycle_ring_is_stable_daemon_order_not_display_order() {
+        let mut st = ClientState::default();
+        st.apply_event(pr_state_event("needs"), 0.0);
+        st.subs.activate("lab");
+        // Display sort is recency-driven: touching `raid` floats it up…
+        st.touch_workspace("raid", 100.0);
+        assert_eq!(
+            st.active_workspaces(),
+            vec!["raid".to_string(), "lab".to_string()]
+        );
+        // …while the cycle ring stays in workspace_order.
+        assert_eq!(st.cycle_ring(), vec!["lab".to_string(), "raid".to_string()]);
+        // Unordered circles fall back to alpha, after the ordered ones.
+        st.extra_workspaces.push("aaa".into());
+        st.subs.activate("aaa");
+        st.workspace_order = vec!["raid".into()];
+        assert_eq!(
+            st.cycle_ring(),
+            vec!["raid".to_string(), "aaa".to_string(), "lab".to_string()]
+        );
     }
 
     #[test]
