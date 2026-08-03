@@ -524,6 +524,9 @@ impl SeanceApp {
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let selected = self.selected_workspace.as_deref() == Some(workspace.as_str());
+        // Drives the menu verb only — the pinned *section* is composed by
+        // `render_sidebar`, so the row itself needs no other special-casing.
+        let pinned = self.subs_pref.is_pinned(&workspace);
         let ws_for_click = workspace.clone();
         let ws_for_group_drop = workspace.clone();
         let ws_for_pane_drop = workspace.clone();
@@ -609,6 +612,12 @@ impl SeanceApp {
                             )
                             .menu("fork workspace ⑂", Box::new(ActForkWorkspace(ws_m.clone())))
                             .menu("share replay…", Box::new(ActShareReplay(ws_m.clone())));
+                        let m = if pinned {
+                            m.menu("unpin", Box::new(ActUnpinWorkspace(ws_m.clone())))
+                        } else {
+                            // Pinning a parked circle activates it too.
+                            m.menu("pin to top", Box::new(ActPinWorkspace(ws_m.clone())))
+                        };
                         let m = if parked {
                             m.menu(
                                 "add to active",
@@ -743,9 +752,10 @@ impl SeanceApp {
         // Ordered groups, INCLUDING empty workspaces (they render with 0 panes).
         // State is global now: the active band renders as it always did, and
         // everything else lands in the collapsed parked group below it.
-        let ordered = self.workspaces(cx);
-        let (active, parked) =
-            crate::subscriptions_pref::partition(&ordered, &self.subs_pref.active);
+        // Pinned circles get their own section at the very top, separated by a
+        // hairline rule; each band carries the same sort.
+        let (pinned, active, parked) = self.workspace_bands(cx);
+        let has_pinned = !pinned.is_empty();
         let parked_n = parked.len();
         let parked_rows: Vec<String> = if self.parked_expanded {
             parked
@@ -833,6 +843,24 @@ impl SeanceApp {
                     .flex()
                     .flex_col()
                     .gap_1()
+                    .children(
+                        pinned
+                            .into_iter()
+                            .map(|ws| self.render_workspace_group(ws, false, cx)),
+                    )
+                    // Divider: same hairline rule as the gui-menu separator.
+                    // NOTE: this is one child of the scroller — `select_workspace`
+                    // offsets its scroll_to_item index by it.
+                    .when(has_pinned, |d| {
+                        d.child(
+                            div()
+                                .mx_2()
+                                .my_1()
+                                .h(px(1.))
+                                .bg(SeancePalette::border())
+                                .into_any_element(),
+                        )
+                    })
                     .children(
                         active
                             .into_iter()

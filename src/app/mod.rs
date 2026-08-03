@@ -1658,6 +1658,12 @@ impl SeanceApp {
                 if let Some(slug) = self.workspace_focus.remove(&old) {
                     self.workspace_focus.insert(new_ws.clone(), slug);
                 }
+                // A rename is not a kill: carry active/seen/pinned across so
+                // the row keeps its band (prune would otherwise drop the old
+                // name and the pin with it).
+                if self.subs_pref.rename(&old, &new_ws) {
+                    self.save_subscriptions();
+                }
                 let _ = self.client.rename_workspace(&old, &new_ws);
             }
         }
@@ -2314,6 +2320,14 @@ impl Render for SeanceApp {
             }))
             .on_action(cx.listener(|this, act: &ActActivateWorkspace, _, cx| {
                 this.activate_workspace(&act.0.clone());
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, act: &ActPinWorkspace, _, cx| {
+                this.pin_workspace(&act.0.clone());
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, act: &ActUnpinWorkspace, _, cx| {
+                this.unpin_workspace(&act.0.clone());
                 cx.notify();
             }))
             .on_action(cx.listener(|this, act: &ActTouchWorkspace, _, cx| {

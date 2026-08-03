@@ -51,6 +51,16 @@ pub struct ActParkWorkspace(pub String);
 #[action(namespace = seance, no_json)]
 pub struct ActActivateWorkspace(pub String);
 
+/// Pin a circle into the sidebar's top section (implies active/`Subscribe`).
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActPinWorkspace(pub String);
+
+/// The inverse: back down into the normal active band, still subscribed.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActUnpinWorkspace(pub String);
+
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]
 pub struct ActRenamePane(pub String);

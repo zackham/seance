@@ -255,6 +255,24 @@ impl ClientState {
             .collect()
     }
 
+    /// The pinned section, rendered ABOVE everything else in the sidebar: the
+    /// pinned subset of the active list, with the same working/idle sort
+    /// applied within it (pins reorder among themselves, they don't freeze).
+    pub fn pinned_workspaces(&self) -> Vec<String> {
+        self.active_workspaces()
+            .into_iter()
+            .filter(|w| self.subs.is_pinned(w))
+            .collect()
+    }
+
+    /// The normal active band under the pinned section: active, not pinned.
+    pub fn unpinned_active_workspaces(&self) -> Vec<String> {
+        self.active_workspaces()
+            .into_iter()
+            .filter(|w| !self.subs.is_pinned(w))
+            .collect()
+    }
+
     /// The collapsed "parked (N)" group: everything else, same sort.
     pub fn parked_workspaces(&self) -> Vec<String> {
         self.workspaces()
@@ -378,11 +396,12 @@ impl ClientState {
     /// Ctrl+PageUp/Down walks EXACTLY the active list the sidebar displays,
     /// read live at each press — pageup/down must always correspond to what
     /// the left sidebar shows (owner decision 2026-08-02; native mirrors).
+    /// With pins that is the pinned section first, then the unpinned band —
+    /// i.e. render order top-to-bottom.
     pub fn displayed_active_ring(&self) -> Vec<String> {
-        self.workspaces()
-            .into_iter()
-            .filter(|w| self.subs.is_active(w))
-            .collect()
+        let mut out = self.pinned_workspaces();
+        out.extend(self.unpinned_active_workspaces());
+        out
     }
 
     /// Bump recency (human typing here / context-menu touch / fresh spawn).
@@ -989,6 +1008,48 @@ mod tests {
             st.displayed_active_ring(),
             vec!["lab".to_string(), "raid".to_string()]
         );
+    }
+
+    #[test]
+    fn pinned_section_floats_above_the_active_band_and_owns_the_ring() {
+        let mut st = ClientState::default();
+        st.apply_event(pr_state_event("needs"), 0.0);
+        st.subs.activate("lab");
+        st.touch_workspace("raid", 100.0);
+        st.touch_workspace("lab", 200.0);
+        // Unpinned order: lab (fresher touch) then raid.
+        assert_eq!(st.unpinned_active_workspaces(), vec!["lab", "raid"]);
+        assert!(st.pinned_workspaces().is_empty());
+
+        // Pin the STALER circle: it jumps the whole band.
+        st.subs.pin("raid");
+        assert_eq!(st.pinned_workspaces(), vec!["raid".to_string()]);
+        assert_eq!(st.unpinned_active_workspaces(), vec!["lab".to_string()]);
+        assert_eq!(
+            st.displayed_active_ring(),
+            vec!["raid".to_string(), "lab".to_string()]
+        );
+        // Ring == pinned ++ unpinned == render order, and nothing is dropped
+        // or duplicated relative to the flat active list.
+        let mut ring = st.displayed_active_ring();
+        let mut active = st.active_workspaces();
+        ring.sort();
+        active.sort();
+        assert_eq!(ring, active);
+    }
+
+    #[test]
+    fn pinned_subset_keeps_the_working_idle_sort_internally() {
+        let mut st = ClientState::default();
+        st.apply_event(pr_state_event("needs"), 0.0);
+        st.subs.activate("lab");
+        st.subs.pin("lab");
+        st.subs.pin("raid");
+        st.touch_workspace("lab", 100.0);
+        st.touch_workspace("raid", 200.0);
+        assert_eq!(st.pinned_workspaces(), vec!["raid", "lab"]);
+        st.touch_workspace("lab", 300.0);
+        assert_eq!(st.pinned_workspaces(), vec!["lab", "raid"]);
     }
 
     #[test]

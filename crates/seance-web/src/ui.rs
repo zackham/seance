@@ -21,8 +21,9 @@
 //!   workspace rows only (glyph `◆` selected / `◈` idle / pulsing `◆` while
 //!   working, `needs`/`done` text badges in their colors, hover `×` banish,
 //!   pane count, full-bleed selected fill, double-click inline rename, per-row
-//!   context menu: touch / rename / fork ⑂ / share replay / park (or "add to
-//!   active" on a parked row) / banish), the collapsed parked group,
+//!   context menu: touch / rename / fork ⑂ / share replay / pin (or "unpin" on
+//!   a pinned row) / park (or "add to active" on a parked row) / banish),
+//!   the pinned section + `.pinned-divider` on top, the collapsed parked group,
 //!   quicklaunch chip strip, host-accounts strip, footer (`+ summon` flex-1
 //!   flame · activity `≋` · help `?` violet).
 //! * **quicklaunch** — daemon-side `~/.config/seance/quicklaunch.json` over the
@@ -47,8 +48,9 @@
 //! 3. **No window-targeted workspace moves.** Workspaces are global
 //!    subscriptions (0.12) — nothing is "sent" anywhere; the ✦ census popover
 //!    is the roster. The sidebar splits into the active list plus a collapsed
-//!    `parked (N)` group (row menus: "park" / "add to active"), persisted per
-//!    browser in `localStorage["seance_active"]`.
+//!    `parked (N)` group, with a pinned subset hoisted into its own section
+//!    above both (row menus: "pin"/"unpin", "park"/"add to active"), persisted
+//!    per browser in `localStorage["seance_active"]`.
 //! 4. **Topbar.** Native has no topbar; the web client needs a permanent
 //!    connection indicator (native is always local) and the latency probe
 //!    toggle, so a slim `#topbar` carries those plus the selected circle's name.
@@ -414,15 +416,17 @@ impl Chrome {
         self.ws_refs.clear();
         self.focused = state.focused_pane.clone();
 
-        let active = state.active_workspaces();
+        let pinned = state.pinned_workspaces();
+        let active = state.unpinned_active_workspaces();
         let parked = state.parked_workspaces();
         let selected = state
             .selected_workspace
             .clone()
+            .or_else(|| pinned.first().cloned())
             .or_else(|| active.first().cloned());
 
         self.build_topbar(state, selected.as_deref())?;
-        self.build_sidebar(state, &active, &parked, selected.as_deref())?;
+        self.build_sidebar(state, &pinned, &active, &parked, selected.as_deref())?;
         self.build_tiles(state, selected.as_deref())?;
         self.render_asks(state)?;
         self.apply_badges(state);
@@ -537,6 +541,7 @@ impl Chrome {
     fn build_sidebar(
         &mut self,
         state: &ClientState,
+        pinned: &[String],
         workspaces: &[String],
         parked: &[String],
         selected: Option<&str>,
@@ -545,13 +550,18 @@ impl Chrome {
         self.sidebar.set_inner_html("");
 
         // `◈+` / quicklaunch uniquify against EVERY known circle, parked too.
-        let all: Vec<String> = workspaces.iter().chain(parked.iter()).cloned().collect();
+        let all: Vec<String> = pinned
+            .iter()
+            .chain(workspaces.iter())
+            .chain(parked.iter())
+            .cloned()
+            .collect();
         self.build_brand(state, &all)?;
 
         let list = mk(&doc, "div", "ws-list")?;
         self.sidebar.append_child(&list)?;
 
-        if workspaces.is_empty() && parked.is_empty() {
+        if pinned.is_empty() && workspaces.is_empty() && parked.is_empty() {
             let empty = mk(&doc, "div", "empty")?;
             empty.append_child(text_el(&doc, "div", "", "no workspaces here")?.unchecked_ref())?;
             {
@@ -561,6 +571,20 @@ impl Chrome {
                 empty.append_child(&hint)?;
             }
             list.append_child(&empty)?;
+        }
+
+        // Pinned section: always at the top, same internal sort, then a rule
+        // separating it from the normal active band.
+        if !pinned.is_empty() {
+            let sect = mk(&doc, "div", "pinned-section")?;
+            sect.set_id("pinned-section");
+            list.append_child(&sect)?;
+            for ws in pinned {
+                self.build_ws_row(&sect, state, ws, selected, false)?;
+            }
+            let divider = mk(&doc, "div", "pinned-divider")?;
+            divider.set_id("pinned-divider");
+            list.append_child(&divider)?;
         }
 
         for ws in workspaces {
@@ -677,6 +701,7 @@ impl Chrome {
     ) -> Result<(), JsValue> {
         let doc = self.doc.clone();
         let is_selected = Some(ws) == selected && !parked;
+        let pinned = state.subs.is_pinned(ws);
         let activity = state.activity_label(ws, self.now_ms());
         let att = state.row_attention(ws);
         let working = matches!(att, Some(Attention::Working));
@@ -803,6 +828,15 @@ impl Chrome {
                     }));
                 }
                 entries.push(MenuEntry::Separator);
+                {
+                    let a = actions.clone();
+                    let w = ws.clone();
+                    entries.push(if pinned {
+                        MenuEntry::item("unpin", move || a.unpin_workspace(&w))
+                    } else {
+                        MenuEntry::item("pin", move || a.pin_workspace(&w))
+                    });
+                }
                 {
                     let a = actions.clone();
                     let w = ws.clone();

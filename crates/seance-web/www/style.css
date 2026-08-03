@@ -583,6 +583,20 @@ input:focus {
   color: var(--text-dim);
 }
 
+/* ── pinned section (always at the top of the rail) ─────────────────── */
+.pinned-section {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pinned-divider {
+  flex: 0 0 auto;
+  height: 0;
+  margin: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
 /* ── parked group (collapsed accordion under the active rows) ───────── */
 .parked-group {
   flex: 0 0 auto;

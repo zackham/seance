@@ -55,6 +55,11 @@ pub trait Actions {
     fn park_workspace(&self, ws: &str);
     /// Parked row menu "add to active": subscribe + promote, without selecting.
     fn activate_workspace(&self, ws: &str);
+    /// Sidebar row menu "pin": move a circle into the pinned section at the top
+    /// of the rail. Pinning a parked circle activates it first.
+    fn pin_workspace(&self, ws: &str);
+    /// Pinned row menu "unpin": back to the normal active band.
+    fn unpin_workspace(&self, ws: &str);
     /// Repaint chrome on the next frame (client-only view state changed —
     /// e.g. the parked accordion opened).
     fn request_rebuild(&self);

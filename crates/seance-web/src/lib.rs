@@ -300,6 +300,31 @@ impl App {
         }
     }
 
+    /// Context menu "pin": into the top section. A parked circle is activated
+    /// (and subscribed) on the way in — pinned implies active.
+    pub fn pin_workspace(self: &Rc<Self>, ws: &str) {
+        let was_active = self.state.borrow().subs.is_active(ws);
+        if !self.state.borrow_mut().subs.pin(ws) {
+            return;
+        }
+        self.persist_subs();
+        if !was_active {
+            self.send(&GuiRequest::Subscribe {
+                workspace: ws.to_string(),
+            });
+        }
+        self.need_rebuild.set(true);
+    }
+
+    /// Context menu "unpin": back into the normal active band (still active).
+    pub fn unpin_workspace(self: &Rc<Self>, ws: &str) {
+        if !self.state.borrow_mut().subs.unpin(ws) {
+            return;
+        }
+        self.persist_subs();
+        self.need_rebuild.set(true);
+    }
+
     /// ctrl+shift+r: inline-rename the selected workspace in the sidebar.
     pub fn begin_selected_workspace_rename(&self) -> bool {
         let ws = match self.state.borrow().selected_workspace.clone() {
@@ -844,6 +869,11 @@ impl Actions for AppActions {
             old: old.into(),
             new: new.into(),
         });
+        // The daemon re-subscribes under the new name; the pin has no such
+        // channel, so carry it here (reconcile prunes the old one).
+        if self.0.state.borrow_mut().subs.rename(old, new) {
+            self.0.persist_subs();
+        }
     }
     fn kill_workspace(&self, ws: &str) {
         self.0.kill_workspace_selecting_neighbor(ws);
@@ -959,6 +989,14 @@ impl Actions for AppActions {
 
     fn activate_workspace(&self, ws: &str) {
         self.0.activate_workspace(ws);
+    }
+
+    fn pin_workspace(&self, ws: &str) {
+        self.0.pin_workspace(ws);
+    }
+
+    fn unpin_workspace(&self, ws: &str) {
+        self.0.unpin_workspace(ws);
     }
 
     fn cycle_workspace(&self, delta: i32) {

@@ -159,14 +159,61 @@ impl SeanceApp {
         cx.notify();
     }
 
-    /// Workspaces in the active band, sidebar display order.
+    /// Pin a circle to the top section (context menu "pin to top"). Pinned
+    /// implies active, so a parked circle is promoted + subscribed here.
+    pub(super) fn pin_workspace(&mut self, ws: &str) {
+        self.park_pending.remove(ws);
+        if self.subs_pref.pin(ws) {
+            self.save_subscriptions();
+        }
+        if !self.subscriptions.iter().any(|s| s == ws) {
+            let _ = self.client.subscribe(ws);
+        }
+    }
+
+    /// Drop a circle out of the pinned section. It stays active — it just
+    /// falls back below the divider into the normal band.
+    pub(super) fn unpin_workspace(&mut self, ws: &str) {
+        if self.subs_pref.unpin(ws) {
+            self.save_subscriptions();
+        }
+    }
+
+    /// The three sidebar bands in display order: (pinned, active-unpinned,
+    /// parked). One sort ([`Self::workspaces`]) applied inside every band.
+    pub(super) fn workspace_bands(
+        &self,
+        cx: &gpui::App,
+    ) -> (Vec<String>, Vec<String>, Vec<String>) {
+        crate::subscriptions_pref::partition3(
+            &self.workspaces(cx),
+            &self.subs_pref.active,
+            &self.subs_pref.pinned,
+        )
+    }
+
+    /// Workspaces in the pinned section, sidebar display order.
+    pub(super) fn pinned_workspaces(&self, cx: &gpui::App) -> Vec<String> {
+        self.workspace_bands(cx).0
+    }
+
+    /// Active-but-unpinned workspaces — the band below the divider.
+    pub(super) fn unpinned_active_workspaces(&self, cx: &gpui::App) -> Vec<String> {
+        self.workspace_bands(cx).1
+    }
+
+    /// Every rendered (non-parked) workspace, top-to-bottom exactly as the
+    /// rail draws it: pinned section first, then the normal active band. This
+    /// is the ctrl+page ring and the neighbour list for park/kill.
     pub(super) fn active_workspaces(&self, cx: &gpui::App) -> Vec<String> {
-        crate::subscriptions_pref::partition(&self.workspaces(cx), &self.subs_pref.active).0
+        let mut out = self.pinned_workspaces(cx);
+        out.extend(self.unpinned_active_workspaces(cx));
+        out
     }
 
     /// Workspaces in the collapsed parked group, same sort as active rows.
     pub(super) fn parked_workspaces(&self, cx: &gpui::App) -> Vec<String> {
-        crate::subscriptions_pref::partition(&self.workspaces(cx), &self.subs_pref.active).1
+        self.workspace_bands(cx).2
     }
 
     /// Badge for a parked row: the normal live attention, or `needs` for a
@@ -466,12 +513,17 @@ impl SeanceApp {
         self.selected_workspace = Some(workspace.to_string());
         // Reveal the selection in the sidebar — ctrl+page cycling can land on
         // a row scrolled out of the rail. Row index = position in display
-        // order (one child per workspace group in the list).
-        if let Some(idx) = self
-            .active_workspaces(cx)
-            .iter()
-            .position(|w| w == workspace)
-        {
+        // order (one child per workspace group in the list), plus one for the
+        // pinned/unpinned divider element when the row sits below it.
+        let (pinned, active, _) = self.workspace_bands(cx);
+        let divider = !pinned.is_empty();
+        let idx = pinned.iter().position(|w| w == workspace).or_else(|| {
+            active
+                .iter()
+                .position(|w| w == workspace)
+                .map(|i| i + pinned.len() + usize::from(divider))
+        });
+        if let Some(idx) = idx {
             self.sidebar_scroll.scroll_to_item(idx);
         }
         // Selecting a circle clears sticky "done/needs" unread — does NOT bump touch.

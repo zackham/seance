@@ -8,8 +8,13 @@
 //! `State` push reconciles (a daemon-side auto-subscribe — spawn, fork, create,
 //! select — folds straight back into the active list).
 //!
-//! Persistence is `localStorage["seance_active"]` = `{"active":[…],"seen":[…]}`
-//! behind the [`SubStore`] seam so the logic stays testable off-wasm.
+//! A subset of the active circles may additionally be **pinned** — rendered in
+//! their own section at the top of the sidebar, above the normal active band.
+//!
+//! Persistence is `localStorage["seance_active"]` =
+//! `{"active":[…],"seen":[…],"pinned":[…]}` behind the [`SubStore`] seam so the
+//! logic stays testable off-wasm (`pinned` is `serde(default)`: blobs written
+//! before pins existed still parse).
 
 use std::collections::HashSet;
 
@@ -28,6 +33,11 @@ pub struct SubPrefs {
     /// `needs` until it is first selected ("ctl spawns parked+needs").
     #[serde(default)]
     pub seen: Vec<String>,
+    /// Circles pinned to their own section at the TOP of the sidebar. A pinned
+    /// circle is always active (pinning a parked one activates it; parking a
+    /// pinned one unpins it). `serde(default)` so pre-pin stored blobs parse.
+    #[serde(default)]
+    pub pinned: Vec<String>,
     /// False until a stored list was loaded or the first `State` seeded one.
     /// Drives the three-valued `Attach.subscriptions` (None = "everything").
     #[serde(skip)]
@@ -71,9 +81,43 @@ impl SubPrefs {
         changed
     }
 
+    pub fn is_pinned(&self, ws: &str) -> bool {
+        self.pinned.iter().any(|w| w == ws)
+    }
+
+    /// Pin a circle to the top section. Pinning implies active (a parked circle
+    /// is promoted). Returns whether anything changed.
+    pub fn pin(&mut self, ws: &str) -> bool {
+        let mut changed = self.activate(ws);
+        if !self.is_pinned(ws) {
+            self.pinned.push(ws.to_string());
+            changed = true;
+        }
+        changed
+    }
+
+    /// Drop the pin, leaving the circle active. Returns whether anything changed.
+    pub fn unpin(&mut self, ws: &str) -> bool {
+        let before = self.pinned.len();
+        self.pinned.retain(|w| w != ws);
+        self.pinned.len() != before
+    }
+
+    /// Carry per-GUI state across a workspace rename (the daemon re-subscribes
+    /// under the new name; the pin has no such channel).
+    pub fn rename(&mut self, old: &str, new: &str) -> bool {
+        let mut changed = false;
+        if self.is_pinned(old) {
+            self.unpin(old);
+            changed = self.pin(new) || changed;
+        }
+        changed
+    }
+
     /// Remove from active, keeping it seen. Returns whether anything changed.
     pub fn park(&mut self, ws: &str) -> bool {
-        let mut changed = false;
+        // Parking a pinned circle drops the pin.
+        let mut changed = self.unpin(ws);
         if self.is_active(ws) {
             self.active.retain(|w| w != ws);
             changed = true;
@@ -109,7 +153,7 @@ impl SubPrefs {
     /// knows about drop out of both lists. Returns whether anything changed.
     pub fn reconcile(&mut self, subscriptions: &[String], known: &[String]) -> bool {
         let known: HashSet<&str> = known.iter().map(String::as_str).collect();
-        let before = (self.active.clone(), self.seen.clone());
+        let before = (self.active.clone(), self.seen.clone(), self.pinned.clone());
         for ws in subscriptions {
             if !self.is_active(ws) {
                 self.active.push(ws.clone());
@@ -117,7 +161,11 @@ impl SubPrefs {
         }
         self.active.retain(|w| known.contains(w.as_str()));
         self.seen.retain(|w| known.contains(w.as_str()));
-        (self.active.clone(), self.seen.clone()) != before
+        // Killed circles drop their pin; a pin can never outlive the active set.
+        let active = &self.active;
+        self.pinned
+            .retain(|w| known.contains(w.as_str()) && active.iter().any(|a| a == w));
+        (self.active.clone(), self.seen.clone(), self.pinned.clone()) != before
     }
 }
 
@@ -231,6 +279,75 @@ mod tests {
         assert!(prefs.activate("web"));
         assert!(prefs.is_active("web"));
         assert!(!prefs.activate("web"));
+    }
+
+    #[test]
+    fn pin_implies_active_and_unpin_leaves_it_active() {
+        let mut prefs = SubPrefs::default();
+        prefs.seed(&v(&["lab"]), &v(&["lab", "raid"]));
+        // Pinning a PARKED circle activates it too.
+        assert!(prefs.pin("raid"));
+        assert!(prefs.is_pinned("raid"));
+        assert!(prefs.is_active("raid"));
+        assert!(prefs.has_seen("raid"));
+        // Idempotent.
+        assert!(!prefs.pin("raid"));
+        // Unpin keeps it active.
+        assert!(prefs.unpin("raid"));
+        assert!(!prefs.is_pinned("raid"));
+        assert!(prefs.is_active("raid"));
+        assert!(!prefs.unpin("raid"));
+    }
+
+    #[test]
+    fn park_unpins() {
+        let mut prefs = SubPrefs::default();
+        prefs.seed(&v(&["lab", "web"]), &v(&["lab", "web"]));
+        prefs.pin("web");
+        assert!(prefs.park("web"));
+        assert!(!prefs.is_pinned("web"));
+        assert!(!prefs.is_active("web"));
+    }
+
+    #[test]
+    fn rename_carries_the_pin() {
+        let mut prefs = SubPrefs::default();
+        prefs.seed(&v(&["lab"]), &v(&["lab"]));
+        prefs.pin("lab");
+        assert!(prefs.rename("lab", "lab-2"));
+        assert!(!prefs.is_pinned("lab"));
+        assert!(prefs.is_pinned("lab-2"));
+        // Renaming an UNPINNED circle is a no-op for pins.
+        prefs.activate("web");
+        assert!(!prefs.rename("web", "web-2"));
+        assert!(!prefs.is_pinned("web-2"));
+    }
+
+    #[test]
+    fn reconcile_prunes_pins_of_dead_circles() {
+        let mut prefs = SubPrefs::default();
+        prefs.seed(&v(&["lab", "web"]), &v(&["lab", "web"]));
+        prefs.pin("web");
+        assert!(prefs.reconcile(&v(&["lab"]), &v(&["lab"])));
+        assert!(prefs.pinned.is_empty());
+    }
+
+    #[test]
+    fn pins_round_trip_and_old_blobs_still_parse() {
+        let store = MemStore::default();
+        let mut prefs = SubPrefs::default();
+        prefs.pin("lab");
+        save(&store, &prefs);
+        let back = load(&store);
+        assert_eq!(back.pinned, v(&["lab"]));
+        assert_eq!(back.active, v(&["lab"]));
+
+        // Pre-pin localStorage blob: no `pinned` key at all.
+        let old = SubPrefs::parse(r#"{"active":["lab"],"seen":["lab","old"]}"#).unwrap();
+        assert!(old.seeded);
+        assert_eq!(old.active, v(&["lab"]));
+        assert!(old.pinned.is_empty());
+        assert!(!old.is_pinned("lab"));
     }
 
     #[test]
