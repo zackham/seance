@@ -134,10 +134,11 @@ input:focus {
   height: 100%;
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
-  grid-template-rows: var(--topbar-h) auto 1fr;
+  grid-template-rows: var(--topbar-h) auto auto 1fr;
   grid-template-areas:
     "topbar topbar"
     "asks   asks"
+    "sidebar awaken"
     "sidebar tiles";
 }
 
@@ -171,6 +172,56 @@ input:focus {
   border-right: 1px solid var(--border);
   overflow: hidden;
   user-select: none;
+}
+
+/* The awaken bar sits ABOVE the panes, never over them: a sleeping circle
+   still shows its last frame and that content must stay readable. */
+#awaken {
+  grid-area: awaken;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-dim);
+}
+#awaken:empty {
+  display: none;
+}
+#awaken .aw-moon {
+  color: var(--violet);
+  flex: none;
+}
+#awaken .aw-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#awaken .aw-btn {
+  flex: none;
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  background: var(--surface);
+  color: var(--flame);
+}
+#awaken .aw-btn:hover {
+  filter: brightness(1.15);
+}
+
+/* A sleeping pane keeps showing its frozen frame — dimmed, so it reads as
+   a record rather than a live screen. */
+.tile.asleep .tile-body {
+  opacity: 0.45;
+}
+.ws-glyph.asleep {
+  color: var(--violet);
 }
 
 #tiles {

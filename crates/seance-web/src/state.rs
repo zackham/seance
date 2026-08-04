@@ -406,6 +406,24 @@ impl ClientState {
     }
 
     /// Bump recency (human typing here / context-menu touch / fresh spawn).
+    /// Any pane of this circle is asleep — the circle reads as asleep.
+    pub fn workspace_asleep(&self, ws: &str) -> bool {
+        self.panes.iter().any(|p| p.workspace == ws && p.asleep)
+    }
+
+    /// Every pane can be put back exactly (daemon's `PaneInfo::restorable` —
+    /// it needs the filesystem, so the client can't decide it). Gates "sleep".
+    pub fn workspace_sleepable(&self, ws: &str) -> bool {
+        let mut any = false;
+        for p in self.panes.iter().filter(|p| p.workspace == ws) {
+            any = true;
+            if !p.restorable {
+                return false;
+            }
+        }
+        any
+    }
+
     pub fn touch_workspace(&mut self, ws: &str, now_ms: f64) {
         if !ws.is_empty() {
             self.workspace_touch.insert(ws.to_string(), now_ms);
@@ -1278,6 +1296,35 @@ mod tests {
             st.workspaces(),
             vec!["alpha", "mike", "zulu", "idle-new", "idle-old"]
         );
+    }
+
+    /// Sleep verbs are gated on the daemon's restorability verdict, and a
+    /// circle reads asleep the moment any of its panes is.
+    #[test]
+    fn sleep_gating_follows_the_daemon_verdict() {
+        let mut st = ClientState::default();
+        st.apply_event(
+            state_with(&[("lab", "w-1", false), ("cadence", "c-1", false)]),
+            0.0,
+        );
+        // Nothing is restorable by default (shells) — no sleep verb offered.
+        assert!(!st.workspace_sleepable("lab"));
+        assert!(!st.workspace_asleep("lab"));
+
+        // Daemon says lab's only pane can be put back → offer it.
+        st.panes[0].restorable = true;
+        assert!(st.workspace_sleepable("lab"));
+
+        // One unrestorable pane in the circle vetoes the whole thing.
+        st.panes.push(st.panes[0].clone());
+        st.panes[2].slug = "w-2".into();
+        st.panes[2].restorable = false;
+        assert!(!st.workspace_sleepable("lab"));
+
+        // And asleep is per-circle, from any pane.
+        st.panes[2].asleep = true;
+        assert!(st.workspace_asleep("lab"));
+        assert!(!st.workspace_asleep("cadence"));
     }
 
     /// The whole point: a circle leaves the working band on the daemon's

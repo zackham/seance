@@ -185,6 +185,12 @@ to synchronize.
 idle; roster shows **slug**; `--wait-ready` runs profile **boot-clear**;
 `phone` / `prompts` are human-spine ctl surfaces. `pr-link add|clear` seeds /
 drops scraped PR links (statuses come from the `pr_watch.json` watcher, not ctl). Cmdlog **survives upgrade**.
+`sleep`/`wake` put a circle down and bring it back (`runtime/engine/sleep.rs`):
+**only restorable circles** — every pane a claude session with a transcript on
+disk, or a file pane; a shell vetoes its circle. Slept panes keep identity + a
+frozen last frame (`<state-dir>/frozen/<slug>.scg`) and stay slept across
+restart/upgrade. `send` (and GUI keystrokes) auto-wake; scrolling doesn't.
+Auto-sleep at 12h idle (`daemon/sleepsweep.rs`).
 `ctl phone` opens a vita telegram topic and **seeds a stage card** — **no**
 `register_participant` claim. Full protocol: `docs/CONTROL.md`.
 

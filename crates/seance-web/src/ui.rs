@@ -268,6 +268,8 @@ pub struct Chrome {
     tiles: Element,
     toasts: Element,
     asks: Element,
+    /// The awaken bar above the tile area (sleeping circles).
+    awaken: Element,
 
     actions: Rc<dyn Actions>,
 
@@ -342,6 +344,21 @@ impl Chrome {
             }
         };
 
+        // Older shells have no #awaken — synthesise it directly before #tiles
+        // so the bar always lands above the panes, never over them.
+        let awaken = match doc.get_element_by_id("awaken") {
+            Some(el) => el,
+            None => {
+                let el = doc.create_element("div")?;
+                el.set_id("awaken");
+                let parent = doc
+                    .get_element_by_id("app")
+                    .ok_or_else(|| JsValue::from_str("missing #app"))?;
+                parent.insert_before(&el, Some(tiles.unchecked_ref()))?;
+                el
+            }
+        };
+
         let rename = Rename {
             doc: doc.clone(),
             actions: actions.clone(),
@@ -357,6 +374,7 @@ impl Chrome {
             tiles,
             toasts,
             asks,
+            awaken,
             actions,
             tile_refs: HashMap::new(),
             ws_refs: HashMap::new(),
@@ -718,11 +736,12 @@ impl Chrome {
         let main = mk(&doc, "div", "ws-main")?;
 
         // WEB DIVERGENCE #1: braille spinner → `◆` with a CSS pulse.
+        let asleep = state.workspace_asleep(ws);
         let glyph = text_el(
             &doc,
             "span",
-            ws_glyph_class(working, is_selected),
-            ws_glyph_char(working, is_selected),
+            ws_glyph_class(working, is_selected, asleep),
+            ws_glyph_char(working, is_selected, asleep),
         )?;
         let name = text_el(&doc, "span", "ws-name", ws)?;
         // Text badges only for needs/done — working is the left-hand glyph.
@@ -779,7 +798,10 @@ impl Chrome {
                 );
             })?;
         }
-        // Per-row context menu (native order).
+        // Per-row context menu (native order). Sleep verbs need the daemon's
+        // restorability verdict, captured before the closure.
+        let row_asleep = asleep;
+        let row_sleepable = !asleep && state.workspace_sleepable(ws);
         {
             let actions = self.actions.clone();
             let rn = self.rename.clone();
@@ -845,6 +867,23 @@ impl Chrome {
                     } else {
                         MenuEntry::item("park", move || a.park_workspace(&w))
                     });
+                }
+                if row_asleep {
+                    let a = actions.clone();
+                    let w = ws.clone();
+                    entries.push(MenuEntry::item("awaken circle", move || {
+                        a.send(GuiRequest::WakeWorkspace {
+                            workspace: w.clone(),
+                        })
+                    }));
+                } else if row_sleepable {
+                    let a = actions.clone();
+                    let w = ws.clone();
+                    entries.push(MenuEntry::item("sleep circle", move || {
+                        a.send(GuiRequest::SleepWorkspace {
+                            workspace: w.clone(),
+                        })
+                    }));
                 }
                 entries.push(MenuEntry::Separator);
                 {
@@ -1500,6 +1539,9 @@ impl Chrome {
         if let Err(e) = self.render_asks(state) {
             log("chrome: asks render failed", &e);
         }
+        if let Err(e) = self.render_awaken(state) {
+            log("chrome: awaken bar render failed", &e);
+        }
     }
 
     fn apply_badges(&mut self, state: &ClientState) {
@@ -1510,9 +1552,12 @@ impl Chrome {
                 continue;
             };
             let status = state.statuses.get(slug).map(|s| s.state.as_str());
-            let exited = pane.exited
-                || state.agency.get(slug).map(|a| a.exited).unwrap_or(false)
-                || !pane.running;
+            // Asleep is not exited: no process by design, and `running` is
+            // false for both. Sleeping wins so the tile reads dimmed, not dead.
+            let exited = !pane.asleep
+                && (pane.exited
+                    || state.agency.get(slug).map(|a| a.exited).unwrap_or(false)
+                    || !pane.running);
             refs.dot
                 .set_class_name(&format!("dot {}", dot_class(status, exited)));
             refs.name.set_text_content(Some(&pane.name));
@@ -1543,22 +1588,68 @@ impl Chrome {
             if exited {
                 class.push_str(" exited");
             }
+            if pane.asleep {
+                class.push_str(" asleep");
+            }
             refs.tile.set_class_name(&class);
         }
 
         for (ws, refs) in &self.ws_refs {
             let att = state.row_attention(ws);
             let working = matches!(att, Some(Attention::Working));
+            let asleep = state.workspace_asleep(ws);
             refs.glyph
-                .set_class_name(ws_glyph_class(working, refs.selected));
+                .set_class_name(ws_glyph_class(working, refs.selected, asleep));
             refs.glyph
-                .set_text_content(Some(ws_glyph_char(working, refs.selected)));
+                .set_text_content(Some(ws_glyph_char(working, refs.selected, asleep)));
             let (text, class) = ws_att(att, refs.selected);
             refs.att.set_text_content(Some(text));
             refs.att.set_class_name(class);
             refs.count
                 .set_text_content(Some(&state.activity_label(ws, self.now_ms())));
         }
+    }
+
+    /// The awaken bar. Says what you're looking at — a frozen frame that
+    /// doesn't announce itself is just a lying screen — and carries the one
+    /// control, above the panes so none of their content is covered.
+    fn render_awaken(&mut self, state: &ClientState) -> Result<(), JsValue> {
+        self.awaken.set_inner_html("");
+        let Some(ws) = state.selected_workspace.clone() else {
+            return Ok(());
+        };
+        if !state.workspace_asleep(&ws) {
+            return Ok(());
+        }
+        let doc = self.doc.clone();
+        let n = state
+            .panes
+            .iter()
+            .filter(|p| p.workspace == ws && p.asleep)
+            .count();
+        self.awaken
+            .append_child(text_el(&doc, "span", "aw-moon", "☾")?.unchecked_ref())?;
+        self.awaken.append_child(
+            text_el(
+                &doc,
+                "span",
+                "aw-text",
+                &format!(
+                    "{ws} is asleep — {n} pane{} holding no memory. What you see below is the last frame each was showing.",
+                    if n == 1 { "" } else { "s" }
+                ),
+            )?
+            .unchecked_ref(),
+        )?;
+        let btn = text_el(&doc, "button", "aw-btn", "awaken circle")?;
+        self.awaken.append_child(&btn)?;
+        let actions = self.actions.clone();
+        bind_click(&btn, &mut self.ask_clicks, move |_| {
+            actions.send(GuiRequest::WakeWorkspace {
+                workspace: ws.clone(),
+            })
+        })?;
+        Ok(())
     }
 
     fn render_asks(&mut self, state: &ClientState) -> Result<(), JsValue> {
@@ -2714,8 +2805,10 @@ fn arm_or_fire(
 }
 
 /// Workspace glyph: `◆` selected / working, `◈` idle (native sidebar).
-fn ws_glyph_char(working: bool, selected: bool) -> &'static str {
-    if working || selected {
+fn ws_glyph_char(working: bool, selected: bool, asleep: bool) -> &'static str {
+    if asleep {
+        "☾"
+    } else if working || selected {
         "◆"
     } else {
         "◈"
@@ -2724,8 +2817,10 @@ fn ws_glyph_char(working: bool, selected: bool) -> &'static str {
 
 /// WEB DIVERGENCE #1: `.working` is a CSS pulse standing in for the native
 /// braille frame cycle.
-fn ws_glyph_class(working: bool, selected: bool) -> &'static str {
-    if working {
+fn ws_glyph_class(working: bool, selected: bool, asleep: bool) -> &'static str {
+    if asleep {
+        "ws-glyph asleep"
+    } else if working {
         "ws-glyph working"
     } else if selected {
         "ws-glyph selected"
@@ -2868,10 +2963,13 @@ mod tests {
 
     #[test]
     fn glyph_and_attention_match_the_native_rules() {
-        assert_eq!(ws_glyph_char(false, true), "◆");
-        assert_eq!(ws_glyph_char(true, false), "◆");
-        assert_eq!(ws_glyph_char(false, false), "◈");
-        assert_eq!(ws_glyph_class(true, true), "ws-glyph working");
+        assert_eq!(ws_glyph_char(false, true, false), "◆");
+        assert_eq!(ws_glyph_char(true, false, false), "◆");
+        assert_eq!(ws_glyph_char(false, false, false), "◈");
+        assert_eq!(ws_glyph_class(true, true, false), "ws-glyph working");
+        // Asleep outranks both: no process, so no spinner and no selection ◆.
+        assert_eq!(ws_glyph_char(true, true, true), "☾");
+        assert_eq!(ws_glyph_class(true, true, true), "ws-glyph asleep");
         // Selected rows never show a text badge; working is the glyph.
         assert_eq!(ws_att(Some(Attention::NeedsHuman), true).0, "");
         assert_eq!(ws_att(Some(Attention::Working), false).0, "");

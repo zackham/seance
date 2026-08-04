@@ -17,6 +17,44 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-08-04
+
+Sleep a circle you're done with. It stops costing RAM and keeps its mind.
+
+### Added
+
+- **Sleep / wake.** A sleeping pane has **no process** — the PTY is gone and
+  so is everything the agent was holding (a claude pane plus its MCP children
+  runs a few hundred MB; forty of them is most of a workstation). What
+  survives is everything that makes the pane itself: slug, name, circle, cwd,
+  command, its claude conversation id, scratchpad, task, status — plus the
+  **last frame it rendered**, frozen to `<state-dir>/frozen/<slug>.scg` and
+  served in place of a live grid, so a slept circle still reads with nothing
+  behind it. Waking relaunches `claude --resume <id>` in the same cwd.
+- **Only where it can be undone.** Sleep is offered for a claude pane with a
+  session id *and* a transcript on disk, or a file pane. A shell can't be
+  rebuilt — cwd drift, history, running children — so one shell vetoes its
+  whole circle, and the refusal names it. Sleeping is a deliberate crash;
+  it is only safe because 0.14.2 gave each pane its own conversation id.
+- **Reading a sleeping circle.** Its panes still show what they were showing,
+  dimmed to 45% with a scrim: readable, and unmistakably not live. The
+  **awaken bar sits above the tile area**, never over the content, and says
+  what you're looking at rather than letting a frozen frame pass for a live
+  one. Right-click a circle for `sleep circle` / `awaken circle`; the sidebar
+  marks it `☾`. Both GUIs.
+- **`seance ctl sleep [WS]` / `wake [WS]`**, and `ctl list` renders
+  `state=asleep`. **`ctl send` to a sleeping pane wakes it** — anything else
+  breaks every orchestrator the first time it addresses a circle that dozed
+  off. Typing into a sleeping pane wakes it too (the waking keystroke is
+  dropped rather than fed to a half-drawn prompt); scrolling doesn't —
+  reading the frozen frame is what it's for.
+- **Auto-sleep at 12h idle**, swept every 5 minutes. Restorable circles only,
+  and only ones with a real activity clock — no observation is not evidence
+  of idleness. Idle means the daemon's own clocks (last pane output, floored
+  by last human input), the same pair the sidebar row shows.
+- **Slept stays slept** across daemon restart and `seance upgrade`. Bringing
+  a slept circle back up on restore would defeat the entire point.
+
 ## [0.14.2] — 2026-08-04
 
 A circle stops working on its own, and the working band holds still.
