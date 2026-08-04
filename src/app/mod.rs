@@ -181,6 +181,9 @@ pub struct SeanceApp {
     /// Last observed pane output per workspace (ms) — sidebar shows "time
     /// since last update" instead of a pane count.
     workspace_activity: std::collections::HashMap<String, u64>,
+    /// Per-pane deadline (ms) until which grid content changes are treated as
+    /// resize reflow, not output. Armed whenever a frame arrives at new dims.
+    resize_settle: std::collections::HashMap<String, u64>,
     /// When each workspace ENTERED the live-working band (sort key there —
     /// stable while it keeps working; last-output would reshuffle per frame).
     workspace_working_since: std::collections::HashMap<String, u64>,
@@ -386,6 +389,7 @@ impl SeanceApp {
             parked_expanded: false,
             workspace_touch: std::collections::HashMap::new(),
             workspace_activity: std::collections::HashMap::new(),
+            resize_settle: std::collections::HashMap::new(),
             workspace_working_since: std::collections::HashMap::new(),
             workspace_was_working: std::collections::HashSet::new(),
             workspace_unread: std::collections::HashMap::new(),
@@ -1000,20 +1004,41 @@ impl SeanceApp {
         // Time-since-activity stamps ONLY on real content change. Attach /
         // pull / relaunch / workspace-switch all re-push FULL frames with
         // identical (or first-seen) content — those must not reset the clock.
-        let content_changed = self
+        // Nor may the SIGWINCH redraw that follows the PTY resize we send the
+        // first time a circle's tiles are laid out (see RESIZE_SETTLE_MS):
+        // selecting a circle must never bump its last-active time.
+        let now = crate::app::util::now_ms();
+        let shape = self
             .panes
             .iter()
             .find(|p| p.slug == slug)
             .and_then(|p| p.remote_terminal())
             .map(|rt| {
                 let prev = &rt.read(cx).snapshot;
-                // Same dims only: resize reflow is not output.
-                !prev.cells.is_empty()
-                    && prev.cols == snap.cols
-                    && prev.rows == snap.rows
-                    && prev.cells != snap.cells
-            })
-            .unwrap_or(false);
+                (
+                    prev.cells.is_empty(),
+                    prev.cols == snap.cols && prev.rows == snap.rows,
+                    prev.cells != snap.cells,
+                )
+            });
+        let mut content_changed = false;
+        if let Some((prev_empty, dims_match, cells_changed)) = shape {
+            if !dims_match {
+                // Reflow moment — arm the settle window for the redraw burst.
+                self.resize_settle
+                    .insert(slug.clone(), now + crate::app::util::RESIZE_SETTLE_MS);
+            }
+            content_changed = crate::app::util::grid_frame_is_output(
+                prev_empty,
+                dims_match,
+                cells_changed,
+                now,
+                self.resize_settle.get(&slug).copied(),
+            );
+            if content_changed {
+                self.resize_settle.remove(&slug);
+            }
+        }
         if content_changed {
             if let Some(ws) = self
                 .panes
@@ -1021,8 +1046,7 @@ impl SeanceApp {
                 .find(|p| p.slug == slug)
                 .map(|p| p.workspace.clone())
             {
-                self.workspace_activity
-                    .insert(ws, crate::app::util::now_ms());
+                self.workspace_activity.insert(ws, now);
             }
         }
         if !self.overview {

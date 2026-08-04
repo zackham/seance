@@ -573,8 +573,17 @@ impl SeanceApp {
                 .client
                 .set_focus(Some(slug), Some(workspace.to_string()));
         } else {
-            // Empty workspace — no pane to activate.
+            // Empty workspace — no pane to activate. Park keyboard focus on
+            // the app root: the previously focused terminal's view is still
+            // ALIVE (its pane just isn't rendered in this circle), so GPUI
+            // happily keeps focus on a handle that is no longer in the
+            // dispatch tree — capture never runs and ctrl+page stops working
+            // until you click. `window.focused()` is Some there, so
+            // ensure_keyboard_focus's None-recovery can't save us either.
             self.active_slug = None;
+            self.pending_focus = None;
+            let fh = self.focus_handle.clone();
+            window.focus(&fh, cx);
             let _ = self.client.set_focus(None, Some(workspace.to_string()));
         }
         self.persist(cx);

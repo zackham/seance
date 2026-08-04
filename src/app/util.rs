@@ -138,6 +138,32 @@ pub(super) fn working_spinner_glyph() -> &'static str {
     FRAMES[i]
 }
 
+/// Grace window after a grid frame arrives at NEW dimensions. The PTY resize
+/// we ourselves requested makes the TUI redraw (SIGWINCH), and that redraw is
+/// a content change indistinguishable from real output — it must not reset the
+/// circle's activity clock.
+pub(super) const RESIZE_SETTLE_MS: u64 = 400;
+
+/// Does this grid frame count as real pane output for the workspace activity
+/// clock? Pure so the reflow-vs-output rule is testable without a window.
+///
+/// - first paint (no previous cells): no — attach/first-view is not output
+/// - dimension change: no — reflow, not output (and arms the settle window)
+/// - content change inside the settle window: no — that's the resize redraw
+/// - content change otherwise: yes
+pub(super) fn grid_frame_is_output(
+    prev_empty: bool,
+    dims_match: bool,
+    cells_changed: bool,
+    now_ms: u64,
+    settle_until: Option<u64>,
+) -> bool {
+    if prev_empty || !dims_match || !cells_changed {
+        return false;
+    }
+    settle_until.is_none_or(|until| now_ms >= until)
+}
+
 pub(super) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -198,6 +224,38 @@ mod tests {
     /// consts are fixed literals, so bit-equality is fine).
     fn same_color(a: gpui::Hsla, b: gpui::Hsla) -> bool {
         a.h == b.h && a.s == b.s && a.l == b.l && a.a == b.a
+    }
+
+    /// Selecting a circle must never bump its last-active time. The first
+    /// select lays out its tiles → PTY resize → SIGWINCH redraw; that redraw
+    /// is a content change, and treating it as output is what made a circle
+    /// jump to the top the first time it was clicked in a GUI session.
+    #[test]
+    fn grid_frame_is_output_ignores_first_paint_and_reflow() {
+        let t = 10_000;
+        // First frame for a pane (attach / first view): never output.
+        assert!(!grid_frame_is_output(true, true, true, t, None));
+        // Dimension change: reflow, not output.
+        assert!(!grid_frame_is_output(false, false, true, t, None));
+        // Redraw inside the settle window the reflow armed.
+        assert!(!grid_frame_is_output(
+            false,
+            true,
+            true,
+            t,
+            Some(t + RESIZE_SETTLE_MS)
+        ));
+        // Identical cells are never output.
+        assert!(!grid_frame_is_output(false, true, false, t, None));
+    }
+
+    #[test]
+    fn grid_frame_is_output_accepts_real_output() {
+        let t = 10_000;
+        assert!(grid_frame_is_output(false, true, true, t, None));
+        // Settle window has expired — this is genuine output again.
+        assert!(grid_frame_is_output(false, true, true, t, Some(t - 1)));
+        assert!(grid_frame_is_output(false, true, true, t, Some(t)));
     }
 
     #[test]

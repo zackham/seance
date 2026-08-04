@@ -85,6 +85,9 @@ pub struct ClientState {
     pub workspace_activity: HashMap<String, f64>,
     /// When each workspace entered the working band (stable sort key there).
     pub workspace_working_since: HashMap<String, f64>,
+    /// Per-pane deadline until which grid content changes count as resize
+    /// reflow, not output. Armed by any frame that arrives at new dims.
+    pub resize_settle: HashMap<String, f64>,
     /// PR links per workspace, daemon-owned (`WorkspaceMeta.pr_links`),
     /// most-recently-seen LAST. Statuses come from the external poller.
     pub workspace_pr_links: HashMap<String, Vec<PrLink>>,
@@ -160,6 +163,10 @@ pub struct ActivityItem {
 }
 
 const ACTIVITY_CAP: usize = 200;
+
+/// Grace after a frame arrives at new dims: the SIGWINCH redraw that follows
+/// the resize we requested is reflow, not output. Mirrors the native const.
+const RESIZE_SETTLE_MS: f64 = 400.0;
 
 /// Coarse one-unit relative time for sidebar labels ("now","42s","3m","2h","4d").
 pub fn rel_label(delta_ms: f64) -> String {
@@ -463,6 +470,38 @@ impl ClientState {
         }
     }
 
+    /// Does this incoming frame count as real output for the activity clock?
+    ///
+    /// Mirrors the native rule (`app::util::grid_frame_is_output`): first
+    /// paint isn't output, a dimension change is reflow (and arms the settle
+    /// window), and the redraw burst the PTY emits after the resize WE asked
+    /// for — the first time a circle's tiles are sized — is reflow too.
+    /// Selecting a circle must never bump its last-active time.
+    fn grid_frame_is_output(&mut self, pane: &str, snap: &GridSnapshot, now_ms: f64) -> bool {
+        let Some(prev) = self.grids.get(pane) else {
+            return false;
+        };
+        let prev_empty = prev.cells.is_empty();
+        let dims_match = prev.cols == snap.cols && prev.rows == snap.rows;
+        let cells_changed = prev.cells != snap.cells;
+        if !dims_match {
+            self.resize_settle
+                .insert(pane.to_string(), now_ms + RESIZE_SETTLE_MS);
+        }
+        if prev_empty || !dims_match || !cells_changed {
+            return false;
+        }
+        if self
+            .resize_settle
+            .get(pane)
+            .is_some_and(|until| now_ms < *until)
+        {
+            return false;
+        }
+        self.resize_settle.remove(pane);
+        true
+    }
+
     fn note_pane_output(&mut self, slug: &str, now_ms: f64) {
         if let Some(ws) = self.pane(slug).map(|p| p.workspace.clone()) {
             self.workspace_activity.insert(ws, now_ms);
@@ -604,14 +643,7 @@ impl ClientState {
             }
             GuiEvent::Grid(snap) => {
                 let pane = snap.pane.clone();
-                let changed = self.grids.get(&pane).is_some_and(|prev| {
-                    // Same dims only: a resize reflow re-renders everything
-                    // without any real output.
-                    !prev.cells.is_empty()
-                        && prev.cols == snap.cols
-                        && prev.rows == snap.rows
-                        && prev.cells != snap.cells
-                });
+                let changed = self.grid_frame_is_output(&pane, &snap, now_ms);
                 self.grids.insert(pane.clone(), snap);
                 if changed {
                     self.note_pane_output(&pane, now_ms);
@@ -628,14 +660,7 @@ impl ClientState {
                     Ok(snap) => {
                         // Stamp only real content change — full re-pushes on
                         // attach/pull must not reset the activity clock.
-                        let changed = self.grids.get(&pane).is_some_and(|prev| {
-                            // Same dims only: a resize reflow re-renders everything
-                            // without any real output.
-                            !prev.cells.is_empty()
-                                && prev.cols == snap.cols
-                                && prev.rows == snap.rows
-                                && prev.cells != snap.cells
-                        });
+                        let changed = self.grid_frame_is_output(&pane, &snap, now_ms);
                         self.grids.insert(pane.clone(), snap);
                         if changed {
                             self.note_pane_output(&pane, now_ms);
@@ -831,6 +856,35 @@ mod tests {
             st.apply_event(ev, 0.0),
             Applied::NeedRefresh { pane: "w-1".into() }
         );
+    }
+
+    fn grid_at(cols: u16, rows: u16, first: char) -> GuiEvent {
+        let mut snap = GridSnapshot::empty("w-1");
+        snap.cols = cols;
+        snap.rows = rows;
+        snap.cells = vec![seance_core::snapshot::CellSnap::blank(); cols as usize * rows as usize];
+        snap.cells[0].c = first;
+        GuiEvent::Grid(snap)
+    }
+
+    /// Selecting a circle for the first time lays out its tiles, which sends a
+    /// PTY resize; the redraw that comes back must not bump the activity clock.
+    #[test]
+    fn resize_reflow_redraw_is_not_activity() {
+        let mut st = ClientState::default();
+        st.apply_event(state_event(), 0.0);
+        // First paint at the daemon's stored size — not output.
+        st.apply_event(grid_at(80, 24, 'a'), 1_000.0);
+        assert!(st.workspace_activity.get("lab").is_none());
+        // Our resize lands: new dims → reflow, arms the settle window.
+        st.apply_event(grid_at(120, 40, 'a'), 1_010.0);
+        assert!(st.workspace_activity.get("lab").is_none());
+        // The SIGWINCH redraw: same dims, different cells, inside the window.
+        st.apply_event(grid_at(120, 40, 'b'), 1_050.0);
+        assert!(st.workspace_activity.get("lab").is_none());
+        // Real output after the window → stamps.
+        st.apply_event(grid_at(120, 40, 'c'), 2_000.0);
+        assert_eq!(st.workspace_activity.get("lab"), Some(&2_000.0));
     }
 
     fn state_event_with_meta(out_ms: u64, touch_ms: u64) -> GuiEvent {
