@@ -12,6 +12,79 @@ use crate::events;
 use crate::runtime::pty_session::{PtySession, SpawnConfig};
 use crate::state::{slugify, unique_slug, PersistedPane};
 
+/// True when `command` launches the claude CLI — bare (`claude …`) or by
+/// absolute path (`/home/…/bin/claude …`), which is how agent profiles spawn.
+pub(super) fn is_claude_cmd(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .next()
+        .map(|first| {
+            first
+                .rsplit('/')
+                .next()
+                .map(|base| base == "claude")
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// A random v4 UUID. Claude's `--session-id` requires UUID shape; we mint the
+/// id ourselves so the pane owns its conversation across daemon death.
+fn new_session_uuid() -> String {
+    use rand::Rng;
+    let b: [u8; 16] = rand::thread_rng().gen();
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    // Force version 4 / variant 10xx in the canonical positions.
+    format!(
+        "{}-{}-4{}-a{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[13..16],
+        &hex[17..20],
+        &hex[20..32]
+    )
+}
+
+/// Where claude keeps a session transcript: `~/.claude/projects/<cwd>/<id>.jsonl`,
+/// with `/` and `.` in the absolute cwd flattened to `-`.
+fn transcript_path(cwd_raw: &str, session: &str) -> PathBuf {
+    let cwd = PathBuf::from(shellexpand::tilde(cwd_raw).into_owned());
+    let encoded: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect();
+    PathBuf::from(shellexpand::tilde("~/.claude/projects").into_owned())
+        .join(encoded)
+        .join(format!("{session}.jsonl"))
+}
+
+/// Pull an already-explicit session id out of a command (`--resume <id>` /
+/// `--session-id <id>`), so a hand-written command keeps that conversation
+/// pinned to the pane across restarts instead of being re-minted.
+fn extract_session_flag(command: &str) -> Option<String> {
+    let toks: Vec<&str> = command.split_whitespace().collect();
+    toks.iter()
+        .position(|t| *t == "--resume" || *t == "--session-id")
+        .and_then(|i| toks.get(i + 1))
+        .filter(|id| !id.starts_with('-'))
+        .map(|id| id.to_string())
+}
+
+/// The launch command for a claude pane whose session id we own.
+///
+/// `--resume` only works once a transcript exists; a pane that was created but
+/// never prompted has none, and `--resume` on a missing id exits non-zero,
+/// which closes the pane. In that case re-assert the same id with
+/// `--session-id` so the pane keeps its identity either way.
+fn claude_session_arg(command: &str, cwd_raw: &str, session: &str) -> String {
+    if transcript_path(cwd_raw, session).is_file() {
+        format!("{command} --resume {session}")
+    } else {
+        format!("{command} --session-id {session}")
+    }
+}
+
 impl Engine {
     pub fn spawn(&mut self, spec: SpawnSpec) -> Result<String> {
         let name = if spec.name.trim().is_empty() {
@@ -68,6 +141,7 @@ impl Engine {
                     command: path.to_string_lossy().to_string(),
                     tiled: spec.tiled,
                     resume_on_restore: false,
+                    claude_session: None,
                     scratch_path,
                     file: Some(path.to_string_lossy().to_string()),
                     session: None,
@@ -96,7 +170,17 @@ impl Engine {
                 }
             }
         };
-        if spec.resume && command.starts_with("claude") && !command.contains("--continue") {
+        // Own the conversation: mint the session id here rather than letting
+        // claude pick one, so a pane can be put back on its exact session after
+        // a crash. `--continue` is deliberately NOT the restore path — it
+        // resumes the most recent conversation *in the cwd*, so panes sharing a
+        // cwd (the normal case) would all land on the same one.
+        let mut claude_session = extract_session_flag(&command);
+        if claude_session.is_none() && is_claude_cmd(&command) && !command.contains("--continue") {
+            let id = new_session_uuid();
+            command = format!("{command} --session-id {id}");
+            claude_session = Some(id);
+        } else if spec.resume && is_claude_cmd(&command) && !command.contains("--continue") {
             command = format!("{command} --continue");
         }
 
@@ -113,6 +197,7 @@ impl Engine {
                 command: explicit.unwrap_or_else(|| DEFAULT_COMMAND.into()),
                 tiled: spec.tiled,
                 resume_on_restore: spec.resume,
+                claude_session,
                 scratch_path,
                 file: None,
                 session: Some(session),
@@ -150,6 +235,7 @@ impl Engine {
                 command: p.command.clone(),
                 tiled: p.tiled,
                 resume_on_restore: false,
+                claude_session: None,
                 scratch_path: self.store.path_for(&p.slug),
                 file: Some(path.to_string_lossy().to_string()),
                 session: None,
@@ -159,8 +245,27 @@ impl Engine {
         }
 
         let mut command = p.command.clone();
-        if p.resume_on_restore && command.starts_with("claude") && !command.contains("--continue") {
+        // Put the pane back on the exact conversation it had. Falls back to the
+        // legacy `--continue` only for panes persisted before session ids were
+        // minted (no id on record).
+        let mut claude_session = p
+            .claude_session
+            .clone()
+            .or_else(|| extract_session_flag(&command));
+        if let Some(id) = claude_session.clone() {
+            if is_claude_cmd(&command) && extract_session_flag(&command).is_none() {
+                command = claude_session_arg(&command, &p.cwd, &id);
+            }
+        } else if p.resume_on_restore && is_claude_cmd(&command) && !command.contains("--continue")
+        {
             command = format!("{command} --continue");
+        }
+        // A pane restored from a pre-session-id state file adopts one now, so
+        // the *next* crash is recoverable even if this one wasn't.
+        if claude_session.is_none() && is_claude_cmd(&command) && !command.contains("--continue") {
+            let id = new_session_uuid();
+            command = format!("{command} --session-id {id}");
+            claude_session = Some(id);
         }
         if command == DEFAULT_COMMAND || command.starts_with("bash") {
             let rc = shell_rc_path();
@@ -185,6 +290,7 @@ impl Engine {
             command: p.command.clone(),
             tiled: p.tiled,
             resume_on_restore: p.resume_on_restore,
+            claude_session,
             scratch_path: self.store.path_for(&p.slug),
             file: None,
             session: Some(session),
@@ -247,6 +353,7 @@ impl Engine {
             }
             self.cmd_log.remove_pane(slug);
             self.statuses.remove(slug);
+            self.pane_busy.remove(slug);
             if self.focused_pane.as_deref() == Some(slug) {
                 self.focused_pane = self.panes.first().map(|p| p.slug.clone());
             }
@@ -373,5 +480,58 @@ impl Engine {
             "workspace_reordered",
             format!("workspace '{moved}' before '{before}'"),
         );
+    }
+}
+
+#[cfg(test)]
+mod session_id_tests {
+    use super::*;
+
+    #[test]
+    fn claude_detected_bare_and_by_path() {
+        assert!(is_claude_cmd("claude --dangerously-skip-permissions"));
+        assert!(is_claude_cmd("/home/zack/.local/bin/claude --resume abc"));
+        assert!(!is_claude_cmd("bash -l"));
+        assert!(!is_claude_cmd("bash --init-file /x/seance.bash"));
+        assert!(!is_claude_cmd("claude-agent-acp"));
+    }
+
+    #[test]
+    fn minted_uuid_is_v4_shaped() {
+        let id = new_session_uuid();
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+            "{id}"
+        );
+        assert_ne!(new_session_uuid(), new_session_uuid());
+    }
+
+    #[test]
+    fn explicit_session_flags_are_adopted_not_reminted() {
+        assert_eq!(
+            extract_session_flag("claude --resume 9f3c1a2b --dangerously-skip-permissions")
+                .as_deref(),
+            Some("9f3c1a2b")
+        );
+        assert_eq!(
+            extract_session_flag("claude --session-id 9f3c1a2b").as_deref(),
+            Some("9f3c1a2b")
+        );
+        assert_eq!(extract_session_flag("claude --continue"), None);
+        assert_eq!(extract_session_flag("claude --resume"), None); // no id follows
+        assert_eq!(extract_session_flag("bash -l"), None);
+    }
+
+    #[test]
+    fn restore_falls_back_to_session_id_when_no_transcript() {
+        // A pane created but never prompted has no transcript; `--resume` would
+        // exit non-zero and close the pane, so the id is re-asserted instead.
+        let cmd = claude_session_arg("claude", "/tmp/definitely-not-a-project", "no-such-session");
+        assert_eq!(cmd, "claude --session-id no-such-session");
     }
 }

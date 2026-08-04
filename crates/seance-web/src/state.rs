@@ -83,8 +83,6 @@ pub struct ClientState {
     pub last_spawned: Option<String>,
     /// Last pane output per workspace (ms) — sidebar shows time-since-update.
     pub workspace_activity: HashMap<String, f64>,
-    /// When each workspace entered the working band (stable sort key there).
-    pub workspace_working_since: HashMap<String, f64>,
     /// Per-pane deadline until which grid content changes count as resize
     /// reflow, not output. Armed by any frame that arrives at new dims.
     pub resize_settle: HashMap<String, f64>,
@@ -187,14 +185,10 @@ pub fn pr_number(url: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-/// Busy TUI title: braille spinner (U+2800..=U+28FF) as first non-space char —
-/// same detector as the native `title_looks_busy`.
-pub fn title_looks_busy(title: &str) -> bool {
-    matches!(
-        title.trim_start().chars().next(),
-        Some('\u{2800}'..='\u{28FF}')
-    )
-}
+/// Busy TUI title: braille spinner (U+2800..=U+28FF) as first non-space char.
+/// One detector, shared with the daemon — which is the only party that sees
+/// every pane's title (see [`ClientState::pane_is_live_working`]).
+pub use seance_core::util::title_looks_busy;
 
 impl ClientState {
     /// All workspaces in sidebar display order — the native auto-sort:
@@ -229,13 +223,11 @@ impl ClientState {
                 } else {
                     1
                 };
-                // Working band: when work STARTED (stable while working).
+                // Working band: no clock — alphabetical, so a row you're
+                // reading doesn't move as agents start and finish around it.
                 // Idle band: the displayed clock (last output; touch floor).
                 let at = if band == 0 {
-                    self.workspace_working_since
-                        .get(ws)
-                        .copied()
-                        .unwrap_or(f64::MAX)
+                    0.0
                 } else {
                     self.workspace_activity
                         .get(ws)
@@ -246,6 +238,7 @@ impl ClientState {
                 (
                     band,
                     std::cmp::Reverse(at.clamp(0.0, u64::MAX as f64) as u64),
+                    ws.to_lowercase(),
                 )
             };
             key(a).cmp(&key(b)).then_with(|| a.cmp(b))
@@ -307,15 +300,16 @@ impl ClientState {
             .max_by_key(|a| a.priority())
     }
 
-    /// Observed live-busy: braille title spinner, or agent-driven working
-    /// status (human-owned sticky "working" is ignored — stale inject chrome).
+    /// Live-busy as the DAEMON sees it: braille title spinner, or agent-driven
+    /// working status (human-owned sticky "working" is ignored — stale inject
+    /// chrome).
+    ///
+    /// The spinner half reads `PaneInfo::busy`, not the local grid title: grid
+    /// frames only arrive for the selected workspace, so every other circle's
+    /// title is frozen at whatever it wore when you looked away. The daemon
+    /// broadcasts busy flips for every pane (`GuiEvent::PaneBusy`).
     pub fn pane_is_live_working(&self, slug: &str) -> bool {
-        let title = self
-            .grids
-            .get(slug)
-            .and_then(|g| g.title.clone())
-            .or_else(|| self.pane(slug).and_then(|p| p.title.clone()));
-        if title.as_deref().is_some_and(title_looks_busy) {
+        if self.pane(slug).is_some_and(|p| p.busy) {
             return true;
         }
         let owner = self.agency.get(slug).map(|a| a.owner.as_str());
@@ -428,10 +422,6 @@ impl ClientState {
             let was = self.workspace_was_working.contains(&ws);
             if was && !now_working {
                 self.touch_workspace(&ws, now_ms);
-                self.workspace_working_since.remove(&ws);
-            }
-            if now_working && !was {
-                self.workspace_working_since.insert(ws.clone(), now_ms);
             }
             if now_working {
                 self.workspace_was_working.insert(ws);
@@ -686,6 +676,24 @@ impl ClientState {
                 }
                 self.structure_rev += 1;
                 Applied::Structure
+            }
+            GuiEvent::PaneBusy { pane, busy } => {
+                let flipped = self
+                    .panes
+                    .iter_mut()
+                    .find(|p| p.slug == pane)
+                    .is_some_and(|p| {
+                        let changed = p.busy != busy;
+                        p.busy = busy;
+                        changed
+                    });
+                if flipped {
+                    // Band membership changed → the sidebar re-sorts.
+                    self.structure_rev += 1;
+                    Applied::Structure
+                } else {
+                    Applied::Nothing
+                }
             }
             GuiEvent::PaneKilled { slug } => {
                 self.note_activity(now_ms, "daemon", Some(&slug), "pane killed".into());
@@ -1221,5 +1229,96 @@ mod tests {
         assert!(st.pr_links("lab").is_empty());
         assert!(!st.workspace_pr_links.contains_key("lab"));
         assert!(st.latest_pr_link("lab").is_none());
+    }
+
+    /// Panes across several circles, as a State push. `busy` marks the ones
+    /// the daemon says are spinning right now.
+    fn state_with(panes: &[(&str, &str, bool)]) -> GuiEvent {
+        let rows: Vec<String> = panes
+            .iter()
+            .enumerate()
+            .map(|(i, (ws, slug, busy))| {
+                format!(
+                    r#"{{"kind":"term","name":"p{i}","slug":"{slug}","workspace":"{ws}",
+                        "command":"bash","cwd":"/","tiled":true,"running":true,
+                        "title":null,"scratchpad":"/tmp/p","busy":{busy}}}"#
+                )
+            })
+            .collect();
+        let order: Vec<String> = panes.iter().map(|(ws, _, _)| format!("\"{ws}\"")).collect();
+        serde_json::from_str(&format!(
+            r#"{{"event":"state","panes":[{}],"selected_workspace":null,
+                "focused_pane":null,"extra_workspaces":[],
+                "workspace_order":[{}],"asks":[],"statuses":[]}}"#,
+            rows.join(","),
+            order.join(",")
+        ))
+        .unwrap()
+    }
+
+    /// The working band is alphabetical, so rows don't move while you read
+    /// them. Idle circles keep the recency sort below.
+    #[test]
+    fn working_band_sorts_alphabetically_above_the_idle_band() {
+        let mut st = ClientState::default();
+        st.apply_event(
+            state_with(&[
+                ("zulu", "z-1", true),
+                ("alpha", "a-1", true),
+                ("mike", "m-1", true),
+                ("idle-old", "o-1", false),
+                ("idle-new", "n-1", false),
+            ]),
+            0.0,
+        );
+        st.workspace_touch.insert("idle-old".into(), 10.0);
+        st.workspace_touch.insert("idle-new".into(), 900.0);
+
+        assert_eq!(
+            st.workspaces(),
+            vec!["alpha", "mike", "zulu", "idle-new", "idle-old"]
+        );
+    }
+
+    /// The whole point: a circle leaves the working band on the daemon's
+    /// broadcast, with nobody selecting or subscribing to it first.
+    #[test]
+    fn pane_busy_event_moves_a_circle_out_of_the_working_band() {
+        let mut st = ClientState::default();
+        st.apply_event(
+            state_with(&[("lab", "w-1", true), ("cadence", "c-1", false)]),
+            0.0,
+        );
+        st.sync_working_touches(0.0);
+        assert!(st.workspace_has_working_agent("lab"));
+        assert_eq!(st.workspaces(), vec!["lab", "cadence"]);
+
+        // No selection, no subscription, no grid frame — just the broadcast.
+        st.apply_event(
+            GuiEvent::PaneBusy {
+                pane: "w-1".into(),
+                busy: false,
+            },
+            1_000.0,
+        );
+        assert!(!st.workspace_has_working_agent("lab"));
+
+        // And the finish-touch floats it to the top of the idle band —
+        // freshly-finished work is what you want next.
+        st.sync_working_touches(1_000.0);
+        assert_eq!(st.workspace_touch.get("lab"), Some(&1_000.0));
+        assert_eq!(st.workspaces(), vec!["lab", "cadence"]);
+
+        // A repeat of the same verdict is not a structural change.
+        assert!(matches!(
+            st.apply_event(
+                GuiEvent::PaneBusy {
+                    pane: "w-1".into(),
+                    busy: false,
+                },
+                1_100.0,
+            ),
+            Applied::Nothing
+        ));
     }
 }

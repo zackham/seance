@@ -102,6 +102,62 @@ fn handle_control_list_scope_and_status_set() {
 }
 
 #[test]
+fn slug_beats_another_panes_display_name() {
+    // Two panes named "term-2": the second gets slug `term-2-2`, so the key
+    // "term-2" is one pane's slug AND the other's name. Resolving both in one
+    // pass drove the wrong pane (2026-08-04: a restore silently skipped the
+    // pane it was asked for and injected into its neighbour twice).
+    with_test_state_dir("slug-vs-name", || {
+        let scratch = temp_scratch("slug-vs-name");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let first = eng.push_stub_pane("term-2", "buzz");
+        let second = eng.push_stub_pane("term-2", "lunch-fix");
+        assert_eq!(first, "term-2");
+        assert_eq!(second, "term-2-2");
+
+        // Exact slug wins over the earlier pane's identical display name.
+        let hit = eng.handle_control(ControlRequest::StatusSet {
+            state: "working".into(),
+            note: None,
+            pane: Some("term-2-2".into()),
+            scope: None,
+            from: None,
+        });
+        assert!(hit.ok, "{:?}", hit.error);
+        assert!(eng.statuses.contains_key("term-2-2"));
+        assert!(!eng.statuses.contains_key("term-2"));
+
+        // Scope narrows candidates BEFORE matching, so the name collision
+        // resolves to the scoped workspace's pane rather than erroring.
+        let scoped = eng.handle_control(ControlRequest::StatusSet {
+            state: "idle".into(),
+            note: None,
+            pane: Some("term-2".into()),
+            scope: Some("lunch-fix".into()),
+            from: None,
+        });
+        assert!(scoped.ok, "{:?}", scoped.error);
+        assert_eq!(
+            eng.statuses.get("term-2-2").map(|(s, _)| s.as_str()),
+            Some("idle")
+        );
+
+        // A genuinely absent pane still reports missing, not "outside".
+        let missing = eng.handle_control(ControlRequest::StatusSet {
+            state: "idle".into(),
+            note: None,
+            pane: Some("nope".into()),
+            scope: Some("lunch-fix".into()),
+            from: None,
+        });
+        assert!(!missing.ok);
+        assert!(missing.error.as_deref().unwrap_or("").contains("no pane"));
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+#[test]
 fn handle_control_self_only_blocks_cross_agent() {
     with_test_state_dir("self-only", || {
         let scratch = temp_scratch("self-only");

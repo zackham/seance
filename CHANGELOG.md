@@ -15,6 +15,66 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [Unreleased]
+
+## [0.14.2] — 2026-08-04
+
+A circle stops working on its own, and the working band holds still.
+
+### Fixed
+
+- **A finished circle leaves the working band without being clicked.** The
+  sidebar's working badge reads a pane's TUI spinner out of its OSC title —
+  but titles ride on grid frames, and grid frames only go to the window that
+  has that workspace *selected*. Every other circle's title was therefore
+  frozen at whatever it wore when you looked away: the spinner it had while
+  working. So a circle stayed "working" until you clicked it, at which point a
+  fresh frame arrived and it dropped out instantly — the click looked like the
+  cause. The daemon now owns the verdict (it is the only party that sees every
+  title) and **broadcasts busy flips to every connection, subscription-blind**
+  (`GuiEvent::PaneBusy`, edge-triggered; `PaneInfo::busy` seeds a fresh
+  attach). Both GUIs read that instead of a local title. One detector,
+  `seance_core::util::title_looks_busy`, shared by daemon and both clients.
+
+### Changed
+
+- **The working band sorts A–Z**, in both GUIs. It used to sort by when each
+  circle started working, which meant the top of the sidebar reshuffled every
+  time an agent picked up or finished — exactly the rows you're trying to read
+  are the ones that move. Alphabetical is stable while a dozen agents run.
+  Idle circles keep the recency sort (last output, human touch as floor), and
+  a circle still gets a touch the moment it finishes so freshly-done work
+  lands at the top of the idle band.
+
+- **`ctl` targets the pane you named.** Pane lookup resolved `slug == key ||
+  name == key` in one pass, so an *earlier* pane's display name shadowed a
+  *later* pane's slug — with two panes named `term-2` (the second being slug
+  `term-2-2`), `ctl send term-2` drove the wrong pane and silently skipped the
+  one asked for, injecting into its neighbour twice. Slug now wins over another
+  pane's name, and `scope` narrows the candidates *before* matching so a scoped
+  call disambiguates instead of erroring. "No such pane" is still distinct from
+  "outside your workspace". Regression test:
+  `slug_beats_another_panes_display_name`.
+
+- **A claude pane owns its conversation across daemon death.** Spawning a
+  claude pane now mints a UUID and passes `--session-id <uuid>`; the id is
+  persisted on the pane (`PersistedPane::claude_session`, serde-default so old
+  state files load) and carried through a graceful upgrade
+  (`HandoffPane::claude_session`). Restore relaunches with `--resume <uuid>`.
+  Before this, restore ran the bare persisted command, so a daemon crash
+  silently started a *fresh* conversation in every pane — on 2026-08-04 a
+  system OOM took the daemon down and all 49 panes came back empty (the
+  transcripts were fine; nothing pointed at them).
+  `--continue` is deliberately **not** the restore path: it resumes the most
+  recent conversation *in the cwd*, so the 42 panes sharing `~/work/vita` would
+  every one of them have landed on the same conversation. `resume_on_restore`
+  stays as the fallback for panes persisted without an id.
+  A pane created but never prompted has no transcript, and `--resume` on a
+  missing id exits non-zero (which closes the pane) — that case re-asserts
+  `--session-id` instead, so the pane keeps its identity either way. A command
+  that already carries an explicit `--resume`/`--session-id` is adopted as-is
+  rather than re-minted.
+
 ## [0.14.1] — 2026-08-02
 
 Remove one PR ref and have it stay removed; cycle in the order you see.

@@ -6,7 +6,7 @@
 
 use gpui::{Context, Window};
 
-use super::util::{now_ms, title_looks_busy};
+use super::util::now_ms;
 
 /// Coarse one-unit relative time for sidebar labels.
 pub(super) fn rel_label(delta_ms: u64) -> String {
@@ -138,7 +138,7 @@ impl SeanceApp {
     /// otherwise pick for us on `Unsubscribe`).
     pub(super) fn park_workspace(&mut self, ws: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_workspace.as_deref() == Some(ws) {
-            let order = self.active_workspaces(cx);
+            let order = self.active_workspaces();
             let next = order
                 .iter()
                 .position(|w| w == ws)
@@ -181,45 +181,42 @@ impl SeanceApp {
 
     /// The three sidebar bands in display order: (pinned, active-unpinned,
     /// parked). One sort ([`Self::workspaces`]) applied inside every band.
-    pub(super) fn workspace_bands(
-        &self,
-        cx: &gpui::App,
-    ) -> (Vec<String>, Vec<String>, Vec<String>) {
+    pub(super) fn workspace_bands(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
         crate::subscriptions_pref::partition3(
-            &self.workspaces(cx),
+            &self.workspaces(),
             &self.subs_pref.active,
             &self.subs_pref.pinned,
         )
     }
 
     /// Workspaces in the pinned section, sidebar display order.
-    pub(super) fn pinned_workspaces(&self, cx: &gpui::App) -> Vec<String> {
-        self.workspace_bands(cx).0
+    pub(super) fn pinned_workspaces(&self) -> Vec<String> {
+        self.workspace_bands().0
     }
 
     /// Active-but-unpinned workspaces — the band below the divider.
-    pub(super) fn unpinned_active_workspaces(&self, cx: &gpui::App) -> Vec<String> {
-        self.workspace_bands(cx).1
+    pub(super) fn unpinned_active_workspaces(&self) -> Vec<String> {
+        self.workspace_bands().1
     }
 
     /// Every rendered (non-parked) workspace, top-to-bottom exactly as the
     /// rail draws it: pinned section first, then the normal active band. This
     /// is the ctrl+page ring and the neighbour list for park/kill.
-    pub(super) fn active_workspaces(&self, cx: &gpui::App) -> Vec<String> {
-        let mut out = self.pinned_workspaces(cx);
-        out.extend(self.unpinned_active_workspaces(cx));
+    pub(super) fn active_workspaces(&self) -> Vec<String> {
+        let mut out = self.pinned_workspaces();
+        out.extend(self.unpinned_active_workspaces());
         out
     }
 
     /// Workspaces in the collapsed parked group, same sort as active rows.
-    pub(super) fn parked_workspaces(&self, cx: &gpui::App) -> Vec<String> {
-        self.workspace_bands(cx).2
+    pub(super) fn parked_workspaces(&self) -> Vec<String> {
+        self.workspace_bands().2
     }
 
     /// Badge for a parked row: the normal live attention, or `needs` for a
     /// circle this window has never looked at (ctl spawns land parked+needs).
-    pub(super) fn parked_attention(&self, ws: &str, cx: &gpui::App) -> Option<WorkspaceAttention> {
-        self.workspace_attention_cx(ws, cx).or({
+    pub(super) fn parked_attention(&self, ws: &str) -> Option<WorkspaceAttention> {
+        self.workspace_attention_cx(ws).or({
             if self.subs_pref.never_seen(ws) {
                 Some(WorkspaceAttention::NeedsHuman)
             } else {
@@ -229,11 +226,11 @@ impl SeanceApp {
     }
 
     /// Collapsed parked header summary: (count, highest-priority attention).
-    pub(super) fn parked_summary(&self, cx: &gpui::App) -> (usize, Option<WorkspaceAttention>) {
-        let parked = self.parked_workspaces(cx);
+    pub(super) fn parked_summary(&self) -> (usize, Option<WorkspaceAttention>) {
+        let parked = self.parked_workspaces();
         let att = parked
             .iter()
-            .filter_map(|ws| self.parked_attention(ws, cx))
+            .filter_map(|ws| self.parked_attention(ws))
             .max_by_key(|a| a.priority());
         (parked.len(), att)
     }
@@ -241,30 +238,30 @@ impl SeanceApp {
     /// All workspaces in sidebar display order.
     ///
     /// 1. Circles with an actively working agent float to the top.
-    /// 2. Within / outside that band, sort by last *human touch* (typing into
-    ///    a terminal in the circle, or right-click → "touch"). Selecting a
-    ///    workspace alone does not bump touch. No manual drag-reorder.
-    pub(super) fn workspaces(&self, cx: &gpui::App) -> Vec<String> {
+    /// 2. Inside the working band, **alphabetical** — a working circle's row
+    ///    must not move while you read it, and any recency clock reshuffles
+    ///    the band as agents start and stop.
+    /// 3. Outside it, by last *human touch* (typing into a terminal in the
+    ///    circle, or right-click → "touch"). Selecting a workspace alone does
+    ///    not bump touch. No manual drag-reorder.
+    pub(super) fn workspaces(&self) -> Vec<String> {
         let mut out: Vec<String> = self.known_workspace_names().into_iter().collect();
-        out.sort_by_key(|ws| self.workspace_sort_key(ws, cx));
+        out.sort_by_key(|ws| self.workspace_sort_key(ws));
         out
     }
 
-    fn workspace_sort_key(&self, ws: &str, cx: &gpui::App) -> (u8, std::cmp::Reverse<u64>, String) {
+    fn workspace_sort_key(&self, ws: &str) -> (u8, std::cmp::Reverse<u64>, String) {
         // 0 = has a live-working agent, 1 = everyone else.
-        let band = if self.workspace_has_working_agent(ws, cx) {
+        let band = if self.workspace_has_working_agent(ws) {
             0
         } else {
             1
         };
-        // Working band: ordered by when work STARTED (newest first) — stable
-        // while it keeps working. Idle band: by the clock the row displays
-        // (last real output; human touch as floor).
+        // Working band: no clock at all — the name is the whole key, so the
+        // list is stable while a dozen agents start and finish. Idle band: by
+        // the clock the row displays (last real output; human touch as floor).
         let at = if band == 0 {
-            self.workspace_working_since
-                .get(ws)
-                .copied()
-                .unwrap_or_else(now_ms)
+            0
         } else {
             self.workspace_activity
                 .get(ws)
@@ -272,27 +269,27 @@ impl SeanceApp {
                 .max(self.workspace_touch.get(ws).copied())
                 .unwrap_or(0)
         };
-        (band, std::cmp::Reverse(at), ws.to_string())
+        (band, std::cmp::Reverse(at), ws.to_lowercase())
     }
 
     /// Any pane in this circle currently shows agent work in progress.
-    fn workspace_has_working_agent(&self, workspace: &str, cx: &gpui::App) -> bool {
+    fn workspace_has_working_agent(&self, workspace: &str) -> bool {
         self.panes
             .iter()
-            .any(|p| p.workspace == workspace && self.pane_is_live_working(&p.slug, cx))
+            .any(|p| p.workspace == workspace && self.pane_is_live_working(&p.slug))
     }
 
-    /// Observed live-busy: braille OSC title spinner, or agent-owned status.
-    fn pane_is_live_working(&self, slug: &str, cx: &gpui::App) -> bool {
-        if let Some(title) = self
-            .panes
-            .iter()
-            .find(|p| p.slug == slug)
-            .and_then(|p| p.title(cx))
-        {
-            if title_looks_busy(&title) {
-                return true;
-            }
+    /// Live-busy, as the DAEMON sees it: braille OSC title spinner, or
+    /// agent-owned status.
+    ///
+    /// The spinner half deliberately does *not* read the local terminal title.
+    /// Grid frames only arrive for the workspace this window has selected, so
+    /// every other circle's title is frozen at whatever it last received —
+    /// which is exactly the spinner it was wearing when you looked away. The
+    /// daemon broadcasts busy flips for every pane instead.
+    fn pane_is_live_working(&self, slug: &str) -> bool {
+        if self.busy_panes.contains(slug) {
+            return true;
         }
         let owner = self.owners.get(slug);
         let st = self.statuses.get(slug).map(|s| s.state.as_str());
@@ -322,17 +319,13 @@ impl SeanceApp {
     /// Recompute live-working per workspace. When a circle stops having any
     /// working agent, bump its touch so it lands at the top of the
     /// non-working band (freshly finished work is what you want next).
-    pub(super) fn sync_workspace_working_touches(&mut self, cx: &gpui::App) {
+    pub(super) fn sync_workspace_working_touches(&mut self) {
         let names: Vec<String> = self.known_workspace_names().into_iter().collect();
         for ws in names {
-            let now = self.workspace_has_working_agent(&ws, cx);
+            let now = self.workspace_has_working_agent(&ws);
             let was = self.workspace_was_working.contains(&ws);
             if was && !now {
                 self.touch_workspace(&ws);
-                self.workspace_working_since.remove(&ws);
-            }
-            if now && !was {
-                self.workspace_working_since.insert(ws.clone(), now_ms());
             }
             if now {
                 self.workspace_was_working.insert(ws);
@@ -384,11 +377,7 @@ impl SeanceApp {
 
     /// Live attention with title spinners (needs `&App`) — badges only;
     /// sidebar order uses [`Self::workspace_has_working_agent`].
-    pub(super) fn workspace_attention_cx(
-        &self,
-        workspace: &str,
-        cx: &gpui::App,
-    ) -> Option<WorkspaceAttention> {
+    pub(super) fn workspace_attention_cx(&self, workspace: &str) -> Option<WorkspaceAttention> {
         let needs = self.panes.iter().any(|p| {
             p.workspace == workspace
                 && matches!(
@@ -403,7 +392,7 @@ impl SeanceApp {
         // the circle is usually already on the red PR; the chip stays visible
         // regardless. On idle circles a `needs` PR resurfaces the row exactly
         // like an agent asking for help (web client mirrors this order).
-        if self.workspace_has_working_agent(workspace, cx) {
+        if self.workspace_has_working_agent(workspace) {
             return Some(WorkspaceAttention::Working);
         }
         let pr = super::prlinks::pr_attention(self.pr_links_for(workspace));
@@ -416,8 +405,8 @@ impl SeanceApp {
     /// Sidebar right-edge label: relative time since the last pane output in
     /// this circle ("now", "42s", "3m", "2h", "4d"); None while a working
     /// agent's spinner owns the slot, or when nothing was ever observed.
-    pub(super) fn workspace_activity_label(&self, ws: &str, cx: &gpui::App) -> Option<String> {
-        if self.workspace_has_working_agent(ws, cx) {
+    pub(super) fn workspace_activity_label(&self, ws: &str) -> Option<String> {
+        if self.workspace_has_working_agent(ws) {
             return None;
         }
         let at = *self.workspace_activity.get(ws)?;
@@ -515,7 +504,7 @@ impl SeanceApp {
         // a row scrolled out of the rail. Row index = position in display
         // order (one child per workspace group in the list), plus one for the
         // pinned/unpinned divider element when the row sits below it.
-        let (pinned, active, _) = self.workspace_bands(cx);
+        let (pinned, active, _) = self.workspace_bands();
         let divider = !pinned.is_empty();
         let idx = pinned.iter().position(|w| w == workspace).or_else(|| {
             active
@@ -604,7 +593,7 @@ impl SeanceApp {
         // read live at each press (owner decision 2026-08-02: pageup/down
         // must always correspond to what the left sidebar displays — no
         // snapshots, no alternate orders).
-        let list = self.active_workspaces(cx);
+        let list = self.active_workspaces();
         if list.is_empty() {
             return;
         }
@@ -684,7 +673,7 @@ impl SeanceApp {
         // last) in sidebar order — not the daemon's arbitrary first-pane
         // fallback — so the human lands somewhere predictable.
         if self.selected_workspace.as_deref() == Some(workspace) {
-            let order = self.active_workspaces(cx);
+            let order = self.active_workspaces();
             if let Some(idx) = order.iter().position(|w| w == workspace) {
                 let neighbor = order
                     .get(idx + 1)

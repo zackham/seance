@@ -474,7 +474,7 @@ impl SeanceApp {
         let att = if expanded {
             None
         } else {
-            self.parked_summary(cx).1
+            self.parked_summary().1
         };
         div()
             .id("parked-header")
@@ -538,9 +538,9 @@ impl SeanceApp {
         let rename_input = self.renaming.as_ref().map(|(_, i)| i.clone());
         // Attention: parked rows additionally badge `needs` until first looked at.
         let attention = if parked {
-            self.parked_attention(&workspace, cx)
+            self.parked_attention(&workspace)
         } else {
-            self.workspace_attention_cx(&workspace, cx)
+            self.workspace_attention_cx(&workspace)
         };
         let header: gpui::AnyElement = if renaming_this_ws {
             div()
@@ -710,7 +710,7 @@ impl SeanceApp {
                 )
                 .children({
                     // Time since last output (was: pane count).
-                    self.workspace_activity_label(&workspace, cx).map(|label| {
+                    self.workspace_activity_label(&workspace).map(|label| {
                         div()
                             .flex_none()
                             .text_xs()
@@ -754,7 +754,7 @@ impl SeanceApp {
         // everything else lands in the collapsed parked group below it.
         // Pinned circles get their own section at the very top, separated by a
         // hairline rule; each band carries the same sort.
-        let (pinned, active, parked) = self.workspace_bands(cx);
+        let (pinned, active, parked) = self.workspace_bands();
         let has_pinned = !pinned.is_empty();
         let parked_n = parked.len();
         let parked_rows: Vec<String> = if self.parked_expanded {

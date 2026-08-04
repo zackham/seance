@@ -117,12 +117,12 @@ pub(super) fn status_color(state: &str) -> gpui::Hsla {
 
 /// Claude Code / ink TUIs put a braille spinner in the OSC title while streaming.
 /// Idle Claude uses `✳` (U+2733) — that is *not* busy.
+///
+/// The daemon runs this same predicate over every pane and pushes the verdict
+/// (`GuiEvent::PaneBusy`); prefer `SeanceApp::busy_panes` for anything the
+/// sidebar reads. This local copy is for panes whose grid we're painting.
 pub(super) fn title_looks_busy(title: &str) -> bool {
-    let t = title.trim_start();
-    let Some(c) = t.chars().next() else {
-        return false;
-    };
-    matches!(c, '\u{2800}'..='\u{28FF}')
+    seance_core::util::title_looks_busy(title)
 }
 
 /// Braille spinner glyph for the sidebar workspace icon (replaces the word

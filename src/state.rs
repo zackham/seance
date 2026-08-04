@@ -41,9 +41,15 @@ pub struct PersistedPane {
     /// shelved in the sidebar (`false`).
     pub tiled: bool,
     /// If true, restore relaunches the session with `claude --continue` in `cwd`
-    /// rather than a fresh command.
+    /// rather than a fresh command. Legacy: superseded by [`Self::claude_session`]
+    /// for panes that own a minted session id.
     #[serde(default)]
     pub resume_on_restore: bool,
+    /// Claude conversation this pane owns (minted at spawn via `--session-id`).
+    /// Restore relaunches with `--resume <id>`, so a daemon crash costs nothing.
+    /// `None` for shells, file panes, and panes persisted before 0.14.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_session: Option<String>,
     /// Named workspace this session belongs to (sidebar grouping).
     #[serde(default = "default_workspace")]
     pub workspace: String,
@@ -395,6 +401,7 @@ mod tests {
                     command: "claude".to_string(),
                     tiled: true,
                     resume_on_restore: true,
+                    claude_session: None,
                     status: Some("working".into()),
                     status_note: None,
                     pad_rev: 2,
@@ -414,6 +421,7 @@ mod tests {
                     command: "claude --dangerously-skip-permissions".to_string(),
                     tiled: false,
                     resume_on_restore: false,
+                    claude_session: None,
                     status: None,
                     status_note: None,
                     pad_rev: 0,

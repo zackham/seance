@@ -343,6 +343,15 @@ pub enum GuiEvent {
         verb: String,
         actor: String,
     },
+    /// The pane's TUI spinner started or stopped. **Broadcast to every
+    /// connection, subscription-blind** — grid frames only reach the window
+    /// that has the workspace selected, so a client watching the sidebar has
+    /// no other way to learn a circle stopped working. Edge-triggered: only
+    /// flips are sent.
+    PaneBusy {
+        pane: String,
+        busy: bool,
+    },
     /// Causal attribution: who last wrote stdin to this pane's PTY.
     InputOrigin {
         pane: String,
@@ -408,6 +417,11 @@ pub struct PaneInfo {
     pub tiled: bool,
     pub running: bool,
     pub title: Option<String>,
+    /// Daemon's verdict on "an agent is streaming in this pane right now"
+    /// (`util::title_looks_busy` over the live OSC title). Seeds the client's
+    /// working badges; kept fresh by [`GuiEvent::PaneBusy`].
+    #[serde(default)]
+    pub busy: bool,
     pub scratchpad: String,
     /// For file panes: the path being watched.
     #[serde(default)]

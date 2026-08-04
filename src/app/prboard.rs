@@ -252,8 +252,8 @@ pub(super) fn board_counts(sections: &[BoardSection]) -> (usize, usize, usize) {
 impl SeanceApp {
     /// `(circle, parked, links)` for every circle with PR links, in sidebar
     /// order — the board's raw input.
-    fn pr_board_input(&self, cx: &gpui::App) -> Vec<(String, bool, Vec<PrLink>)> {
-        let ordered = self.workspaces(cx);
+    fn pr_board_input(&self) -> Vec<(String, bool, Vec<PrLink>)> {
+        let ordered = self.workspaces();
         let (_, parked) = crate::subscriptions_pref::partition(&ordered, &self.subs_pref.active);
         ordered
             .into_iter()
@@ -321,7 +321,7 @@ impl SeanceApp {
     }
 
     pub(super) fn render_pr_board(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let sections = build_board(&self.pr_board_input(cx), now_ms());
+        let sections = build_board(&self.pr_board_input(), now_ms());
         let (open, drafts, done) = board_counts(&sections);
         div()
             .id("pr-board")

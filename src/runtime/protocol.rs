@@ -26,6 +26,9 @@ pub struct HandoffPane {
     pub command: String,
     pub tiled: bool,
     pub resume_on_restore: bool,
+    /// Claude session id owned by the pane (see `PersistedPane::claude_session`).
+    #[serde(default)]
+    pub claude_session: Option<String>,
     pub kind: String,
     pub file: Option<String>,
     pub child_pid: Option<u32>,

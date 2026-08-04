@@ -623,6 +623,28 @@ impl Engine {
                         title: title.clone().unwrap_or_default(),
                     },
                 );
+                // Busy is BROADCAST; the grid below is not. A client only gets
+                // frames for the workspace it has selected, so every other
+                // circle's spinner would freeze at whatever it last saw and
+                // read as "working" until you clicked it. Edge-triggered off
+                // the daemon's own busy set, which is the single source both
+                // sides agree on (`pane_infos` reports it too).
+                let now_busy = title
+                    .as_deref()
+                    .map(seance_core::util::title_looks_busy)
+                    .unwrap_or(false);
+                let was_busy = self.pane_busy.contains(slug);
+                if was_busy != now_busy {
+                    if now_busy {
+                        self.pane_busy.insert(slug.clone());
+                    } else {
+                        self.pane_busy.remove(slug);
+                    }
+                    self.broadcast(GuiEvent::PaneBusy {
+                        pane: slug.clone(),
+                        busy: now_busy,
+                    });
+                }
                 // Title changes are rare — push immediately (also a grid).
                 if let Some(s) = self.session_mut(slug) {
                     s.bump_rev();
@@ -767,6 +789,7 @@ impl Engine {
                     tiled: p.tiled,
                     running,
                     title: p.session.as_ref().and_then(|s| s.title()),
+                    busy: self.pane_busy.contains(&p.slug),
                     scratchpad: p.scratch_path.to_string_lossy().to_string(),
                     file: p.file.clone(),
                     owner: Some(w.owner),

@@ -54,6 +54,8 @@ pub struct EnginePane {
     pub command: String,
     pub tiled: bool,
     pub resume_on_restore: bool,
+    /// Claude conversation this pane owns; restored with `--resume`.
+    pub claude_session: Option<String>,
     pub scratch_path: PathBuf,
     pub file: Option<String>,
     pub session: Option<PtySession>,
@@ -112,6 +114,10 @@ pub struct Engine {
     /// Last cells we broadcast per pane — enables row-damage frames + skip
     /// when nothing changed.
     last_grid_cells: HashMap<String, LastGridFrame>,
+    /// Panes whose TUI title currently shows a spinner. The daemon is the only
+    /// party that sees EVERY title (grid frames go to subscribers only), so it
+    /// owns this and broadcasts the flips (`GuiEvent::PaneBusy`).
+    pane_busy: HashSet<String>,
     /// workspace → last real pane output (unix ms). Daemon-owned so the
     /// sidebar's "time since update" survives GUI relaunch, workspace pulls
     /// between windows, and `seance upgrade`. Fed by the recorder tap.
@@ -169,6 +175,7 @@ impl Engine {
             last_record_grid: HashMap::new(),
             grid_flush_pending: HashSet::new(),
             last_grid_cells: HashMap::new(),
+            pane_busy: HashSet::new(),
             workspace_output: HashMap::new(),
             workspace_touch_ms: HashMap::new(),
             pr_links: HashMap::new(),
@@ -193,6 +200,7 @@ impl Engine {
             command: DEFAULT_COMMAND.into(),
             tiled: true,
             resume_on_restore: false,
+            claude_session: None,
             scratch_path,
             file: None,
             session: None,
@@ -233,6 +241,7 @@ impl Engine {
             last_record_grid: HashMap::new(),
             grid_flush_pending: HashSet::new(),
             last_grid_cells: HashMap::new(),
+            pane_busy: HashSet::new(),
             workspace_output: HashMap::new(),
             workspace_touch_ms: HashMap::new(),
             pr_links: HashMap::new(),
@@ -366,6 +375,7 @@ impl Engine {
             last_record_grid: HashMap::new(),
             grid_flush_pending: HashSet::new(),
             last_grid_cells: HashMap::new(),
+            pane_busy: HashSet::new(),
             // Activity clocks ride the handoff — an upgrade must not reset
             // every circle's "time since update" to unknown.
             workspace_output: bundle.workspace_output.into_iter().collect(),
@@ -400,6 +410,7 @@ impl Engine {
                     command: hp.command,
                     tiled: hp.tiled,
                     resume_on_restore: false,
+                    claude_session: None,
                     scratch_path,
                     file: hp.file,
                     session: None,
@@ -461,6 +472,7 @@ impl Engine {
                 command: hp.command,
                 tiled: hp.tiled,
                 resume_on_restore: hp.resume_on_restore,
+                claude_session: hp.claude_session,
                 scratch_path,
                 file: None,
                 session,
@@ -503,6 +515,7 @@ impl Engine {
                         command: p.command.clone(),
                         tiled: p.tiled,
                         resume_on_restore: p.resume_on_restore,
+                        claude_session: p.claude_session.clone(),
                         workspace: p.workspace.clone(),
                         status,
                         status_note,
@@ -577,6 +590,7 @@ impl Engine {
                 command: p.command.clone(),
                 tiled: p.tiled,
                 resume_on_restore: p.resume_on_restore,
+                claude_session: p.claude_session.clone(),
                 kind: p.kind.clone(),
                 file: p.file.clone(),
                 child_pid: None,

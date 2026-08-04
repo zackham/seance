@@ -27,7 +27,7 @@ impl SeanceApp {
     }
 
     pub(super) fn render_overview(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let workspaces = self.workspaces(cx);
+        let workspaces = self.workspaces();
         let selected = self.selected_workspace.clone();
         let n = workspaces.len().max(1);
         let cols = (n as f32).sqrt().ceil() as usize;
@@ -99,7 +99,7 @@ impl SeanceApp {
         let mut cards: Vec<gpui::AnyElement> = Vec::with_capacity(workspaces.len());
         for ws in &workspaces {
             let is_sel = selected.as_deref() == Some(ws.as_str());
-            let attention = self.workspace_attention_cx(ws, cx);
+            let attention = self.workspace_attention_cx(ws);
             let thumbs: Vec<gpui::AnyElement> = self
                 .panes
                 .iter()

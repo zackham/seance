@@ -26,6 +26,20 @@ pub fn slugify(name: &str) -> String {
     }
 }
 
+/// Claude Code / ink TUIs put a braille spinner in the OSC title while
+/// streaming. Idle Claude uses `✳` (U+2733) — that is *not* busy.
+///
+/// Lives here because the **daemon** is the authority on busy: it sees every
+/// title change, while a client only receives grid frames for the workspace
+/// it has selected. Both GUIs consume the daemon's verdict rather than
+/// re-deriving one from a title that may be hours stale.
+pub fn title_looks_busy(title: &str) -> bool {
+    matches!(
+        title.trim_start().chars().next(),
+        Some('\u{2800}'..='\u{28FF}')
+    )
+}
+
 /// Slugify `name`, then disambiguate against already-taken slugs.
 ///
 /// On collision, appends `-2`, `-3`, ... until the result is unused. `taken` is

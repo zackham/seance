@@ -184,9 +184,11 @@ pub struct SeanceApp {
     /// Per-pane deadline (ms) until which grid content changes are treated as
     /// resize reflow, not output. Armed whenever a frame arrives at new dims.
     resize_settle: std::collections::HashMap<String, u64>,
-    /// When each workspace ENTERED the live-working band (sort key there —
-    /// stable while it keeps working; last-output would reshuffle per frame).
-    workspace_working_since: std::collections::HashMap<String, u64>,
+    /// Panes the DAEMON says are streaming right now. Authoritative: grid
+    /// frames (and the titles inside them) only arrive for the selected
+    /// workspace, so a locally-derived spinner freezes on every other circle.
+    /// Seeded from `PaneInfo::busy`, kept live by `GuiEvent::PaneBusy`.
+    busy_panes: std::collections::HashSet<String>,
     /// Workspaces that currently have a live-working agent (for falling-edge
     /// touch when work finishes → top of the non-working band).
     workspace_was_working: std::collections::HashSet<String>,
@@ -390,7 +392,7 @@ impl SeanceApp {
             workspace_touch: std::collections::HashMap::new(),
             workspace_activity: std::collections::HashMap::new(),
             resize_settle: std::collections::HashMap::new(),
-            workspace_working_since: std::collections::HashMap::new(),
+            busy_panes: std::collections::HashSet::new(),
             workspace_was_working: std::collections::HashSet::new(),
             workspace_unread: std::collections::HashMap::new(),
             overview: false,
@@ -642,6 +644,15 @@ impl SeanceApp {
                     .collect();
                 self.reconcile_subscriptions(&known);
 
+                // Re-seed busy from the daemon's verdict — a full state push is
+                // the resync point for panes whose flips we may have missed
+                // (reconnect, upgrade handoff).
+                self.busy_panes = panes
+                    .iter()
+                    .filter(|p| p.busy)
+                    .map(|p| p.slug.clone())
+                    .collect();
+
                 self.selected_workspace = selected_workspace;
                 self.active_slug = focused_pane;
                 self.extra_workspaces = extra_workspaces;
@@ -737,7 +748,7 @@ impl SeanceApp {
                 // workspace. Keyboard recovery is render-side (ensure_keyboard_focus)
                 // so we don't steal focus from whisper / rename / palette here.
                 self.ensure_active_pane_in_workspace();
-                self.sync_workspace_working_touches(cx);
+                self.sync_workspace_working_touches();
                 cx.notify();
             }
             GuiEvent::Grid(snap) => {
@@ -810,6 +821,9 @@ impl SeanceApp {
             GuiEvent::PaneSpawned { pane } => {
                 let slug = pane.slug.clone();
                 let ws = pane.workspace.clone();
+                if pane.busy {
+                    self.busy_panes.insert(slug.clone());
+                }
                 self.ensure_remote_pane_cx(&pane, cx);
                 // Summon → select workspace, make active, focus the new pane.
                 self.selected_workspace = Some(ws.clone());
@@ -823,8 +837,22 @@ impl SeanceApp {
                 self.rename_next_spawn = false;
                 cx.notify();
             }
+            GuiEvent::PaneBusy { pane, busy } => {
+                let changed = if busy {
+                    self.busy_panes.insert(pane)
+                } else {
+                    self.busy_panes.remove(&pane)
+                };
+                if changed {
+                    // A circle leaving the working band takes a touch here, not
+                    // on selection — that's the whole point of the broadcast.
+                    self.sync_workspace_working_touches();
+                    cx.notify();
+                }
+            }
             GuiEvent::PaneKilled { slug } => {
                 self.panes.retain(|p| p.slug != slug);
+                self.busy_panes.remove(&slug);
                 self.workspace_focus.retain(|_, s| s != &slug);
                 // Never leave a workspace with panes but no active pane.
                 let prev = self.active_slug.clone();
@@ -879,7 +907,7 @@ impl SeanceApp {
                 }
                 self.note_workspace_status_event(&slug, &state);
                 self.statuses.insert(slug, PaneStatus { state, note });
-                self.sync_workspace_working_touches(cx);
+                self.sync_workspace_working_touches();
                 if matches!(self.drawer, Drawer::Pad { .. }) {
                     self.pad_refresh_tick = self.pad_refresh_tick.wrapping_add(1);
                 }
@@ -928,7 +956,7 @@ impl SeanceApp {
                         exit_code,
                     },
                 );
-                self.sync_workspace_working_touches(cx);
+                self.sync_workspace_working_touches();
                 cx.notify();
             }
             GuiEvent::Ghost { pane, ghost } => {
@@ -1075,7 +1103,7 @@ impl SeanceApp {
                     rt.update(cx, |t, cx| {
                         t.apply_snapshot(snap, cx);
                     });
-                    self.sync_workspace_working_touches(cx);
+                    self.sync_workspace_working_touches();
                     cx.notify();
                 }
                 return;
@@ -1091,7 +1119,7 @@ impl SeanceApp {
             rt.update(cx, |t, cx| {
                 t.apply_snapshot(snap, cx);
             });
-            self.sync_workspace_working_touches(cx);
+            self.sync_workspace_working_touches();
             self.grid_batch_visible = true;
         }
     }

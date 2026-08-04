@@ -154,7 +154,7 @@ impl SeanceApp {
                     })
                     .map(|p| p.slug.clone())
                     .collect();
-                for ws in self.workspaces(cx) {
+                for ws in self.workspaces() {
                     if q.is_empty() || ws.to_ascii_lowercase().contains(&q) {
                         items.push(format!("ws:{ws}"));
                     }
@@ -206,7 +206,7 @@ impl SeanceApp {
                     // switching circles; panes are reachable within one.
                     let q = query.trim().to_ascii_lowercase();
                     let mut items: Vec<(String, String)> = Vec::new();
-                    for ws in self.workspaces(_cx) {
+                    for ws in self.workspaces() {
                         if q.is_empty()
                             || q.split_whitespace()
                                 .all(|t| ws.to_ascii_lowercase().contains(t))

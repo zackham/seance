@@ -8,7 +8,7 @@ use super::helpers::{
     assert_self_or_cross, atomic_append_pad, atomic_write_pad, base64_decode, chrono_lite_stamp,
     now_ms, task_json, validate_status, write_task_sidecar,
 };
-use super::{Engine, PendingAsk, SpawnSpec};
+use super::{Engine, EnginePane, PendingAsk, SpawnSpec};
 use crate::control::{ControlRequest, ControlResponse};
 use crate::events;
 use crate::runtime::protocol::*;
@@ -20,19 +20,42 @@ impl Engine {
         let ok = |data: serde_json::Value| ControlResponse::ok(data);
         let err = |m: String| ControlResponse::err(m);
         let find = |eng: &Engine, key: &str, scope: &Option<String>| -> Result<usize, String> {
-            let idx = eng
+            // Slug is the unique id; a display name is not. Resolving both in a
+            // single pass let an EARLIER pane's name shadow a LATER pane's slug —
+            // two panes named "term-2" (one of them slug `term-2-2`) meant
+            // `ctl send term-2` drove the wrong pane and silently skipped the
+            // one actually asked for. Slug wins, and scope narrows the
+            // candidates *before* matching so a scoped call can disambiguate.
+            let matches = |p: &EnginePane, by_slug: bool| {
+                if by_slug {
+                    p.slug == key
+                } else {
+                    p.name == key
+                }
+            };
+            let in_scope = |p: &EnginePane| scope.as_ref().is_none_or(|ws| p.workspace == *ws);
+            for by_slug in [true, false] {
+                if let Some(i) = eng
+                    .panes
+                    .iter()
+                    .position(|p| matches(p, by_slug) && in_scope(p))
+                {
+                    return Ok(i);
+                }
+            }
+            // Nothing in scope — distinguish "wrong workspace" from "no such pane".
+            if eng
                 .panes
                 .iter()
-                .position(|p| p.slug == key || p.name == key)
-                .ok_or_else(|| format!("no pane '{key}'"))?;
-            if let Some(ws) = scope {
-                if eng.panes[idx].workspace != *ws {
+                .any(|p| matches(p, true) || matches(p, false))
+            {
+                if let Some(ws) = scope {
                     return Err(format!(
                         "pane '{key}' is outside your workspace '{ws}' (use --all to cross)"
                     ));
                 }
             }
-            Ok(idx)
+            Err(format!("no pane '{key}'"))
         };
         let actor = |from: &Option<String>| {
             from.as_ref()

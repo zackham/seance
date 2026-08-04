@@ -830,3 +830,93 @@ fn empty_workspace_row_disappears_after_last_pane_dies() {
         let _ = std::fs::remove_dir_all(&scratch);
     });
 }
+
+/// The bug this fixes: a circle that stopped working kept its spinner until
+/// you clicked it. Grid frames (which carry the OSC title) are sent only to
+/// windows streaming that pane, so a window looking at another circle never
+/// learned the title had gone idle. Busy flips are broadcast instead —
+/// including to a window that subscribes to neither the pane nor its circle.
+#[test]
+fn busy_flips_reach_a_window_that_does_not_subscribe_to_the_circle() {
+    with_test_state_dir("gui-busy", || {
+        let scratch = temp_scratch("gui-busy");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let worker = eng.push_stub_pane("worker", "lab");
+        eng.push_stub_pane("other", "cadence");
+
+        // This window watches `cadence` only — `lab` is parked for it.
+        let gui = FakeGui::attach_to(&mut eng);
+        let st = attach_with(&mut eng, &gui.id, &["cadence"]);
+        assert!(!st.subscribes("lab"), "subs={:?}", st.subscriptions);
+        gui.drain();
+
+        eng.handle_session_event(SessionEvent::Title {
+            slug: worker.clone(),
+            title: Some("\u{2809} building".into()),
+        });
+        assert_eq!(
+            busy_events(&gui.drain()),
+            vec![(worker.clone(), true)],
+            "spinner in an unsubscribed circle must still be announced"
+        );
+
+        // Same busy title again: edge-triggered, so nothing new on the wire.
+        eng.handle_session_event(SessionEvent::Title {
+            slug: worker.clone(),
+            title: Some("\u{280B} building".into()),
+        });
+        assert!(busy_events(&gui.drain()).is_empty(), "no flip, no event");
+
+        // Work finished. THIS is the event the sidebar was never getting.
+        eng.handle_session_event(SessionEvent::Title {
+            slug: worker.clone(),
+            title: Some("\u{2733} idle".into()),
+        });
+        assert_eq!(busy_events(&gui.drain()), vec![(worker.clone(), false)]);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+/// A fresh window's State push carries the daemon's busy verdict, so a GUI
+/// that attaches mid-spinner starts in the working band without waiting for
+/// the next flip.
+#[test]
+fn state_push_seeds_busy_from_the_daemon() {
+    with_test_state_dir("gui-busy-seed", || {
+        let scratch = temp_scratch("gui-busy-seed");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let worker = eng.push_stub_pane("worker", "lab");
+        eng.push_stub_pane("idle-one", "lab");
+        eng.handle_session_event(SessionEvent::Title {
+            slug: worker.clone(),
+            title: Some("\u{2809} building".into()),
+        });
+
+        let gui = FakeGui::attach_to(&mut eng);
+        let _ = attach_all(&mut eng, &gui.id);
+        let busy = eng
+            .pane_infos()
+            .into_iter()
+            .filter(|p| p.busy)
+            .map(|p| p.slug)
+            .collect::<Vec<_>>();
+        assert_eq!(busy, vec![worker.clone()]);
+
+        // A killed pane doesn't linger in the busy set.
+        eng.kill_pane(&worker);
+        assert!(eng.pane_infos().iter().all(|p| !p.busy));
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+/// `(pane, busy)` pairs in wire order.
+fn busy_events(evs: &[GuiEvent]) -> Vec<(String, bool)> {
+    evs.iter()
+        .filter_map(|ev| match ev {
+            GuiEvent::PaneBusy { pane, busy } => Some((pane.clone(), *busy)),
+            _ => None,
+        })
+        .collect()
+}
