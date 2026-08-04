@@ -437,6 +437,12 @@ pub struct PaneInfo {
     /// conversation. Clients render it greyed with an awaken affordance.
     #[serde(default)]
     pub asleep: bool,
+    /// The daemon can put this pane back exactly as it is (a claude pane whose
+    /// conversation exists on disk, or a file pane). Clients offer "sleep"
+    /// only when every pane in the circle says yes — the check needs the
+    /// filesystem, so it can't be made client-side.
+    #[serde(default)]
+    pub restorable: bool,
     pub scratchpad: String,
     /// For file panes: the path being watched.
     #[serde(default)]

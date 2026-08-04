@@ -46,6 +46,17 @@ pub struct ActKillWorkspace(pub String);
 #[action(namespace = seance, no_json)]
 pub struct ActParkWorkspace(pub String);
 
+/// Sleep a circle: every pane's process exits, the last frame stays readable,
+/// and it wakes back onto the same conversations. Daemon-side and global.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActSleepWorkspace(pub String);
+
+/// Wake a sleeping circle (the awaken bar, and the context menu).
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActWakeWorkspace(pub String);
+
 /// The inverse: parked → active (`Subscribe`), without selecting it.
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]

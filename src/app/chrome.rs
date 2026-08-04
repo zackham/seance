@@ -218,6 +218,76 @@ impl SeanceApp {
     /// Stage strip — only when something needs the human.
     /// Human-only shells stay clean (no second roster). Shows chips for
     /// needs-human / blocked / risky in the selected workspace.
+    /// The awaken bar: a sleeping circle's panes still show what they were
+    /// showing, greyed, and this sits ABOVE them so none of that content is
+    /// covered. Only rendered when the selected circle is asleep.
+    pub(super) fn render_awaken_bar(&self, cx: &Context<Self>) -> gpui::AnyElement {
+        let Some(ws) = self.selected_workspace.clone() else {
+            return div().into_any_element();
+        };
+        if !self.workspace_asleep(&ws) {
+            return div().into_any_element();
+        }
+        let n = self
+            .panes
+            .iter()
+            .filter(|p| p.workspace == ws && p.asleep)
+            .count();
+        let ws_for_click = ws.clone();
+        div()
+            .id("awaken-bar")
+            .flex_none()
+            .px_3()
+            .py_2()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .border_b_1()
+            .border_color(SeancePalette::border())
+            .bg(SeancePalette::bg_elevated())
+            .child(
+                div()
+                    .flex_none()
+                    .text_sm()
+                    .text_color(SeancePalette::violet())
+                    .child("☾"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .text_color(SeancePalette::text_dim())
+                    // Say what you are looking at. A frozen frame that doesn't
+                    // announce itself is just a lying screen.
+                    .child(format!(
+                        "{ws} is asleep — {n} pane{} holding no memory. What you see below is the last frame each was showing.",
+                        if n == 1 { "" } else { "s" }
+                    )),
+            )
+            .child(
+                div()
+                    .id("awaken-btn")
+                    .flex_none()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .text_sm()
+                    .cursor_pointer()
+                    .bg(SeancePalette::surface())
+                    .text_color(SeancePalette::flame())
+                    .hover(|s| s.bg(SeancePalette::surface().lighten(0.06)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let _ = this.client.wake_workspace(&ws_for_click);
+                        cx.notify();
+                    }))
+                    .child("awaken circle"),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_stage_strip(
         &self,
         window_active: bool,
@@ -399,6 +469,31 @@ pub(super) fn render_pane(
                 SharedString::from(format!("flip-in-{slug}")),
                 Animation::new(Duration::from_millis(220)).with_easing(ease_in_out),
                 |this, delta| this.opacity(0.35 + 0.65 * delta),
+            )
+            .into_any_element()
+    } else if pane.asleep {
+        // Frozen frame: still readable — that is the point of sleeping rather
+        // than closing — but unmistakably not live. A dimmed scrim over the
+        // content, and the terminal beneath it takes no input (no process).
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .overflow_hidden()
+            .child(
+                div()
+                    .size_full()
+                    .opacity(0.45)
+                    .child(pane.content_element()),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .bg(SeancePalette::bg().opacity(0.35)),
             )
             .into_any_element()
     } else {

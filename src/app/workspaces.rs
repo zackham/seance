@@ -305,6 +305,24 @@ impl SeanceApp {
         }
     }
 
+    /// Any pane of this circle is asleep — the circle reads as asleep.
+    pub(super) fn workspace_asleep(&self, ws: &str) -> bool {
+        self.panes.iter().any(|p| p.workspace == ws && p.asleep)
+    }
+
+    /// Every pane in the circle can be put back exactly (daemon's verdict, on
+    /// the wire as `PaneInfo::restorable`). Gates the "sleep circle" verb.
+    pub(super) fn workspace_sleepable(&self, ws: &str) -> bool {
+        let mut any = false;
+        for p in self.panes.iter().filter(|p| p.workspace == ws) {
+            any = true;
+            if !p.restorable {
+                return false;
+            }
+        }
+        any
+    }
+
     /// Bump this circle's recency so it sorts above idle peers (working agents
     /// still float above everything). Sources: human typing into a terminal
     /// here, right-click → touch, newly created circles, and the moment a

@@ -1459,6 +1459,8 @@ impl SeanceApp {
                 p.command = info.command.clone();
                 p.cwd = info.cwd.clone();
                 p.scratchpad = info.scratchpad.clone();
+                p.asleep = info.asleep;
+                p.restorable = info.restorable;
             }
             return;
         }
@@ -1475,6 +1477,8 @@ impl SeanceApp {
                 command: info.command.clone(),
                 tiled: info.tiled,
                 scratchpad: info.scratchpad.clone(),
+                asleep: info.asleep,
+                restorable: info.restorable,
                 body: PaneBody::File { view },
                 popped: None,
             });
@@ -1491,6 +1495,8 @@ impl SeanceApp {
             command: info.command.clone(),
             tiled: info.tiled,
             scratchpad: info.scratchpad.clone(),
+            asleep: info.asleep,
+            restorable: info.restorable,
             body: PaneBody::Remote { terminal, view },
             popped: None,
         });
@@ -2295,6 +2301,7 @@ impl Render for SeanceApp {
             .collect();
         let shelf_el = self.render_minimize_shelf(active, cx).into_any_element();
         let stage_el = self.render_stage_strip(active, cx).into_any_element();
+        let awaken_el = self.render_awaken_bar(cx);
         let pr_el = self.render_pr_chip(cx);
         let t2 = std::time::Instant::now();
         let tiles_el = self.render_tiles(active, cx).into_any_element();
@@ -2366,6 +2373,14 @@ impl Render for SeanceApp {
             }))
             .on_action(cx.listener(|this, act: &ActClearPrLinks, _, cx| {
                 this.clear_pr_links(&act.0.clone(), cx);
+            }))
+            .on_action(cx.listener(|this, act: &ActSleepWorkspace, _, cx| {
+                let _ = this.client.sleep_workspace(&act.0.clone());
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, act: &ActWakeWorkspace, _, cx| {
+                let _ = this.client.wake_workspace(&act.0.clone());
+                cx.notify();
             }))
             .on_action(cx.listener(|this, act: &ActParkWorkspace, window, cx| {
                 this.park_workspace(&act.0.clone(), window, cx);
@@ -2481,6 +2496,7 @@ impl Render for SeanceApp {
                     .child(shelf_el)
                     .child(pr_el)
                     .child(stage_el)
+                    .child(awaken_el)
                     .child(tiles_el),
             )
             .children(

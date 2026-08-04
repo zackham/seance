@@ -252,6 +252,20 @@ impl GuiClient {
         })
     }
 
+    /// Sleep a whole circle — daemon-side, so every window sees it.
+    pub fn sleep_workspace(&self, workspace: &str) -> Result<()> {
+        self.send(GuiRequest::SleepWorkspace {
+            workspace: workspace.to_string(),
+        })
+    }
+
+    /// Wake it back onto its own conversations.
+    pub fn wake_workspace(&self, workspace: &str) -> Result<()> {
+        self.send(GuiRequest::WakeWorkspace {
+            workspace: workspace.to_string(),
+        })
+    }
+
     pub fn kill_workspace(&self, workspace: &str) -> Result<()> {
         self.send(GuiRequest::KillWorkspace {
             workspace: workspace.to_string(),

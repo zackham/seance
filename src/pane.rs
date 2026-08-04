@@ -30,6 +30,11 @@ pub struct Pane {
     pub tiled: bool,
     /// Daemon-side scratchpad path (from PaneInfo) — pads are bridge-served.
     pub scratchpad: String,
+    /// No process behind this pane: its body paints the frozen last frame and
+    /// the tile area greys out (daemon's `PaneInfo::asleep`).
+    pub asleep: bool,
+    /// The daemon could put this pane back exactly — gates the sleep verb.
+    pub restorable: bool,
     pub body: PaneBody,
     /// When popped out, the handle of the OS window hosting this pane's view.
     /// Not persisted — restarts bring every pane back into the main window.

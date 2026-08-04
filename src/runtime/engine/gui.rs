@@ -805,6 +805,7 @@ impl Engine {
                     title: p.session.as_ref().and_then(|s| s.title()),
                     busy: self.pane_busy.contains(&p.slug),
                     asleep: p.asleep,
+                    restorable: self.pane_restorable(&p.slug),
                     scratchpad: p.scratch_path.to_string_lossy().to_string(),
                     file: p.file.clone(),
                     owner: Some(w.owner),
@@ -1019,6 +1020,18 @@ impl Engine {
                 None
             }
             GuiRequest::Input { pane, bytes_b64 } => {
+                // Typing into a sleeping pane wakes it — same rule as ctl send.
+                // Scrolling deliberately does not: reading the frozen frame is
+                // what it's for.
+                if self.panes.iter().any(|p| p.slug == pane && p.asleep) {
+                    if self.wake_pane(&pane).is_ok() {
+                        self.persist();
+                        self.push_state_to_all();
+                    }
+                    // The keystroke that woke it is dropped: the shell/agent is
+                    // still booting and would eat it at a half-drawn prompt.
+                    return None;
+                }
                 self.record_event(
                     &pane,
                     seance_core::replay::ReplayEvent::Input {

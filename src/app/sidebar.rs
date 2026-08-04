@@ -536,6 +536,10 @@ impl SeanceApp {
             Some((RenameTarget::Workspace(w), _)) if *w == workspace
         );
         let rename_input = self.renaming.as_ref().map(|(_, i)| i.clone());
+        // Sleep verbs: only offered when the daemon says every pane in the
+        // circle can be put back exactly (it checks the filesystem, we can't).
+        let asleep = self.workspace_asleep(&workspace);
+        let sleepable = !asleep && self.workspace_sleepable(&workspace);
         // Attention: parked rows additionally badge `needs` until first looked at.
         let attention = if parked {
             self.parked_attention(&workspace)
@@ -626,6 +630,13 @@ impl SeanceApp {
                         } else {
                             m.menu("park circle", Box::new(ActParkWorkspace(ws_m.clone())))
                         };
+                        let m = if asleep {
+                            m.menu("awaken circle", Box::new(ActWakeWorkspace(ws_m.clone())))
+                        } else if sleepable {
+                            m.menu("sleep circle", Box::new(ActSleepWorkspace(ws_m.clone())))
+                        } else {
+                            m
+                        };
                         m.separator().menu(
                             "banish workspace (kill all panes)",
                             Box::new(ActKillWorkspace(ws_m.clone())),
@@ -636,7 +647,9 @@ impl SeanceApp {
                     // Working → spinner in the icon slot (no "working"
                     // text badge), so more of the workspace name shows.
                     let working = matches!(attention, Some(WorkspaceAttention::Working));
-                    let (glyph, color) = if working {
+                    let (glyph, color) = if asleep {
+                        ("☾", SeancePalette::violet())
+                    } else if working {
                         (working_spinner_glyph(), SeancePalette::flame())
                     } else if selected {
                         ("◆", SeancePalette::flame())
