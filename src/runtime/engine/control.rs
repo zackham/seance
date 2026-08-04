@@ -174,6 +174,16 @@ impl Engine {
                         events::log(&act, Some(&ws), Some(&slug), "agency.denied", e.clone());
                         return err(e);
                     }
+                    // Addressing a sleeping pane wakes it. Anything else makes
+                    // every orchestrator break silently the first time it
+                    // talks to a circle that dozed off.
+                    if self.panes[idx].asleep {
+                        if let Err(e) = self.wake_pane(&slug) {
+                            return err(format!("pane '{slug}' is asleep and would not wake: {e}"));
+                        }
+                        self.persist();
+                        self.push_state_to_all();
+                    }
                     if self.panes[idx].session.is_none() {
                         return err(if exited {
                             "pane has exited (tombstone)".into()
@@ -859,6 +869,54 @@ impl Engine {
                     format!("cleared {removed} link(s)"),
                 );
                 ok(json!({"workspace": ws, "removed": removed}))
+            }
+            Sleep {
+                workspace,
+                scope,
+                from,
+            } => {
+                let Some(ws) = workspace.or(scope) else {
+                    return err("sleep: expected WORKSPACE".into());
+                };
+                match self.sleep_workspace(&ws) {
+                    Ok(n) => {
+                        self.persist();
+                        self.push_state_to_all();
+                        events::log(
+                            &actor(&from),
+                            Some(&ws),
+                            None,
+                            "workspace_slept",
+                            format!("{n} pane(s) slept"),
+                        );
+                        ok(json!({"workspace": ws, "slept": n}))
+                    }
+                    Err(e) => err(e.to_string()),
+                }
+            }
+            Wake {
+                workspace,
+                scope,
+                from,
+            } => {
+                let Some(ws) = workspace.or(scope) else {
+                    return err("wake: expected WORKSPACE".into());
+                };
+                match self.wake_workspace(&ws) {
+                    Ok(n) => {
+                        self.persist();
+                        self.push_state_to_all();
+                        events::log(
+                            &actor(&from),
+                            Some(&ws),
+                            None,
+                            "workspace_woke",
+                            format!("{n} pane(s) woke"),
+                        );
+                        ok(json!({"workspace": ws, "woke": n}))
+                    }
+                    Err(e) => err(e.to_string()),
+                }
             }
             PolicyGet {
                 workspace, scope, ..

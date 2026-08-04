@@ -508,10 +508,13 @@ impl Engine {
     }
 
     fn flush_workspace_grids(&mut self, workspace: &str) {
+        // Sleeping panes are included: they have no session, but they do have
+        // a frozen frame, and selecting the circle is exactly when you want to
+        // read it.
         let slugs: Vec<String> = self
             .panes
             .iter()
-            .filter(|p| p.workspace == workspace && p.session.is_some())
+            .filter(|p| p.workspace == workspace && (p.session.is_some() || p.asleep))
             .map(|p| p.slug.clone())
             .collect();
         for slug in slugs {
@@ -658,6 +661,12 @@ impl Engine {
                 }
             }
             SessionEvent::Exited { slug, code } => {
+                // Sleeping a pane kills its child, which lands here. That exit
+                // is the point, not a death — the pane keeps its identity and
+                // its frozen frame, so it must NOT be auto-closed.
+                if self.panes.iter().any(|p| p.slug == *slug && p.asleep) {
+                    return;
+                }
                 self.record_grid_tap(&slug.clone(), true);
                 self.record_event(
                     slug,
@@ -693,11 +702,15 @@ impl Engine {
         }
     }
 
+    /// The pane's current grid — or, for a sleeping pane, the frame it was
+    /// showing when it went to sleep. Every paint path runs through here, so
+    /// a slept circle still reads without a process behind it.
     pub fn snapshot_pane(&self, slug: &str) -> Option<GridSnapshot> {
-        self.panes
-            .iter()
-            .find(|p| p.slug == slug)
-            .and_then(|p| p.session.as_ref().map(|s| s.snapshot()))
+        let pane = self.panes.iter().find(|p| p.slug == slug)?;
+        if pane.asleep {
+            return self.frozen_grid(slug);
+        }
+        pane.session.as_ref().map(|s| s.snapshot())
     }
 
     /// Dense one-row summary for orchestrators (`list` / `brief` / `roster`).
@@ -750,6 +763,7 @@ impl Engine {
             "cwd": p.cwd,
             "tiled": p.tiled,
             "running": running,
+            "asleep": p.asleep,
             "exited": w.exited,
             "exit_code": w.exit_code,
             "owner": w.owner,
@@ -790,6 +804,7 @@ impl Engine {
                     running,
                     title: p.session.as_ref().and_then(|s| s.title()),
                     busy: self.pane_busy.contains(&p.slug),
+                    asleep: p.asleep,
                     scratchpad: p.scratch_path.to_string_lossy().to_string(),
                     file: p.file.clone(),
                     owner: Some(w.owner),
@@ -945,6 +960,43 @@ impl Engine {
                     self.flush_workspace_grids(&workspace);
                 }
                 None
+            }
+            GuiRequest::SleepWorkspace { workspace } => {
+                let res = self.sleep_workspace(&workspace);
+                self.persist();
+                self.push_state_to_all();
+                return Some(match res {
+                    Ok(n) => GuiEvent::Ack {
+                        ok: true,
+                        data: Some(json!({ "slept": n })),
+                        error: None,
+                    },
+                    Err(e) => GuiEvent::Ack {
+                        ok: false,
+                        data: None,
+                        error: Some(e.to_string()),
+                    },
+                });
+            }
+            GuiRequest::WakeWorkspace { workspace } => {
+                let res = self.wake_workspace(&workspace);
+                self.persist();
+                self.push_state_to_all();
+                if res.is_ok() {
+                    self.flush_workspace_grids(&workspace);
+                }
+                return Some(match res {
+                    Ok(n) => GuiEvent::Ack {
+                        ok: true,
+                        data: Some(json!({ "woke": n })),
+                        error: None,
+                    },
+                    Err(e) => GuiEvent::Ack {
+                        ok: false,
+                        data: None,
+                        error: Some(e.to_string()),
+                    },
+                });
             }
             GuiRequest::Unsubscribe { workspace } => {
                 let was_selected = self.gui_conns.iter().any(|c| {

@@ -317,6 +317,8 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
         "revoke" => parse_revoke(sub_args),
         "policy" => parse_policy(sub_args),
         "pr-link" | "pr-links" => parse_pr_link(sub_args),
+        "sleep" => parse_sleep(sub_args, false),
+        "wake" | "awaken" => parse_sleep(sub_args, true),
         "seize" => parse_seize(sub_args),
         "release" => parse_release(sub_args),
         "drive" | "drive-mode" => parse_drive(sub_args),

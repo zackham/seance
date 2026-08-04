@@ -13,6 +13,7 @@ use anyhow::{bail, Context as _, Result};
 
 pub mod fsbridge;
 pub mod prwatch;
+pub mod sleepsweep;
 
 use crate::control::{self, ControlRequest, ControlResponse};
 use crate::runtime::engine::{Engine, OwnedFdAdopt};
@@ -119,6 +120,8 @@ fn run_daemon_inner(args: Vec<String>) -> Result<()> {
 
     // External PR-watcher ingest (pr_watch.json → PrLink.status).
     prwatch::start_pr_watch_poller(Arc::clone(&engine));
+    // Idle circles stop holding RAM (12h; restorable circles only).
+    sleepsweep::start_sleep_sweeper(Arc::clone(&engine));
 
     // Write pid file.
     let pid_path = daemon_pid_path();

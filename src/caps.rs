@@ -294,6 +294,8 @@ pub fn op_name(req: &crate::control::ControlRequest) -> &'static str {
         Caps { .. } => "caps",
         CapsGrant { .. } => "caps_grant",
         CapsRevoke { .. } => "caps_revoke",
+        Sleep { .. } => "sleep",
+        Wake { .. } => "wake",
         PolicyGet { .. } => "policy_get",
         PolicySet { .. } => "policy_set",
         Seize { .. } => "seize",

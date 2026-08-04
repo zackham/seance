@@ -29,6 +29,9 @@ pub struct HandoffPane {
     /// Claude session id owned by the pane (see `PersistedPane::claude_session`).
     #[serde(default)]
     pub claude_session: Option<String>,
+    /// Slept panes hand off as slept — no PTY fd to transfer, nothing to do.
+    #[serde(default)]
+    pub asleep: bool,
     pub kind: String,
     pub file: Option<String>,
     pub child_pid: Option<u32>,

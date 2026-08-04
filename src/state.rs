@@ -50,6 +50,11 @@ pub struct PersistedPane {
     /// `None` for shells, file panes, and panes persisted before 0.14.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_session: Option<String>,
+    /// Asleep: persisted with no live process. Restore leaves it that way —
+    /// a slept circle stays slept across daemon restart and `seance upgrade`,
+    /// which is the whole point (it is not holding RAM).
+    #[serde(default)]
+    pub asleep: bool,
     /// Named workspace this session belongs to (sidebar grouping).
     #[serde(default = "default_workspace")]
     pub workspace: String,
@@ -402,6 +407,7 @@ mod tests {
                     tiled: true,
                     resume_on_restore: true,
                     claude_session: None,
+                    asleep: false,
                     status: Some("working".into()),
                     status_note: None,
                     pad_rev: 2,
@@ -422,6 +428,7 @@ mod tests {
                     tiled: false,
                     resume_on_restore: false,
                     claude_session: None,
+                    asleep: false,
                     status: None,
                     status_note: None,
                     pad_rev: 0,

@@ -75,6 +75,16 @@ pub enum GuiRequest {
     Unsubscribe {
         workspace: String,
     },
+    /// Put a whole circle to sleep: every pane's process exits, the last frame
+    /// is frozen, identity and claude conversation are kept. Refused unless
+    /// every pane in it is restorable.
+    SleepWorkspace {
+        workspace: String,
+    },
+    /// Relaunch every sleeping pane in the circle (`claude --resume <id>`).
+    WakeWorkspace {
+        workspace: String,
+    },
     Input {
         pane: String,
         bytes_b64: String,
@@ -422,6 +432,11 @@ pub struct PaneInfo {
     /// working badges; kept fresh by [`GuiEvent::PaneBusy`].
     #[serde(default)]
     pub busy: bool,
+    /// Asleep: no process, no RAM. The pane keeps its identity and its last
+    /// rendered frame (served frozen), and wakes back onto the same claude
+    /// conversation. Clients render it greyed with an awaken affordance.
+    #[serde(default)]
+    pub asleep: bool,
     pub scratchpad: String,
     /// For file panes: the path being watched.
     #[serde(default)]

@@ -105,6 +105,21 @@ pub(crate) fn atomic_write_pad(path: &std::path::Path, contents: &str) -> Result
     })
 }
 
+/// Atomic replace of a binary blob (frozen grid frames). Same temp+rename.
+pub(crate) fn atomic_write_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let tmp = parent.join(format!(
+        ".{}.tmp.{}",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("blob"),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })
+}
+
 /// Atomic append: read existing + write new via temp+rename.
 pub(crate) fn atomic_append_pad(path: &std::path::Path, chunk: &str) -> Result<(), String> {
     let mut body = if path.exists() {

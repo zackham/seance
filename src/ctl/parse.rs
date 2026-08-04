@@ -159,6 +159,16 @@ pub(crate) fn with_identity(
     use ControlRequest::*;
     match request {
         List { .. } => List { scope, from },
+        Sleep { workspace, .. } => Sleep {
+            workspace,
+            scope,
+            from,
+        },
+        Wake { workspace, .. } => Wake {
+            workspace,
+            scope,
+            from,
+        },
         New {
             name,
             cwd,
@@ -975,6 +985,38 @@ pub(crate) fn parse_policy(args: Vec<String>) -> Result<ControlRequest, String> 
             from: None,
         })
     }
+}
+
+/// `sleep [WORKSPACE]` · `wake [WORKSPACE]` — omit the name inside a pane and
+/// the caller's own circle is used (ctl stamps `scope`).
+pub(crate) fn parse_sleep(args: Vec<String>, wake: bool) -> Result<ControlRequest, String> {
+    let mut it = args.into_iter();
+    let mut workspace = None;
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--workspace" | "--ws" => workspace = Some(take_value(&mut it, "--workspace")?),
+            other if workspace.is_none() => workspace = Some(other.to_string()),
+            other => {
+                return Err(format!(
+                    "{}: unexpected '{other}'",
+                    if wake { "wake" } else { "sleep" }
+                ))
+            }
+        }
+    }
+    Ok(if wake {
+        ControlRequest::Wake {
+            workspace,
+            scope: None,
+            from: None,
+        }
+    } else {
+        ControlRequest::Sleep {
+            workspace,
+            scope: None,
+            from: None,
+        }
+    })
 }
 
 /// `pr-link add WORKSPACE URL` · `pr-link clear WORKSPACE [URL]`

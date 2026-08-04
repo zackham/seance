@@ -179,8 +179,11 @@ pub(crate) fn print_session_rows(arr: &[serde_json::Value]) {
             .unwrap_or(0);
         let title = str_field(s, "title").unwrap_or_default();
         let task = str_field(s, "task_id").unwrap_or_default();
+        let asleep = s.get("asleep").and_then(|v| v.as_bool()).unwrap_or(false);
         let state = if exited {
             "tombstone"
+        } else if asleep {
+            "asleep"
         } else {
             match running {
                 Some(true) => "running",
@@ -346,6 +349,8 @@ COMMANDS:
     commands PANE / last-command PANE [--failed]
     watch [opts]                  stream events
          --kinds a,b  --pane P  --actor A  --since-seq N  --no-catch-up
+    sleep [WS]                    sleep a circle (frees its RAM; wakes on resume)
+    wake [WS]                     wake a sleeping circle
     pr-link add WS URL            seed a PR link on a workspace
     pr-link clear WS [URL]        drop one link (or all) from a workspace
     whoami / caps / grant / revoke / policy

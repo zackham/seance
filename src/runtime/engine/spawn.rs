@@ -47,7 +47,7 @@ fn new_session_uuid() -> String {
 
 /// Where claude keeps a session transcript: `~/.claude/projects/<cwd>/<id>.jsonl`,
 /// with `/` and `.` in the absolute cwd flattened to `-`.
-fn transcript_path(cwd_raw: &str, session: &str) -> PathBuf {
+pub(super) fn transcript_path(cwd_raw: &str, session: &str) -> PathBuf {
     let cwd = PathBuf::from(shellexpand::tilde(cwd_raw).into_owned());
     let encoded: String = cwd
         .to_string_lossy()
@@ -77,7 +77,7 @@ fn extract_session_flag(command: &str) -> Option<String> {
 /// never prompted has none, and `--resume` on a missing id exits non-zero,
 /// which closes the pane. In that case re-assert the same id with
 /// `--session-id` so the pane keeps its identity either way.
-fn claude_session_arg(command: &str, cwd_raw: &str, session: &str) -> String {
+pub(super) fn claude_session_arg(command: &str, cwd_raw: &str, session: &str) -> String {
     if transcript_path(cwd_raw, session).is_file() {
         format!("{command} --resume {session}")
     } else {
@@ -142,6 +142,7 @@ impl Engine {
                     tiled: spec.tiled,
                     resume_on_restore: false,
                     claude_session: None,
+                    asleep: false,
                     scratch_path,
                     file: Some(path.to_string_lossy().to_string()),
                     session: None,
@@ -198,6 +199,7 @@ impl Engine {
                 tiled: spec.tiled,
                 resume_on_restore: spec.resume,
                 claude_session,
+                asleep: false,
                 scratch_path,
                 file: None,
                 session: Some(session),
@@ -236,6 +238,7 @@ impl Engine {
                 tiled: p.tiled,
                 resume_on_restore: false,
                 claude_session: None,
+                asleep: p.asleep,
                 scratch_path: self.store.path_for(&p.slug),
                 file: Some(path.to_string_lossy().to_string()),
                 session: None,
@@ -274,13 +277,20 @@ impl Engine {
             }
         }
 
-        let session = self.spawn_terminal_session(
-            &want_slug,
-            &command,
-            &p.cwd,
-            &p.workspace,
-            p.resume_on_restore,
-        )?;
+        // A circle that was asleep stays asleep across a daemon restart —
+        // relaunching it here would defeat the point (it is not holding RAM,
+        // and nobody asked for it back).
+        let session = if p.asleep {
+            None
+        } else {
+            Some(self.spawn_terminal_session(
+                &want_slug,
+                &command,
+                &p.cwd,
+                &p.workspace,
+                p.resume_on_restore,
+            )?)
+        };
         self.panes.push(EnginePane {
             kind: "terminal".into(),
             name: p.name.clone(),
@@ -291,15 +301,16 @@ impl Engine {
             tiled: p.tiled,
             resume_on_restore: p.resume_on_restore,
             claude_session,
+            asleep: p.asleep,
             scratch_path: self.store.path_for(&p.slug),
             file: None,
-            session: Some(session),
+            session,
             agency: crate::agency::Agency::default(),
         });
         Ok(())
     }
 
-    fn spawn_terminal_session(
+    pub(super) fn spawn_terminal_session(
         &self,
         slug: &str,
         command: &str,

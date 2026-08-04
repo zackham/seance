@@ -4,6 +4,7 @@ mod control;
 mod gui;
 pub(crate) mod helpers;
 mod pr_links;
+mod sleep;
 mod spawn;
 
 #[cfg(test)]
@@ -13,6 +14,7 @@ mod tests;
 
 // Re-export helpers used by sibling modules / tests.
 pub use helpers::OwnedFdAdopt;
+pub use sleep::AUTO_SLEEP_IDLE_MS;
 
 use gui::{GuiConn, LastGridFrame};
 
@@ -27,6 +29,7 @@ use anyhow::Result;
 
 use super::protocol::*;
 use super::pty_session::{AdoptedPty, PtySession, SessionEvent};
+use super::snapshot::GridSnapshot;
 use crate::cmdlog::CommandLog;
 use crate::scratchpad::ScratchpadStore;
 use crate::state::{AppState, PersistedPane};
@@ -56,6 +59,8 @@ pub struct EnginePane {
     pub resume_on_restore: bool,
     /// Claude conversation this pane owns; restored with `--resume`.
     pub claude_session: Option<String>,
+    /// Asleep: no `session`, no process, no RAM. Keeps identity + last frame.
+    pub asleep: bool,
     pub scratch_path: PathBuf,
     pub file: Option<String>,
     pub session: Option<PtySession>,
@@ -114,6 +119,10 @@ pub struct Engine {
     /// Last cells we broadcast per pane — enables row-damage frames + skip
     /// when nothing changed.
     last_grid_cells: HashMap<String, LastGridFrame>,
+    /// Last rendered frame of each SLEEPING pane, served in place of a live
+    /// snapshot so the circle still reads (greyed) with no process behind it.
+    /// Backed by `<state-dir>/frozen/<slug>.scg` so it survives restart.
+    frozen_grids: HashMap<String, GridSnapshot>,
     /// Panes whose TUI title currently shows a spinner. The daemon is the only
     /// party that sees EVERY title (grid frames go to subscribers only), so it
     /// owns this and broadcasts the flips (`GuiEvent::PaneBusy`).
@@ -176,6 +185,7 @@ impl Engine {
             grid_flush_pending: HashSet::new(),
             last_grid_cells: HashMap::new(),
             pane_busy: HashSet::new(),
+            frozen_grids: HashMap::new(),
             workspace_output: HashMap::new(),
             workspace_touch_ms: HashMap::new(),
             pr_links: HashMap::new(),
@@ -201,6 +211,7 @@ impl Engine {
             tiled: true,
             resume_on_restore: false,
             claude_session: None,
+            asleep: false,
             scratch_path,
             file: None,
             session: None,
@@ -242,6 +253,7 @@ impl Engine {
             grid_flush_pending: HashSet::new(),
             last_grid_cells: HashMap::new(),
             pane_busy: HashSet::new(),
+            frozen_grids: HashMap::new(),
             workspace_output: HashMap::new(),
             workspace_touch_ms: HashMap::new(),
             pr_links: HashMap::new(),
@@ -290,6 +302,8 @@ impl Engine {
                 pane.agency = crate::agency::Agency::from_snap(&snap);
             }
         }
+
+        eng.load_frozen_grids();
 
         if eng.panes.is_empty() {
             let _ = eng.spawn(SpawnSpec {
@@ -376,6 +390,7 @@ impl Engine {
             grid_flush_pending: HashSet::new(),
             last_grid_cells: HashMap::new(),
             pane_busy: HashSet::new(),
+            frozen_grids: HashMap::new(),
             // Activity clocks ride the handoff — an upgrade must not reset
             // every circle's "time since update" to unknown.
             workspace_output: bundle.workspace_output.into_iter().collect(),
@@ -411,6 +426,7 @@ impl Engine {
                     tiled: hp.tiled,
                     resume_on_restore: false,
                     claude_session: None,
+                    asleep: hp.asleep,
                     scratch_path,
                     file: hp.file,
                     session: None,
@@ -473,12 +489,14 @@ impl Engine {
                 tiled: hp.tiled,
                 resume_on_restore: hp.resume_on_restore,
                 claude_session: hp.claude_session,
+                asleep: hp.asleep,
                 scratch_path,
                 file: None,
                 session,
                 agency,
             });
         }
+        eng.load_frozen_grids();
         Ok((eng, event_rx))
     }
 
@@ -516,6 +534,7 @@ impl Engine {
                         tiled: p.tiled,
                         resume_on_restore: p.resume_on_restore,
                         claude_session: p.claude_session.clone(),
+                        asleep: p.asleep,
                         workspace: p.workspace.clone(),
                         status,
                         status_note,
@@ -591,6 +610,7 @@ impl Engine {
                 tiled: p.tiled,
                 resume_on_restore: p.resume_on_restore,
                 claude_session: p.claude_session.clone(),
+                asleep: p.asleep,
                 kind: p.kind.clone(),
                 file: p.file.clone(),
                 child_pid: None,

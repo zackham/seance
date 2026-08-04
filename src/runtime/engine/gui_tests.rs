@@ -920,3 +920,126 @@ fn busy_events(evs: &[GuiEvent]) -> Vec<(String, bool)> {
         })
         .collect()
 }
+
+/// Restorability is the whole gate on sleep. A stub pane runs `bash -l`, which
+/// is exactly the case that must be refused: a shell's cwd drift, history and
+/// children can't be rebuilt, so it vetoes its circle.
+#[test]
+fn a_shell_pane_is_not_restorable_and_vetoes_its_circle() {
+    with_test_state_dir("sleep-gate", || {
+        let scratch = temp_scratch("sleep-gate");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let shell = eng.push_stub_pane("worker", "lab");
+
+        assert!(!eng.pane_restorable(&shell));
+        assert!(!eng.workspace_restorable("lab"));
+        assert_eq!(eng.workspace_sleep_blockers("lab"), vec![shell.clone()]);
+
+        let e = eng.sleep_workspace("lab").unwrap_err().to_string();
+        assert!(e.contains("not restorable"), "{e}");
+        assert!(e.contains(&shell), "{e}");
+        // Refused means untouched: the pane is still there, still awake.
+        assert!(eng.panes.iter().any(|p| p.slug == shell && !p.asleep));
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+/// A claude pane with a live conversation id sleeps, keeps its identity, and
+/// its `Exited` (which sleeping causes) must not auto-close it.
+#[test]
+fn sleeping_keeps_the_pane_and_survives_its_own_exit_event() {
+    with_test_state_dir("sleep-keep", || {
+        let scratch = temp_scratch("sleep-keep");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let slug = eng.push_stub_pane("agent", "lab");
+        let transcript = fake_claude_pane(&mut eng, &slug, "sleep-keep");
+
+        assert!(eng.pane_restorable(&slug));
+        assert_eq!(eng.sleep_workspace("lab").unwrap(), 1);
+        assert!(eng.workspace_asleep("lab"));
+        let p = eng.panes.iter().find(|p| p.slug == slug).unwrap();
+        assert!(p.asleep && p.session.is_none());
+        assert!(p.claude_session.is_some(), "conversation id is kept");
+
+        // The PTY death that sleeping caused arrives late. It must be ignored:
+        // the auto-close path would delete the pane we just slept.
+        eng.handle_session_event(SessionEvent::Exited {
+            slug: slug.clone(),
+            code: Some(0),
+        });
+        assert!(eng.panes.iter().any(|p| p.slug == slug && p.asleep));
+
+        // Sleeping twice is a no-op, not an error (sweep vs right-click race).
+        assert!(!eng.sleep_pane(&slug).unwrap());
+
+        let _ = std::fs::remove_file(&transcript);
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+/// The sweep only takes circles that are idle past the threshold AND fully
+/// restorable AND actually clocked — no observation is not evidence of idle.
+#[test]
+fn auto_sleep_takes_only_idle_restorable_clocked_circles() {
+    with_test_state_dir("sleep-sweep", || {
+        let scratch = temp_scratch("sleep-sweep");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let idle = eng.push_stub_pane("agent", "idle-circle");
+        let fresh = eng.push_stub_pane("agent", "fresh-circle");
+        let never = eng.push_stub_pane("agent", "unclocked");
+        let shell = eng.push_stub_pane("worker", "has-a-shell");
+        let t1 = fake_claude_pane(&mut eng, &idle, "sweep-1");
+        let t2 = fake_claude_pane(&mut eng, &fresh, "sweep-2");
+        let t3 = fake_claude_pane(&mut eng, &never, "sweep-3");
+
+        let now = now_ms();
+        let day = 24 * 60 * 60 * 1000;
+        eng.workspace_output.insert("idle-circle".into(), now - day);
+        eng.workspace_output
+            .insert("fresh-circle".into(), now - 1000);
+        eng.workspace_output.insert("has-a-shell".into(), now - day);
+        // `unclocked` deliberately gets no stamp.
+
+        let idle_ms = 12 * 60 * 60 * 1000;
+        assert_eq!(
+            eng.auto_sleep_candidates(idle_ms, now),
+            vec!["idle-circle".to_string()]
+        );
+
+        // Human input inside the window keeps a circle awake even with no output.
+        eng.workspace_touch_ms
+            .insert("idle-circle".into(), now - 60_000);
+        assert!(eng.auto_sleep_candidates(idle_ms, now).is_empty());
+
+        let _ = shell;
+        for t in [t1, t2, t3] {
+            let _ = std::fs::remove_file(t);
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+/// Give a stub pane the shape of a resumable claude pane: a claude command, a
+/// minted session id, and a transcript on disk where `--resume` would find it.
+/// Returns the transcript path so the test can clean it up.
+fn fake_claude_pane(eng: &mut Engine, slug: &str, tag: &str) -> PathBuf {
+    let cwd = std::env::temp_dir().join(format!("seance-sleep-{}-{}", tag, std::process::id()));
+    std::fs::create_dir_all(&cwd).unwrap();
+    let session = format!("11111111-2222-4333-a444-{:012}", std::process::id());
+    let encoded: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect();
+    let dir = PathBuf::from(shellexpand::tilde("~/.claude/projects").into_owned()).join(encoded);
+    std::fs::create_dir_all(&dir).unwrap();
+    let transcript = dir.join(format!("{session}.jsonl"));
+    std::fs::write(&transcript, b"{}\n").unwrap();
+
+    let p = eng.panes.iter_mut().find(|p| p.slug == slug).unwrap();
+    p.command = "claude --dangerously-skip-permissions".into();
+    p.cwd = cwd.to_string_lossy().to_string();
+    p.claude_session = Some(session);
+    transcript
+}
