@@ -17,6 +17,20 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.15.1] — 2026-08-04
+
+### Fixed
+
+- **Awaken lands the keyboard in the circle.** Every awaken affordance is a
+  click, and a click leaves focus on the thing clicked — the bar button, the
+  menu item — so waking a circle left you unable to type until you clicked a
+  pane. Both GUIs now focus the circle's pane as part of waking. Native holds
+  it in `pending_focus`, which survives the daemon round-trip and applies on
+  the first render after the relaunch; web focuses the pane and blurs the
+  button (a focused `<button>` also eats Enter/Space, which would re-fire the
+  wake). Same family as the summon and empty-circle focus bugs: the pane view
+  is alive the whole time, so nothing re-focuses it unless we say so.
+
 ## [0.15.0] — 2026-08-04
 
 Sleep a circle you're done with. It stops costing RAM and keeps its mind.

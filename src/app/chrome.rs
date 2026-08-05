@@ -279,9 +279,8 @@ impl SeanceApp {
                     .bg(SeancePalette::surface())
                     .text_color(SeancePalette::flame())
                     .hover(|s| s.bg(SeancePalette::surface().lighten(0.06)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let _ = this.client.wake_workspace(&ws_for_click);
-                        cx.notify();
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.wake_workspace_focused(&ws_for_click, window, cx);
                     }))
                     .child("awaken circle"),
             )

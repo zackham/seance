@@ -802,6 +802,7 @@ impl Chrome {
         // restorability verdict, captured before the closure.
         let row_asleep = asleep;
         let row_sleepable = !asleep && state.workspace_sleepable(ws);
+        let menu_wake_target: Option<String> = state.panes_in(ws).first().map(|p| p.slug.clone());
         {
             let actions = self.actions.clone();
             let rn = self.rename.clone();
@@ -871,10 +872,16 @@ impl Chrome {
                 if row_asleep {
                     let a = actions.clone();
                     let w = ws.clone();
+                    let target = menu_wake_target.clone();
                     entries.push(MenuEntry::item("awaken circle", move || {
                         a.send(GuiRequest::WakeWorkspace {
                             workspace: w.clone(),
-                        })
+                        });
+                        // Same rule as the awaken bar: waking a circle means
+                        // you want to type in it.
+                        if let Some(slug) = target.as_deref() {
+                            a.focus_pane(slug);
+                        }
                     }));
                 } else if row_sleepable {
                     let a = actions.clone();
@@ -1644,10 +1651,21 @@ impl Chrome {
         let btn = text_el(&doc, "button", "aw-btn", "awaken circle")?;
         self.awaken.append_child(&btn)?;
         let actions = self.actions.clone();
+        // Land the keyboard in the circle. Clicking the button leaves DOM
+        // focus on the button, which both swallows Enter/Space (it would
+        // re-fire the wake) and leaves `focused_pane` wherever it was.
+        let target = state.panes_in(&ws).first().map(|p| p.slug.clone());
+        let btn_for_blur = btn.clone();
         bind_click(&btn, &mut self.ask_clicks, move |_| {
             actions.send(GuiRequest::WakeWorkspace {
                 workspace: ws.clone(),
-            })
+            });
+            if let Some(el) = btn_for_blur.dyn_ref::<web_sys::HtmlElement>() {
+                let _ = el.blur();
+            }
+            if let Some(slug) = target.as_deref() {
+                actions.focus_pane(slug);
+            }
         })?;
         Ok(())
     }

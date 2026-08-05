@@ -305,6 +305,27 @@ impl SeanceApp {
         }
     }
 
+    /// Wake a circle AND land the keyboard in it.
+    ///
+    /// Every awaken affordance is a click, and a click leaves focus on the
+    /// thing you clicked (the bar button, the context-menu item) — so without
+    /// this you'd have to click the pane before typing. The pane view already
+    /// exists (sleeping never unmounted it); `pending_focus` survives the
+    /// round-trip and is applied on the first render after the daemon relaunches.
+    pub(super) fn wake_workspace_focused(
+        &mut self,
+        ws: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.client.wake_workspace(ws);
+        if let Some(slug) = self.preferred_pane_in_workspace(ws) {
+            self.set_active(&slug, window, cx);
+            self.pending_focus = Some(slug);
+        }
+        cx.notify();
+    }
+
     /// Any pane of this circle is asleep — the circle reads as asleep.
     pub(super) fn workspace_asleep(&self, ws: &str) -> bool {
         self.panes.iter().any(|p| p.workspace == ws && p.asleep)

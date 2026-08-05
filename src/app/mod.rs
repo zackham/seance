@@ -2378,9 +2378,8 @@ impl Render for SeanceApp {
                 let _ = this.client.sleep_workspace(&act.0.clone());
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, act: &ActWakeWorkspace, _, cx| {
-                let _ = this.client.wake_workspace(&act.0.clone());
-                cx.notify();
+            .on_action(cx.listener(|this, act: &ActWakeWorkspace, window, cx| {
+                this.wake_workspace_focused(&act.0.clone(), window, cx);
             }))
             .on_action(cx.listener(|this, act: &ActParkWorkspace, window, cx| {
                 this.park_workspace(&act.0.clone(), window, cx);
