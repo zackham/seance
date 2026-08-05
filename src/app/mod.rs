@@ -31,6 +31,7 @@ use std::sync::Arc;
 mod actions;
 mod chrome;
 mod layout;
+mod menus;
 mod overview;
 mod pads;
 mod palette;
@@ -210,6 +211,16 @@ pub struct SeanceApp {
     quicklaunch_checked: Option<std::time::Instant>,
     /// Open quicklaunch create/edit modal (None = closed).
     quicklaunch_editor: Option<quicklaunch::QuickLaunchEditor>,
+    /// Host-provided menus (`menus[]` of ~/.config/seance/host.json) — chips
+    /// that run a list command on click instead of being polled.
+    host_menus: Vec<crate::host::HostMenuConfig>,
+    /// Daemon-side mtime_ms of host.json at last menu load (see quicklaunch).
+    host_menus_mtime: Option<u64>,
+    host_menus_checked: Option<std::time::Instant>,
+    /// The one open menu dropdown, if any.
+    host_menu: Option<menus::HostMenuOpen>,
+    /// Monotonic open counter — stale list results check it and drop out.
+    host_menu_token: u64,
     /// `✦` popover: census of the GUI windows attached to this daemon.
     gui_menu_open: bool,
     /// Daemon-scraped PR links per workspace (most-recently-seen LAST) —
@@ -404,6 +415,11 @@ impl SeanceApp {
             quicklaunch_mtime: None,
             quicklaunch_checked: None,
             quicklaunch_editor: None,
+            host_menus: Vec::new(),
+            host_menus_mtime: None,
+            host_menus_checked: None,
+            host_menu: None,
+            host_menu_token: 0,
             gui_menu_open: false,
             pr_links: std::collections::HashMap::new(),
             pr_tip: None,
@@ -1305,6 +1321,10 @@ impl SeanceApp {
             if self.gui_menu_open {
                 self.gui_menu_open = false;
                 cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+            if self.close_host_menu(cx) {
                 cx.stop_propagation();
                 return;
             }
@@ -2253,8 +2273,9 @@ impl Render for SeanceApp {
             *g = Some(std::time::Instant::now());
         }
 
-        // Quicklaunch config hot-reload (background bridge stat, ~2s throttle).
+        // Launch-strip config hot-reload (background bridge stat, ~2s throttle).
         self.reload_quicklaunch_if_stale(cx);
+        self.reload_host_menus_if_stale(cx);
 
         // Summon arrives without a Window on the event path; open rename here.
         if self.pending_rename.is_some() {

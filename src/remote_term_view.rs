@@ -114,6 +114,12 @@ struct TermSelection {
     /// Drag end (unexpanded).
     cursor: CellPos,
     kind: SelectKind,
+    /// The gesture that made this, as opposed to `kind`, which is the
+    /// resulting *geometry* (a word select collapses to `Simple` the moment
+    /// it's expanded against the grid). Releasing the button consults this:
+    /// a double- or triple-click is an explicit "select that", a plain click
+    /// is not. See [`RemoteTerminalView::should_copy_on_release`].
+    gesture: SelectKind,
 }
 
 impl TermSelection {
@@ -163,6 +169,16 @@ impl TermSelection {
         }
     }
 
+    #[cfg(test)]
+    fn simple(anchor: CellPos, cursor: CellPos) -> Self {
+        Self {
+            anchor,
+            cursor,
+            kind: SelectKind::Simple,
+            gesture: SelectKind::Simple,
+        }
+    }
+
     fn contains(&self, row: usize, col: usize, cols: u16, rows: u16) -> bool {
         if cols == 0 || rows == 0 {
             return false;
@@ -173,6 +189,32 @@ impl TermSelection {
         let b = hi.row as u32 * cols as u32 + hi.col as u32;
         i >= a && i <= b
     }
+}
+
+/// Cells a selection covers. One means the anchor cell alone — a click that
+/// never moved off the character it landed on.
+fn selection_span(sel: &TermSelection, cols: u16, rows: u16) -> u32 {
+    if cols == 0 || rows == 0 {
+        return 0;
+    }
+    let (lo, hi) = sel.range(cols, rows);
+    let a = lo.row as u32 * cols as u32 + lo.col as u32;
+    let b = hi.row as u32 * cols as u32 + hi.col as u32;
+    b.saturating_sub(a) + 1
+}
+
+/// Whether releasing the mouse button copies.
+///
+/// Only when the human actually asked for a selection: a drag that covered
+/// more than one cell, or a double/triple click, which says "select that
+/// word/line" outright — even when the word is a single character.
+///
+/// A bare click used to qualify. It anchored a one-cell selection and release
+/// copied that character over whatever was on the clipboard, so clicking a
+/// pane to focus it silently destroyed the clipboard — a loss you only
+/// discover at paste time, by which point the thing you wanted is gone.
+fn copies_on_release(gesture: SelectKind, cells: u32) -> bool {
+    gesture != SelectKind::Simple || cells > 1
 }
 
 /// Layout metrics from last canvas prepaint — mouse → cell mapping.
@@ -375,6 +417,8 @@ impl RemoteTerminalView {
     }
 
     fn start_selection_at(&mut self, pos: CellPos, kind: SelectKind, cx: &App) {
+        // Held before `kind` is rewritten to the post-expansion geometry below.
+        let gesture = kind;
         let snap = &self.terminal.read(cx).snapshot;
         let (anchor, cursor, kind) = match kind {
             SelectKind::Simple => (pos, pos, SelectKind::Simple),
@@ -399,8 +443,19 @@ impl RemoteTerminalView {
             anchor,
             cursor,
             kind,
+            gesture,
         });
         self.selecting = true;
+    }
+
+    /// Does releasing the mouse put this selection on the clipboard?
+    /// Grid read here; the rule itself is [`copies_on_release`].
+    fn should_copy_on_release(&self, cx: &App) -> bool {
+        let Some(sel) = self.selection.as_ref() else {
+            return false;
+        };
+        let snap = &self.terminal.read(cx).snapshot;
+        copies_on_release(sel.gesture, selection_span(sel, snap.cols, snap.rows))
     }
 
     fn update_selection_at(&mut self, pos: CellPos, cx: &App) {
@@ -710,8 +765,15 @@ impl Render for RemoteTerminalView {
                 cx.listener(|this, _ev, window, cx| {
                     if this.selecting {
                         this.selecting = false;
-                        // Ghostty / primary-selection: copy on release.
-                        this.copy_selection(window, cx);
+                        // Ghostty / primary-selection: copy on release — but
+                        // only if this was a selection and not just a click.
+                        if this.should_copy_on_release(cx) {
+                            this.copy_selection(window, cx);
+                        } else {
+                            // A click is a click. Drop the one-cell anchor so
+                            // nothing is left highlighted either.
+                            this.clear_selection();
+                        }
                         cx.notify();
                     }
                 }),
@@ -1535,3 +1597,70 @@ fn u32_to_hsla(v: u32) -> Option<Hsla> {
 // silence unused import if FONT_FAMILY only re-exported
 #[allow(unused_imports)]
 use term_font::FONT_FAMILY as _;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(row: u16, col: u16) -> CellPos {
+        CellPos { row, col }
+    }
+
+    #[test]
+    fn a_click_that_never_moved_spans_one_cell() {
+        let sel = TermSelection::simple(at(3, 10), at(3, 10));
+        assert_eq!(selection_span(&sel, 80, 24), 1);
+    }
+
+    #[test]
+    fn a_drag_spans_what_it_covered_in_either_direction() {
+        // Left-to-right across one row.
+        let fwd = TermSelection::simple(at(3, 10), at(3, 14));
+        assert_eq!(selection_span(&fwd, 80, 24), 5);
+        // Right-to-left is the same selection, so the same span.
+        let back = TermSelection::simple(at(3, 14), at(3, 10));
+        assert_eq!(selection_span(&back, 80, 24), 5);
+        // Across a row boundary: to end of row 3, then two cells of row 4.
+        let wrap = TermSelection::simple(at(3, 78), at(4, 1));
+        assert_eq!(selection_span(&wrap, 80, 24), 4);
+    }
+
+    #[test]
+    fn a_line_select_spans_the_row_it_took() {
+        let sel = TermSelection {
+            anchor: at(2, 0),
+            cursor: at(2, 79),
+            kind: SelectKind::Lines,
+            gesture: SelectKind::Lines,
+        };
+        assert_eq!(selection_span(&sel, 80, 24), 80);
+    }
+
+    #[test]
+    fn span_is_zero_on_a_grid_with_no_cells() {
+        // Pre-first-frame: a pane can be clicked before it has dimensions.
+        let sel = TermSelection::simple(at(0, 0), at(0, 0));
+        assert_eq!(selection_span(&sel, 0, 0), 0);
+    }
+
+    #[test]
+    fn a_bare_click_does_not_reach_the_clipboard() {
+        assert!(!copies_on_release(SelectKind::Simple, 1));
+        // Nor does a click that jittered inside one cell.
+        assert!(!copies_on_release(SelectKind::Simple, 0));
+    }
+
+    #[test]
+    fn a_drag_of_two_or_more_cells_copies() {
+        assert!(copies_on_release(SelectKind::Simple, 2));
+        assert!(copies_on_release(SelectKind::Simple, 4000));
+    }
+
+    #[test]
+    fn double_and_triple_click_copy_even_a_one_character_target() {
+        // `x` as a whole word, or a line holding a single character: the
+        // gesture was explicit, so the length doesn't get a vote.
+        assert!(copies_on_release(SelectKind::Word, 1));
+        assert!(copies_on_release(SelectKind::Lines, 1));
+    }
+}

@@ -467,11 +467,16 @@ impl SeanceApp {
         )
     }
 
-    /// Chip strip above the host-bridge widgets. The title row (with its `+`
-    /// add button) is always shown so an empty config can still be populated
-    /// from the UI; the chip row is omitted when there are no entries.
+    /// The launch strip, above the host-bridge widgets: quicklaunch chips
+    /// (this window's own "terminal in DIR running CMD") followed by any
+    /// host-provided menu chips (see `menus.rs`). Two sources, one row —
+    /// from the human's side they are the same gesture, "start something".
+    ///
+    /// The title row (with its `+` add button) is always shown so an empty
+    /// config can still be populated from the UI; the chip row is omitted only
+    /// when neither source has anything.
     pub(super) fn render_quicklaunch(&self, cx: &Context<Self>) -> impl IntoElement {
-        let has_entries = !self.quicklaunch.is_empty();
+        let has_entries = !self.quicklaunch.is_empty() || !self.host_menus.is_empty();
         div()
             .flex_none()
             .flex()
@@ -492,7 +497,7 @@ impl SeanceApp {
                         div()
                             .text_xs()
                             .text_color(SeancePalette::text_faint())
-                            .child("── vita quicklaunch ──"),
+                            .child("── launch ──"),
                     )
                     .child(
                         div()
@@ -515,11 +520,22 @@ impl SeanceApp {
             )
             .when(has_entries, |strip| {
                 strip.child(
-                    div().px_2().flex().flex_row().flex_wrap().gap_1().children(
-                        self.quicklaunch
-                            .iter()
-                            .map(|e| self.render_quicklaunch_chip(e, cx)),
-                    ),
+                    div()
+                        .px_2()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap_1()
+                        .children(
+                            self.quicklaunch
+                                .iter()
+                                .map(|e| self.render_quicklaunch_chip(e, cx)),
+                        )
+                        .children(
+                            self.host_menus
+                                .iter()
+                                .map(|m| self.render_host_menu_chip(m, cx)),
+                        ),
                 )
             })
             .into_any_element()

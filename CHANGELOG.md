@@ -17,6 +17,60 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-08-05
+
+A host can hand seance a workflow it doesn't understand.
+
+### Added
+
+- **Host menus — a chip in the launch strip that asks its question when you
+  click it.** The host bridge already let an outside app own a strip in the
+  rail, but only by polling: every item became a permanent chip, so the shape
+  only fit small ambient state like which claude account is live. A menu is the
+  other half. `menus[]` in `host.json` names a `list_cmd` and a `select_cmd`;
+  the chip runs the list on click, drops the items into a dropdown grouped by
+  whatever the host said, and runs select on the row you pick. Nothing is
+  polled. Twenty rows in the rail would be a wall; twenty rows in a dropdown is
+  a list.
+- **A menu's `select_cmd` can hand back a `workspace`**, and the rail pins it
+  and jumps to it. That is the whole reason a menu can create a circle and have
+  it feel like a launch rather than a background event: a circle you just
+  deliberately conjured is the one you're about to work in, so landing it
+  somewhere you then have to go find defeats the point. Hosts that spawn
+  background work send `"pin": false`.
+- **First menu (vita's, not seance's): the week's meetings.** Click one and a
+  circle opens for that meeting — a claude pane in the vita repo, armed for
+  seance, handed the meeting's agenda prompt, and told to put the agenda up as
+  a live file pane beside itself so you watch it get written. Seance does not
+  know what a meeting is. It ran two commands the host configured; the workflow
+  is entirely `vita/scripts/seance_host_meetings.py` talking to `seance ctl`.
+  This is the seam working as intended: a host adds a workflow without seance
+  learning the workflow.
+
+### Fixed
+
+- **Clicking a pane no longer eats your clipboard.** A bare left click anchored
+  a one-cell selection, and releasing the button copied it — so clicking into a
+  terminal to focus it silently replaced the clipboard with one character. That
+  is a loss you only discover at paste time, when whatever you wanted is
+  already gone. Release now copies only when the gesture actually was a
+  selection: a drag covering more than one cell, or a double/triple click
+  (explicit "select that word/line", so a one-character word still copies). A
+  plain click clears the anchor instead of leaving a stray highlight.
+- **A pretty-printed host response could be read as an empty one.** Snapshot
+  parsing scanned for the last `{…}` line before trying stdout as a whole, and
+  every field of the snapshot has a default — so one indented *item* line
+  deserialized cleanly into a snapshot with no items. A host that formatted its
+  JSON got "no items", which is worse than an error because it looks like an
+  answer. Whole-stdout is now tried first, and the leaked-log line scan insists
+  on a line carrying `items` or `schema`.
+
+### Changed
+
+- The rail's launch strip is titled `── launch ──` (was `── vita quicklaunch
+  ──`). It holds two sources now, and neither of them is vita's by nature —
+  vita is just this machine's host.
+
 ## [0.17.1] — 2026-08-05
 
 Design pass on the rail. Same theme, same information — far less work to read.

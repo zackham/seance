@@ -64,7 +64,12 @@ src/app/               the GPUI app, split by surface:
   sidebar.rs           left rail: active/parked workspace rows, context menus, host list
   tiles.rs             tile grid + sashes + zoom
   palette.rs           command palette
-  quicklaunch.rs       quicklaunch strip + create/edit modal (daemon-side json)
+  quicklaunch.rs       launch strip: quicklaunch chips + create/edit modal
+                       (daemon-side json); also hosts the menu chips
+  menus.rs             host-provided MENUS (`menus[]` of host.json): a chip
+                       that runs `list_cmd` on click, drops a picker, runs
+                       `select_cmd` on choice. On-demand twin of the polled
+                       host widgets — see docs/HOST.md
   workspaces.rs        workspace state ops + WorkspaceAttention + active/parked partition
   prlinks.rs           PR header chip + all-links popover + pr_attention helper
   prboard.rs           `PRs (N)` sweep overlay: pure board model (grouping,

@@ -39,6 +39,15 @@ pub struct GuiClient {
     fs_next_id: std::sync::atomic::AtomicU64,
 }
 
+/// Result of a daemon-side `sh -lc`. `stderr` is carried because a host
+/// command that fails usually explains itself there, and "exit 1" with the
+/// reason thrown away is an error message that lies by omission.
+pub struct ShellOut {
+    pub status: Option<i64>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// One fs result: (ok, data, error).
 type FsReply = (bool, Option<serde_json::Value>, Option<String>);
 type FsPending = Arc<Mutex<std::collections::HashMap<u64, Sender<FsReply>>>>;
@@ -467,22 +476,26 @@ impl GuiClient {
         .map(|_| ())
     }
 
-    /// Run a shell command daemon-side (`sh -lc`); returns (status, stdout).
+    /// Run a shell command daemon-side (`sh -lc`).
     /// 30s budget — background threads only, never the UI thread.
-    pub fn shell(&self, cmd: &str) -> Result<(Option<i64>, String)> {
+    pub fn shell(&self, cmd: &str) -> Result<ShellOut> {
         let v = self.fs_call(
             crate::runtime::protocol::FsOp::Shell {
                 cmd: cmd.to_string(),
             },
             Duration::from_secs(30),
         )?;
-        Ok((
-            v.get("status").and_then(|c| c.as_i64()),
-            v.get("stdout")
+        let text = |k: &str| {
+            v.get(k)
                 .and_then(|o| o.as_str())
                 .unwrap_or_default()
-                .to_string(),
-        ))
+                .to_string()
+        };
+        Ok(ShellOut {
+            status: v.get("status").and_then(|c| c.as_i64()),
+            stdout: text("stdout"),
+            stderr: text("stderr"),
+        })
     }
 
     /// Run a host widget select command daemon-side; returns its stdout.
