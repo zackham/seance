@@ -155,7 +155,10 @@ impl SeanceApp {
                     .map(|p| p.slug.clone())
                     .collect();
                 for ws in self.workspaces() {
-                    if q.is_empty() || ws.to_ascii_lowercase().contains(&q) {
+                    // Match either form: you should be able to find a circle
+                    // by what you see (label) or by what it is (slug).
+                    let label = self.workspace_label(&ws).to_ascii_lowercase();
+                    if q.is_empty() || ws.to_ascii_lowercase().contains(&q) || label.contains(&q) {
                         items.push(format!("ws:{ws}"));
                     }
                 }
@@ -207,11 +210,10 @@ impl SeanceApp {
                     let q = query.trim().to_ascii_lowercase();
                     let mut items: Vec<(String, String)> = Vec::new();
                     for ws in self.workspaces() {
-                        if q.is_empty()
-                            || q.split_whitespace()
-                                .all(|t| ws.to_ascii_lowercase().contains(t))
-                        {
-                            items.push((format!("ws:{ws}"), ws.clone()));
+                        let label = self.workspace_label(&ws).to_ascii_lowercase();
+                        let hay = format!("{} {label}", ws.to_ascii_lowercase());
+                        if q.is_empty() || q.split_whitespace().all(|t| hay.contains(t)) {
+                            items.push((format!("ws:{ws}"), self.workspace_label(&ws)));
                         }
                     }
                     (

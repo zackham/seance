@@ -590,9 +590,10 @@ impl SeanceApp {
                 .on_click(
                     cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                         if event.click_count() == 2 {
+                            let label = this.workspace_label(&ws_for_click);
                             this.start_rename(
                                 RenameTarget::Workspace(ws_for_click.clone()),
-                                &ws_for_click.clone(),
+                                &label,
                                 window,
                                 cx,
                             );
@@ -674,7 +675,7 @@ impl SeanceApp {
                         } else {
                             SeancePalette::text_dim()
                         })
-                        .child(workspace.clone()),
+                        .child(self.workspace_label(&workspace)),
                 )
                 .children({
                     // Text badges only for needs/done — working is

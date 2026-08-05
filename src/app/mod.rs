@@ -192,6 +192,11 @@ pub struct SeanceApp {
     /// Workspaces that currently have a live-working agent (for falling-edge
     /// touch when work finishes → top of the non-working band).
     workspace_was_working: std::collections::HashSet<String>,
+    /// slug → display label, mirrored from `WorkspaceMeta.name`. A circle
+    /// absent here reads as its slug — which is what every circle reads as
+    /// until someone renames it. Nothing else in this struct is keyed by the
+    /// label, so a rename disturbs none of it.
+    workspace_names: std::collections::HashMap<String, String>,
     /// Sticky attention on inactive circles until selected (done/needs).
     workspace_unread: std::collections::HashMap<String, WorkspaceAttention>,
     /// Full-window live overview (ctrl+shift+space).
@@ -394,6 +399,7 @@ impl SeanceApp {
             resize_settle: std::collections::HashMap::new(),
             busy_panes: std::collections::HashSet::new(),
             workspace_was_working: std::collections::HashSet::new(),
+            workspace_names: std::collections::HashMap::new(),
             workspace_unread: std::collections::HashMap::new(),
             overview: false,
             empty_window: empty,
@@ -721,7 +727,13 @@ impl SeanceApp {
                 // pr_links arrive for every known workspace: rebuild the
                 // mirror wholesale so cleared/renamed circles drop out.
                 let mut links = std::collections::HashMap::new();
+                // Labels arrive for every known circle, so rebuild wholesale:
+                // a circle renamed back to its slug must lose its entry.
+                let mut names = std::collections::HashMap::new();
                 for m in workspace_meta {
+                    if let Some(n) = m.name.clone() {
+                        names.insert(m.workspace.clone(), n);
+                    }
                     if !m.pr_links.is_empty() {
                         links.insert(m.workspace.clone(), m.pr_links.clone());
                     }
@@ -744,6 +756,7 @@ impl SeanceApp {
                     }
                 }
                 self.pr_links = links;
+                self.workspace_names = names;
                 // active_slug from daemon; repair if missing / not in selected
                 // workspace. Keyboard recovery is render-side (ensure_keyboard_focus)
                 // so we don't steal focus from whisper / rename / palette here.
@@ -1435,7 +1448,8 @@ impl SeanceApp {
                     // Inline-rename the selected workspace; Enter commits and
                     // returns focus to the pane that was active.
                     if let Some(ws) = self.selected_workspace.clone() {
-                        self.start_rename(RenameTarget::Workspace(ws.clone()), &ws, window, cx);
+                        let label = self.workspace_label(&ws);
+                        self.start_rename(RenameTarget::Workspace(ws.clone()), &label, window, cx);
                         cx.stop_propagation();
                     }
                 }
@@ -1687,42 +1701,15 @@ impl SeanceApp {
                 // Daemon is source of truth — don't only dual-write state.json.
                 let _ = self.client.rename_pane(&slug, new_name);
             }
-            RenameTarget::Workspace(old) => {
-                let new_ws = crate::state::slugify(new_name);
-                for pane in &mut self.panes {
-                    if pane.workspace == old {
-                        pane.workspace = new_ws.clone();
-                    }
-                }
-                for ws in &mut self.extra_workspaces {
-                    if *ws == old {
-                        *ws = new_ws.clone();
-                    }
-                }
-                for w in &mut self.workspace_order {
-                    if *w == old {
-                        *w = new_ws.clone();
-                    }
-                }
-                if let Some(t) = self.workspace_touch.remove(&old) {
-                    self.workspace_touch.insert(new_ws.clone(), t);
-                }
-                if let Some(u) = self.workspace_unread.remove(&old) {
-                    self.workspace_unread.insert(new_ws.clone(), u);
-                }
-                if self.selected_workspace.as_deref() == Some(old.as_str()) {
-                    self.selected_workspace = Some(new_ws.clone());
-                }
-                if let Some(slug) = self.workspace_focus.remove(&old) {
-                    self.workspace_focus.insert(new_ws.clone(), slug);
-                }
-                // A rename is not a kill: carry active/seen/pinned across so
-                // the row keeps its band (prune would otherwise drop the old
-                // name and the pin with it).
-                if self.subs_pref.rename(&old, &new_ws) {
-                    self.save_subscriptions();
-                }
-                let _ = self.client.rename_workspace(&old, &new_ws);
+            RenameTarget::Workspace(slug) => {
+                // Nothing local to migrate: the slug is the identity and it
+                // does not move. Every map here — touch, unread, focus,
+                // selection, pin/park prefs — is keyed by it and stays
+                // correct. Optimistically show the new label; the daemon's
+                // next State push confirms it.
+                self.workspace_names
+                    .insert(slug.clone(), new_name.to_string());
+                let _ = self.client.rename_workspace(&slug, new_name);
             }
         }
         cx.notify();
@@ -2355,12 +2342,8 @@ impl Render for SeanceApp {
                 this.fork_workspace(&act.0.clone(), None, "human", cx);
             }))
             .on_action(cx.listener(|this, act: &ActRenameWorkspace, window, cx| {
-                this.start_rename(
-                    RenameTarget::Workspace(act.0.clone()),
-                    &act.0.clone(),
-                    window,
-                    cx,
-                );
+                let label = this.workspace_label(&act.0);
+                this.start_rename(RenameTarget::Workspace(act.0.clone()), &label, window, cx);
             }))
             .on_action(cx.listener(|_this, act: &ActShareReplay, _, _cx| {
                 share_replay_open(&act.0);

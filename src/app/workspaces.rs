@@ -326,6 +326,16 @@ impl SeanceApp {
         cx.notify();
     }
 
+    /// What to show for a circle. Its slug is the identity; this is the
+    /// mutable label, and it falls back to the slug — which is exactly what a
+    /// circle reads as until someone renames it.
+    pub(super) fn workspace_label(&self, ws: &str) -> String {
+        self.workspace_names
+            .get(ws)
+            .cloned()
+            .unwrap_or_else(|| ws.to_string())
+    }
+
     /// Any pane of this circle is asleep — the circle reads as asleep.
     pub(super) fn workspace_asleep(&self, ws: &str) -> bool {
         self.panes.iter().any(|p| p.workspace == ws && p.asleep)

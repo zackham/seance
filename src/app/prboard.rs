@@ -417,7 +417,7 @@ impl SeanceApp {
                             .text_sm()
                             .font_semibold()
                             .text_color(SeancePalette::text())
-                            .child(ws.clone()),
+                            .child(self.workspace_label(&ws)),
                     )
                     .when(section.needs, |d| {
                         d.child(

@@ -130,23 +130,6 @@ impl SubscriptionsPref {
         self.pinned.contains(ws)
     }
 
-    /// Carry every membership across a workspace rename (the daemon renames in
-    /// place; to this file it would otherwise look like a kill plus a birth).
-    pub fn rename(&mut self, old: &str, new: &str) -> bool {
-        fn swap(set: &mut BTreeSet<String>, old: &str, new: &str) -> bool {
-            if set.remove(old) {
-                set.insert(new.to_string());
-                true
-            } else {
-                false
-            }
-        }
-        let mut changed = swap(&mut self.active, old, new);
-        changed |= swap(&mut self.seen, old, new);
-        changed |= swap(&mut self.pinned, old, new);
-        changed
-    }
-
     /// Drop names the daemon no longer knows about (killed / renamed circles),
     /// so the file doesn't accrete forever. Returns true when it changed.
     pub fn prune(&mut self, known: &BTreeSet<String>) -> bool {
@@ -298,16 +281,6 @@ mod tests {
     }
 
     /// Rename carries the pin (kill drops it — that's `prune`).
-    #[test]
-    fn rename_carries_pin() {
-        let mut pref = SubscriptionsPref::default();
-        pref.pin("lab");
-        assert!(pref.rename("lab", "workshop"));
-        assert_eq!(pref.pinned, set(&["workshop"]));
-        assert_eq!(pref.active, set(&["workshop"]));
-        assert_eq!(pref.seen, set(&["workshop"]));
-        assert!(!pref.rename("nobody", "nothing"));
-    }
 
     #[test]
     fn partition3_preserves_sort_and_floats_pins() {
