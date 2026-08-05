@@ -158,8 +158,7 @@ fn main() {
                 if pid == self_pid {
                     continue;
                 }
-                // Skip daemon processes (cmdline contains "daemon").
-                if sysopen::process_cmdline(pid).contains("daemon") {
+                if !sysopen::is_gui_cmdline(&sysopen::process_cmdline(pid)) {
                     continue;
                 }
                 let _ = std::process::Command::new("kill").arg(pid_s).status();

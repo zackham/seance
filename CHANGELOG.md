@@ -17,6 +17,21 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-08-05
+
+### Fixed
+
+- **`restart-gui` was killing the `seance web` bridge.** It found processes
+  with `pgrep -x seance` — which matches every surface, since they all share
+  the binary and therefore the process name — and spared only cmdlines
+  containing "daemon". So each GUI redeploy silently took down any running web
+  bridge, and said `stopped 3 gui process(es)` while doing it. Remote access to
+  seance disappearing as a side effect of shipping a UI change is the kind of
+  breakage you discover much later, from the wrong end. It now kills only a
+  cmdline with no subcommand at all (flags like `--local` / `--remote <host>`
+  are still the GUI); `web`, `ctl`, `replay`, `daemon` and anything else on the
+  binary survive.
+
 ## [0.18.0] — 2026-08-05
 
 A host can hand seance a workflow it doesn't understand.
