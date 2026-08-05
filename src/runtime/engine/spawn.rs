@@ -94,15 +94,15 @@ impl Engine {
         };
         let taken: Vec<&str> = self.panes.iter().map(|p| p.slug.as_str()).collect();
         let slug = unique_slug(&name, &taken);
-        let workspace = spec
-            .workspace
-            .filter(|w| !w.trim().is_empty())
-            .map(|w| slugify(&w))
-            .unwrap_or_else(|| {
-                self.selected_workspace
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_WORKSPACE.into())
-            });
+        // A spawn target may be given as a slug OR a label; an unknown name
+        // mints a new circle (slug from the name, name kept as the label).
+        let workspace = match spec.workspace.filter(|w| !w.trim().is_empty()) {
+            Some(w) => self.workspace_slug_for_spawn(w.trim()),
+            None => self
+                .selected_workspace
+                .clone()
+                .unwrap_or_else(|| DEFAULT_WORKSPACE.into()),
+        };
         // New / unlisted workspace names land at the bottom of the sidebar,
         // never alphabetically at the top.
         if !self.workspace_order.iter().any(|w| w == &workspace) {
@@ -331,7 +331,14 @@ impl Engine {
         let scratch_path = self.store.path_for(slug);
         let mut env = HashMap::new();
         env.insert("SEANCE_SESSION".into(), slug.to_string());
+        // The circle's stable id. This is the whole reason the slug never
+        // moves: a rename cannot reach into a running process's environment,
+        // so the value it was given at spawn has to stay true forever.
         env.insert("SEANCE_WORKSPACE".into(), workspace.to_string());
+        env.insert(
+            "SEANCE_WORKSPACE_NAME".into(),
+            self.workspace_label(workspace),
+        );
         env.insert(
             "SEANCE_SCRATCHPAD".into(),
             scratch_path.to_string_lossy().to_string(),

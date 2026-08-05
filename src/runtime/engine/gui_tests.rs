@@ -585,8 +585,11 @@ fn recorder_tap_and_activity_clock_fire_with_zero_subscribers() {
     });
 }
 
+/// A rename no longer disturbs a subscription set — there is nothing to
+/// migrate, because the slug every set holds does not move. Killing by the
+/// new LABEL still resolves to that slug and clears every set.
 #[test]
-fn rename_and_kill_maintain_every_subscription_set() {
+fn rename_leaves_subscriptions_alone_and_kill_by_label_clears_them() {
     with_test_state_dir("gui-rename-kill", || {
         let scratch = temp_scratch("gui-rename-kill");
         let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
@@ -607,10 +610,14 @@ fn rename_and_kill_maintain_every_subscription_set() {
         );
         for id in [&g1.id, &g2.id] {
             let subs = eng.subscriptions_of(id);
-            assert!(subs.contains(&"workshop".to_string()), "{id}: {subs:?}");
-            assert!(!subs.contains(&"lab".to_string()), "{id}: {subs:?}");
+            assert!(
+                subs.contains(&"lab".to_string()),
+                "the slug is the subscription and it does not move ({id}): {subs:?}"
+            );
         }
+        assert_eq!(eng.workspace_label("lab"), "workshop");
 
+        // Addressed by the label a human now sees — resolved at the door.
         let _ = eng.handle_gui(
             GuiRequest::KillWorkspace {
                 workspace: "workshop".into(),
@@ -619,7 +626,7 @@ fn rename_and_kill_maintain_every_subscription_set() {
         );
         for id in [&g1.id, &g2.id] {
             assert!(
-                !eng.subscriptions_of(id).contains(&"workshop".to_string()),
+                !eng.subscriptions_of(id).contains(&"lab".to_string()),
                 "a killed circle must leave every subscription set ({id})"
             );
         }

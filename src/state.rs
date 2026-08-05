@@ -111,9 +111,15 @@ pub struct AppState {
     /// Workspaces that exist independently of panes (created empty).
     #[serde(default)]
     pub extra_workspaces: Vec<String>,
-    /// Sidebar display order of workspaces (drag-to-reorder).
+    /// Sidebar display order of workspaces (drag-to-reorder). Slugs.
     #[serde(default)]
     pub workspace_order: Vec<String>,
+    /// slug → display label, only for circles renamed away from their slug.
+    /// A circle absent here is displayed by its slug, so state written before
+    /// 0.16 loads with every label equal to its slug — which is exactly what
+    /// it was.
+    #[serde(default)]
+    pub workspace_names: Vec<(String, String)>,
     /// Last known window size `(width, height)` in pixels.
     pub window_size: Option<(f32, f32)>,
     /// Dispatch tasks (inject inbox + completion envelope).
@@ -447,6 +453,7 @@ mod tests {
             selected_workspace: Some("main".to_string()),
             extra_workspaces: vec![],
             workspace_order: vec![],
+            workspace_names: vec![],
             window_size: Some((1280.0, 800.0)),
             tasks: vec![],
             task_counter: 0,

@@ -206,19 +206,10 @@ impl Engine {
         self.workspace_touch_ms.remove(workspace);
         self.pr_links.remove(workspace);
         self.pr_dismissed.remove(workspace);
+        self.forget_workspace_label(workspace);
         if self.selected_workspace.as_deref() == Some(workspace) {
             self.selected_workspace = self.panes.first().map(|p| p.workspace.clone());
         }
         self.drop_workspace_subs(workspace);
-    }
-
-    /// Rename follow-through for the link list.
-    pub(crate) fn rename_pr_links(&mut self, old: &str, new: &str) {
-        if let Some(links) = self.pr_links.remove(old) {
-            self.pr_links.insert(new.to_string(), links);
-        }
-        if let Some(dismissed) = self.pr_dismissed.remove(old) {
-            self.pr_dismissed.insert(new.to_string(), dismissed);
-        }
     }
 }

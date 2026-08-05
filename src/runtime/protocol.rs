@@ -54,6 +54,9 @@ pub struct HandoffBundle {
     pub focused_pane: Option<String>,
     pub extra_workspaces: Vec<String>,
     pub workspace_order: Vec<String>,
+    /// slug → display label, for circles whose label differs from their slug.
+    #[serde(default)]
+    pub workspace_names: Vec<(String, String)>,
     pub proposal_counter: u64,
     pub ask_counter: u64,
     /// Live badges (0.9.5+) — survive `seance upgrade`.

@@ -17,6 +17,19 @@ use crate::runtime::snapshot::GhostSnap;
 impl Engine {
     pub fn handle_control(&mut self, request: ControlRequest) -> ControlResponse {
         use ControlRequest::*;
+        // Circles are addressable by slug or by label; every handler below
+        // wants the slug. One rewrite at the door beats twenty at the tills.
+        let request = self.normalize_workspace_keys(request);
+        // A label two circles share resolves to neither. Say so, rather than
+        // letting it fall through as a name that matches nothing.
+        if let Some(key) = request.workspace_hint() {
+            if self.workspace_key_is_ambiguous(key) {
+                return ControlResponse::err(format!(
+                    "circle '{key}' is ambiguous — more than one circle uses that name; \
+                     address it by slug (`seance ctl list --all` shows them)"
+                ));
+            }
+        }
         let ok = |data: serde_json::Value| ControlResponse::ok(data);
         let err = |m: String| ControlResponse::err(m);
         let find = |eng: &Engine, key: &str, scope: &Option<String>| -> Result<usize, String> {
@@ -754,10 +767,21 @@ impl Engine {
                         Some((Some(tid), Some(t.status.clone()), Some(t.body.len())))
                     })
                     .unwrap_or((None, None, None));
+                // Which circle am I in? A property of the PANE, not of what
+                // the caller's environment last heard — that is the whole
+                // point of the identity split, and this is the canonical
+                // answer an agent should trust.
+                let ws_slug = session
+                    .as_ref()
+                    .and_then(|slug| self.panes.iter().find(|p| p.slug == *slug))
+                    .map(|p| p.workspace.clone())
+                    .or_else(|| scope.clone());
+                let ws_label = ws_slug.as_deref().map(|s| self.workspace_label(s));
                 ok(json!({
                     "principal": principal,
                     "session": session,
-                    "workspace": scope,
+                    "workspace": ws_slug,
+                    "workspace_name": ws_label,
                     "policy": policy.as_str(),
                     "grants": grants,
                     "event_seq": events::current_seq(),

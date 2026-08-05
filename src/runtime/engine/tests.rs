@@ -654,17 +654,23 @@ fn scraped_url_lands_on_the_pane_workspace() {
     });
 }
 
+/// Renaming is a label change, so the link list is not migrated — it is not
+/// touched at all. This used to require `rename_pr_links`; the identity now
+/// holds still and the follow-through is gone.
 #[test]
-fn rename_workspace_carries_pr_links() {
+fn rename_leaves_pr_links_on_the_same_circle() {
     with_test_state_dir("pr-rename", || {
         let scratch = temp_scratch("pr-rename");
         let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
         eng.push_stub_pane("worker", "lab");
         eng.record_pr_link("lab", "https://github.com/o/r/pull/1", 1);
 
-        eng.rename_pr_links("lab", "atelier");
-        assert!(!eng.pr_links.contains_key("lab"));
-        assert_eq!(eng.pr_links["atelier"].len(), 1);
+        eng.rename_workspace("lab", "Atelier");
+        assert_eq!(eng.pr_links["lab"].len(), 1);
+        assert!(!eng.pr_links.contains_key("atelier"));
+        assert_eq!(eng.workspace_label("lab"), "Atelier");
+        // And the circle answers to both names afterwards.
+        assert_eq!(eng.resolve_workspace("Atelier").as_deref(), Some("lab"));
 
         let _ = std::fs::remove_dir_all(&scratch);
     });
@@ -807,15 +813,16 @@ fn rename_and_forget_follow_the_dismissed_set() {
         let url = "https://github.com/o/r/pull/1";
         eng.clear_pr_links("lab", Some(url));
 
-        eng.rename_pr_links("lab", "atelier");
-        assert!(!eng.pr_dismissed.contains_key("lab"));
-        assert!(eng.pr_link_dismissed("atelier", url));
-        assert!(!eng.record_pr_link("atelier", url, 1));
+        // A rename cannot move a dismissal off its circle any more: the key
+        // is the slug and the slug never moves.
+        eng.rename_workspace("lab", "Atelier");
+        assert!(eng.pr_link_dismissed("lab", url));
+        assert!(!eng.record_pr_link("lab", url, 1));
 
-        eng.forget_workspace("atelier");
-        assert!(!eng.pr_dismissed.contains_key("atelier"));
+        eng.forget_workspace("lab");
+        assert!(!eng.pr_dismissed.contains_key("lab"));
         // Forgotten circle starts clean — the tombstones went with the row.
-        assert!(eng.record_pr_link("atelier", url, 2));
+        assert!(eng.record_pr_link("lab", url, 2));
 
         let _ = std::fs::remove_dir_all(&scratch);
     });
@@ -845,6 +852,7 @@ fn dismissals_survive_persist_reload_and_handoff() {
             focused_pane: None,
             extra_workspaces: vec![],
             workspace_order: vec![],
+            workspace_names: vec![],
             proposal_counter: 0,
             ask_counter: 0,
             statuses: vec![],

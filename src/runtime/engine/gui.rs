@@ -17,7 +17,6 @@ use crate::runtime::pty_session::SessionEvent;
 use crate::runtime::snapshot::{
     dirty_rows, encode_grid_bin, encode_grid_bin_ex, CellSnap, GridSnapshot,
 };
-use crate::state::slugify;
 
 /// One GUI window connection.
 ///
@@ -312,6 +311,7 @@ impl Engine {
                 last_output_ms: self.workspace_output.get(&ws).copied().unwrap_or(0),
                 last_touch_ms: self.workspace_touch_ms.get(&ws).copied().unwrap_or(0),
                 pr_links: self.pr_links.get(&ws).cloned().unwrap_or_default(),
+                name: self.workspace_names.get(&ws).cloned(),
                 workspace: ws,
             })
             .collect();
@@ -759,6 +759,7 @@ impl Engine {
             "name": p.name,
             "slug": p.slug,
             "workspace": p.workspace,
+            "workspace_name": self.workspace_label(&p.workspace),
             "command": p.command,
             "cwd": p.cwd,
             "tiled": p.tiled,
@@ -858,6 +859,10 @@ impl Engine {
     }
 
     pub fn handle_gui(&mut self, req: GuiRequest, window_id: &str) -> Option<GuiEvent> {
+        // Circles are addressable by slug or label here too — the web client
+        // is a third client on this protocol and must not be able to send a
+        // label the daemon then treats as an unknown circle.
+        let req = self.normalize_workspace_keys(req);
         match req {
             GuiRequest::Attach {
                 selected_workspace,
@@ -1309,56 +1314,23 @@ impl Engine {
                 None
             }
             GuiRequest::RenameWorkspace { old, new } => {
-                let new = slugify(&new);
-                for p in &mut self.panes {
-                    if p.workspace == old {
-                        p.workspace = new.clone();
-                    }
-                }
-                for w in &mut self.extra_workspaces {
-                    if *w == old {
-                        *w = new.clone();
-                    }
-                }
-                for w in &mut self.workspace_order {
-                    if *w == old {
-                        *w = new.clone();
-                    }
-                }
-                if let Some(t) = self.workspace_output.remove(&old) {
-                    self.workspace_output.insert(new.clone(), t);
-                }
-                if let Some(t) = self.workspace_touch_ms.remove(&old) {
-                    self.workspace_touch_ms.insert(new.clone(), t);
-                }
-                self.rename_pr_links(&old, &new);
-                if self.selected_workspace.as_deref() == Some(old.as_str()) {
-                    self.selected_workspace = Some(new.clone());
-                }
-                // A rename must follow every subscription set, not just the
-                // selections — otherwise subscribers silently park the circle.
-                for c in &mut self.gui_conns {
-                    if c.selected_workspace.as_deref() == Some(old.as_str()) {
-                        c.selected_workspace = Some(new.clone());
-                    }
-                    if c.subscriptions.remove(&old) {
-                        c.subscriptions.insert(new.clone());
-                    }
-                }
+                // A rename sets the LABEL. The slug — the circle's identity —
+                // does not move, so there is nothing to migrate: panes,
+                // activity clocks, PR links and dismissals, every window's
+                // selection and subscription set, each client's pin/park
+                // prefs, and every running pane's `SEANCE_WORKSPACE` all keep
+                // pointing at the same circle. The eight-structure migration
+                // this replaced could never reach that last one.
+                self.rename_workspace(&old, &new);
                 self.persist();
                 self.push_state_to_all();
                 None
             }
             GuiRequest::CreateWorkspace { name } => {
-                let name = slugify(&name);
-                if !self.extra_workspaces.contains(&name)
-                    && !self.panes.iter().any(|p| p.workspace == name)
-                {
-                    self.extra_workspaces.push(name.clone());
-                }
-                if !self.workspace_order.iter().any(|w| w == &name) {
-                    self.workspace_order.push(name.clone());
-                }
+                // Mint a slug from what was typed and keep the typed text as
+                // the label, so "Growth Work" reads as itself while being
+                // keyed by `growth-work` forever after.
+                let name = self.create_workspace(&name);
                 self.subscribe_conn(window_id, &name);
                 self.selected_workspace = Some(name.clone());
                 if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {

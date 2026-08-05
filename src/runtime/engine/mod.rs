@@ -6,6 +6,7 @@ pub(crate) mod helpers;
 mod pr_links;
 mod sleep;
 mod spawn;
+mod workspaces;
 
 #[cfg(test)]
 mod gui_tests;
@@ -83,6 +84,11 @@ pub struct Engine {
     pub focused_pane: Option<String>,
     pub extra_workspaces: Vec<String>,
     pub workspace_order: Vec<String>,
+    /// slug → display label. A circle's **slug is its identity** (minted once,
+    /// never rewritten); this is the mutable label a rename changes. Absent =
+    /// the label is the slug. See `workspaces.rs` in the app for the display
+    /// side and `resolve_workspace` for addressing by either.
+    pub workspace_names: HashMap<String, String>,
     pub store: ScratchpadStore,
     pub cmd_log: CommandLog,
     pub asks: Vec<PendingAsk>,
@@ -163,6 +169,7 @@ impl Engine {
             focused_pane: None,
             extra_workspaces: Vec::new(),
             workspace_order: vec![DEFAULT_WORKSPACE.into()],
+            workspace_names: HashMap::new(),
             store,
             cmd_log: CommandLog::default(),
             asks: Vec::new(),
@@ -231,6 +238,7 @@ impl Engine {
             focused_pane: state.active_slug.clone(),
             extra_workspaces: state.extra_workspaces.clone(),
             workspace_order: state.workspace_order.clone(),
+            workspace_names: state.workspace_names.iter().cloned().collect(),
             store,
             cmd_log: state.cmd_log.clone(),
             asks: Vec::new(),
@@ -337,6 +345,7 @@ impl Engine {
             focused_pane: bundle.focused_pane,
             extra_workspaces: bundle.extra_workspaces,
             workspace_order: bundle.workspace_order,
+            workspace_names: bundle.workspace_names.into_iter().collect(),
             store,
             cmd_log: bundle.cmd_log.clone(),
             asks: bundle
@@ -555,6 +564,7 @@ impl Engine {
             selected_workspace: self.selected_workspace.clone(),
             extra_workspaces: self.extra_workspaces.clone(),
             workspace_order: self.workspace_order.clone(),
+            workspace_names: self.sorted_workspace_names(),
             window_size: None,
             // Keep open + recently finished tasks (cap body size already at create).
             tasks: self.tasks.values().cloned().collect(),
@@ -689,6 +699,7 @@ impl Engine {
             focused_pane: self.focused_pane.clone(),
             extra_workspaces: self.extra_workspaces.clone(),
             workspace_order: self.workspace_order.clone(),
+            workspace_names: self.sorted_workspace_names(),
             proposal_counter: self.proposal_counter,
             ask_counter: self.ask_counter,
             statuses,

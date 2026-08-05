@@ -486,7 +486,14 @@ pub struct StatusInfo {
 /// between windows, and `seance upgrade` — the clients are mirrors.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WorkspaceMeta {
+    /// The circle's stable **slug** — its identity. Minted once at creation
+    /// and never rewritten, so anything holding it (a pane's environment, a
+    /// client's pin/park prefs, a path on disk) survives a rename.
     pub workspace: String,
+    /// Human-facing label. Free text, mutable, and the only thing a rename
+    /// changes. Absent means "same as the slug".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Last real pane output (recorder-observed content change).
     #[serde(default)]
     pub last_output_ms: u64,
