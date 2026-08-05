@@ -894,6 +894,32 @@ impl Engine {
                 );
                 ok(json!({"workspace": ws, "removed": removed}))
             }
+            RenameCircle {
+                name,
+                workspace,
+                scope,
+                from,
+            } => {
+                let Some(key) = workspace.or(scope) else {
+                    return err("rename: expected a circle".into());
+                };
+                match self.rename_workspace(&key, &name) {
+                    Some(slug) => {
+                        let label = self.workspace_label(&slug);
+                        self.persist();
+                        self.push_state_to_all();
+                        events::log(
+                            &actor(&from),
+                            Some(&slug),
+                            None,
+                            "workspace_renamed",
+                            format!("label -> '{label}'"),
+                        );
+                        ok(json!({"workspace": slug, "workspace_name": label}))
+                    }
+                    None => err(format!("no circle '{key}'")),
+                }
+            }
             Sleep {
                 workspace,
                 scope,

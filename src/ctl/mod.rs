@@ -322,6 +322,7 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
         "revoke" => parse_revoke(sub_args),
         "policy" => parse_policy(sub_args),
         "pr-link" | "pr-links" => parse_pr_link(sub_args),
+        "rename-circle" | "rename-workspace" => parse_rename_circle(sub_args),
         "sleep" => parse_sleep(sub_args, false),
         "wake" | "awaken" => parse_sleep(sub_args, true),
         "seize" => parse_seize(sub_args),

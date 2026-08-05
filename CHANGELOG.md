@@ -59,6 +59,10 @@ A circle's name stops being its identity.
 - `SEANCE_WORKSPACE_NAME` carries the circle's label for display.
   `SEANCE_WORKSPACE` is the slug and is now genuinely stable. `ctl list` shows
   `label (slug)` when they differ; `whoami` reports both.
+- **`seance ctl rename-circle [WS] NAME`** — agents can already create circles
+  (`ctl new --workspace`), so they can now label them too; rename was
+  GUI-only. Addresses by either form and sets the label, leaving the slug
+  alone like every other path.
 - Labels render in both GUIs — sidebar, overview, PR board, command palette —
   and a new circle keeps the name you typed ("Growth Work" reads as itself
   while being keyed by `growth-work`). The palette matches **either** form, so

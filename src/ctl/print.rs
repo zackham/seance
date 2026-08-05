@@ -357,6 +357,7 @@ COMMANDS:
     commands PANE / last-command PANE [--failed]
     watch [opts]                  stream events
          --kinds a,b  --pane P  --actor A  --since-seq N  --no-catch-up
+    rename-circle [WS] NAME       set a circle's label (its slug never moves)
     sleep [WS]                    sleep a circle (frees its RAM; wakes on resume)
     wake [WS]                     wake a sleeping circle
     pr-link add WS URL            seed a PR link on a workspace

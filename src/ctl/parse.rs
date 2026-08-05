@@ -159,6 +159,14 @@ pub(crate) fn with_identity(
     use ControlRequest::*;
     match request {
         List { .. } => List { scope, from },
+        RenameCircle {
+            name, workspace, ..
+        } => RenameCircle {
+            name,
+            workspace,
+            scope,
+            from,
+        },
         Sleep { workspace, .. } => Sleep {
             workspace,
             scope,
@@ -985,6 +993,37 @@ pub(crate) fn parse_policy(args: Vec<String>) -> Result<ControlRequest, String> 
             from: None,
         })
     }
+}
+
+/// `rename-circle [WS] NEW-LABEL` — omit WS inside a pane and your own
+/// circle is relabelled (ctl stamps `scope`).
+pub(crate) fn parse_rename_circle(args: Vec<String>) -> Result<ControlRequest, String> {
+    let mut it = args.into_iter();
+    let mut workspace = None;
+    let mut positionals: Vec<String> = Vec::new();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--workspace" | "--ws" => workspace = Some(take_value(&mut it, "--workspace")?),
+            other => positionals.push(other.to_string()),
+        }
+    }
+    // Two positionals = WS then label; one = the label for the current circle.
+    let name = match positionals.len() {
+        0 => return Err("rename-circle: expected [WORKSPACE] NEW-NAME".into()),
+        1 => positionals.remove(0),
+        _ => {
+            if workspace.is_none() {
+                workspace = Some(positionals.remove(0));
+            }
+            positionals.join(" ")
+        }
+    };
+    Ok(ControlRequest::RenameCircle {
+        name,
+        workspace,
+        scope: None,
+        from: None,
+    })
 }
 
 /// `sleep [WORKSPACE]` · `wake [WORKSPACE]` — omit the name inside a pane and

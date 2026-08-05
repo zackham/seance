@@ -437,6 +437,19 @@ pub enum ControlRequest {
         from: Option<String>,
     },
 
+    /// Set a circle's display label. The slug — its identity — is untouched,
+    /// so nothing keyed by it moves. `workspace` addresses the circle by
+    /// either form; `name` is the new label (empty resets it to the slug).
+    RenameCircle {
+        name: String,
+        #[serde(default)]
+        workspace: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
     /// Put a circle to sleep: every pane's process exits, its last frame is
     /// frozen, identity + claude conversation are kept. Refused unless every
     /// pane in the circle is restorable.
@@ -607,6 +620,7 @@ impl ControlRequest {
             | Self::PrLinkClear { from, .. }
             | Self::Sleep { from, .. }
             | Self::Wake { from, .. }
+            | Self::RenameCircle { from, .. }
             | Self::Task { from, .. } => from,
         }
     }
@@ -642,6 +656,9 @@ impl ControlRequest {
                 workspace, scope, ..
             }
             | Self::Wake {
+                workspace, scope, ..
+            }
+            | Self::RenameCircle {
                 workspace, scope, ..
             } => workspace.as_deref().or(scope.as_deref()),
             Self::List { scope, .. }
