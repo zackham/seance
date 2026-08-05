@@ -976,6 +976,12 @@ impl Actions for AppActions {
         self.0.need_rebuild.set(true);
     }
 
+    fn toggle_collapsed(&self, key: &str) {
+        if self.0.state.borrow_mut().subs.toggle_collapsed(key) {
+            self.0.persist_subs();
+        }
+        self.0.need_rebuild.set(true);
+    }
     fn request_rebuild(&self) {
         self.0.need_rebuild.set(true);
     }

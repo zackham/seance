@@ -23,6 +23,11 @@ use serde::{Deserialize, Serialize};
 /// localStorage key holding the serialized [`SubPrefs`].
 pub const STORAGE_KEY: &str = "seance_active";
 
+/// Fold key for a prefix cluster inside a band.
+pub fn group_key(section: &str, prefix: &str) -> String {
+    format!("{section}/{}", prefix.to_ascii_lowercase())
+}
+
 /// The persisted per-GUI split.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubPrefs {
@@ -38,6 +43,11 @@ pub struct SubPrefs {
     /// pinned one unpins it). `serde(default)` so pre-pin stored blobs parse.
     #[serde(default)]
     pub pinned: Vec<String>,
+    /// Folded rail nodes: a band (`"active"`) or a prefix cluster inside one
+    /// (`"active/mtg"`). `None` = never touched, which folds the quiet bands
+    /// by default; the first fold makes the list authoritative.
+    #[serde(default)]
+    pub collapsed: Option<Vec<String>>,
     /// False until a stored list was loaded or the first `State` seeded one.
     /// Drives the three-valued `Attach.subscriptions` (None = "everything").
     #[serde(skip)]
@@ -101,6 +111,37 @@ impl SubPrefs {
         let before = self.pinned.len();
         self.pinned.retain(|w| w != ws);
         self.pinned.len() != before
+    }
+
+    /// Is this rail node folded?
+    pub fn is_collapsed(&self, key: &str) -> bool {
+        match &self.collapsed {
+            None => matches!(key, "sleeping" | "parked"),
+            Some(list) => list.iter().any(|k| k == key),
+        }
+    }
+
+    /// Fold / unfold. Always reports `true` — the caller persists.
+    pub fn toggle_collapsed(&mut self, key: &str) -> bool {
+        let list = self
+            .collapsed
+            .get_or_insert_with(|| vec!["sleeping".to_string(), "parked".to_string()]);
+        if let Some(i) = list.iter().position(|k| k == key) {
+            list.remove(i);
+        } else {
+            list.push(key.to_string());
+        }
+        true
+    }
+
+    /// Drop cluster folds whose group no longer exists; band folds stay.
+    pub fn prune_collapsed(&mut self, live_groups: &[String]) -> bool {
+        let Some(list) = self.collapsed.as_mut() else {
+            return false;
+        };
+        let before = list.len();
+        list.retain(|k| !k.contains('/') || live_groups.iter().any(|g| g == k));
+        before != list.len()
     }
 
     /// Remove from active, keeping it seen. Returns whether anything changed.
@@ -335,5 +376,47 @@ mod tests {
         assert!(!prefs.has_seen("raid"));
         prefs.mark_seen("raid");
         assert!(prefs.has_seen("raid"));
+    }
+    /// Untouched means the quiet bands are folded; the first fold makes the
+    /// list authoritative so unfolding everything stays unfolded.
+    #[test]
+    fn collapse_defaults_then_become_authoritative() {
+        let mut p = SubPrefs::default();
+        assert!(!p.is_collapsed("active"));
+        assert!(p.is_collapsed("sleeping") && p.is_collapsed("parked"));
+
+        p.toggle_collapsed("parked");
+        assert!(!p.is_collapsed("parked"));
+        assert!(p.is_collapsed("sleeping"), "the other default survived");
+
+        p.toggle_collapsed("sleeping");
+        assert!(!p.is_collapsed("sleeping"));
+        assert!(!p.is_collapsed("parked"), "does not spring back");
+    }
+
+    /// Cluster folds are per band: folding `mtg` under active leaves the
+    /// slept `mtg` circles alone.
+    #[test]
+    fn group_folds_are_scoped_to_their_section() {
+        let mut p = SubPrefs::default();
+        let a = group_key("active", "MTG");
+        let s = group_key("sleeping", "mtg");
+        assert_eq!(a, "active/mtg", "prefix key is case-insensitive");
+        p.toggle_collapsed(&a);
+        assert!(p.is_collapsed(&a));
+        assert!(!p.is_collapsed(&s));
+    }
+
+    /// A cluster that no longer exists takes its fold with it; bands stay.
+    #[test]
+    fn prune_drops_dead_group_folds_only() {
+        let mut p = SubPrefs::default();
+        p.toggle_collapsed("active");
+        p.toggle_collapsed(&group_key("active", "mtg"));
+        p.toggle_collapsed(&group_key("active", "gone"));
+        assert!(p.prune_collapsed(&["active/mtg".to_string()]));
+        assert!(p.is_collapsed("active/mtg"));
+        assert!(!p.is_collapsed("active/gone"));
+        assert!(p.is_collapsed("active"));
     }
 }

@@ -174,8 +174,6 @@ pub struct SeanceApp {
     /// Workspaces parked locally whose `Unsubscribe` may still be in flight —
     /// a State composed before it landed must not re-activate them.
     park_pending: std::collections::BTreeSet<String>,
-    /// Parked group expanded in the sidebar. Session-local by design.
-    parked_expanded: bool,
     /// Last activity timestamp (ms) per workspace — input/inject/status, not click.
     workspace_touch: std::collections::HashMap<String, u64>,
     /// Last observed pane output per workspace (ms) — sidebar shows "time
@@ -393,7 +391,6 @@ impl SeanceApp {
             subs_pref: pref.unwrap_or_default(),
             subs_seeded,
             park_pending: std::collections::BTreeSet::new(),
-            parked_expanded: false,
             workspace_touch: std::collections::HashMap::new(),
             workspace_activity: std::collections::HashMap::new(),
             resize_settle: std::collections::HashMap::new(),

@@ -634,71 +634,67 @@ input:focus {
   color: var(--text-dim);
 }
 
-/* ── pinned section (always at the top of the rail) ─────────────────── */
-.pinned-section {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.pinned-divider {
-  flex: 0 0 auto;
-  height: 0;
-  margin: 6px 0;
-  border-top: 1px solid var(--border);
-}
-
-/* ── parked group (collapsed accordion under the active rows) ───────── */
-.parked-group {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-top: 6px;
-  border-top: 1px solid var(--border);
-  padding-top: 6px;
-}
-.parked-head {
+/* ── folding bands + prefix clusters ────────────────────────────────── */
+/* Four bands (pinned / active / sleeping / parked), each folding, and inside
+   each a cluster per shared name prefix. Same accordion idiom one level in. */
+.sect-head,
+.grp-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 8px;
   cursor: pointer;
-  color: var(--text-faint);
   font-size: var(--fs-xs);
 }
-.parked-head:hover {
+.sect-head {
+  padding: 5px 8px 3px;
+  color: var(--text-faint);
+  letter-spacing: 0.04em;
+}
+.sect-head:not(:first-child) {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.grp-head {
+  padding: 2px 8px 2px 18px;
+  color: var(--text-dim);
+}
+.sect-head:hover,
+.grp-head:hover {
   background: var(--surface);
 }
-.parked-caret {
+.fold-caret {
   flex: 0 0 auto;
   line-height: 1;
 }
-.parked-title {
+.fold-title {
   flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.parked-dot {
+.fold-dot {
   flex: 0 0 auto;
   line-height: 1;
   color: var(--text-faint);
 }
-.parked-dot.needs {
+.fold-dot.needs {
   color: var(--violet);
 }
-.parked-dot.working {
+.fold-dot.working {
   color: var(--text-dim);
 }
-.parked-dot.done {
+.fold-dot.done {
   color: var(--success);
 }
-.parked-list {
+/* Cluster members sit one indent in, with a hairline tying them to the head. */
+.grp-rows {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  margin-left: 10px;
+  border-left: 1px solid var(--border);
 }
+
 /* Parked rows are the same rows, visually muted. */
 .ws-row.parked {
   opacity: 0.62;

@@ -9,6 +9,7 @@ use gpui_component::{
 
 use crate::runtime::protocol::GuiRequest;
 use crate::theme::SeancePalette;
+use seance_core::grouping::{Section, SectionRow};
 
 use super::actions::*;
 use super::util::{
@@ -464,20 +465,29 @@ impl SeanceApp {
         .detach();
     }
 
-    /// The collapsed `parked (N)` accordion header — same caret/expand idiom as
-    /// the host account strip. Collapsed, it carries the highest-priority
-    /// attention dot among the circles it hides, so a parked agent asking for
-    /// help is still visible without expanding.
-    fn render_parked_header(&self, count: usize, cx: &Context<Self>) -> gpui::AnyElement {
-        let expanded = self.parked_expanded;
-        let caret = if expanded { "▾" } else { "▸" };
-        let att = if expanded {
-            None
+    /// A band header: caret, name, count. Collapsed, it carries the highest
+    /// attention among the circles it hides, so an agent asking for help is
+    /// visible without unfolding the pile.
+    fn render_section_header(
+        &self,
+        section: Section,
+        rows: &[String],
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let key = section.key();
+        let collapsed = self.subs_pref.is_collapsed(key);
+        let caret = if collapsed { "▸" } else { "▾" };
+        let count = rows.len();
+        let att = if collapsed {
+            rows.iter()
+                .filter_map(|ws| self.workspace_attention_cx(ws))
+                .max_by_key(|a| a.priority())
         } else {
-            self.parked_summary().1
+            None
         };
+        let title = section.title();
         div()
-            .id("parked-header")
+            .id(SharedString::from(format!("section-{key}")))
             .px_2()
             .py_1p5()
             .flex()
@@ -485,13 +495,9 @@ impl SeanceApp {
             .gap_1p5()
             .cursor_pointer()
             .hover(|s| s.bg(SeancePalette::surface()))
-            .tooltip(tip(if expanded {
-                "collapse parked circles"
-            } else {
-                "parked circles — click to expand (out of ctrl+page rotation)"
-            }))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.parked_expanded = !this.parked_expanded;
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.subs_pref.toggle_collapsed(key);
+                this.save_subscriptions();
                 cx.notify();
             }))
             .child(
@@ -501,7 +507,7 @@ impl SeanceApp {
                     .truncate()
                     .text_xs()
                     .text_color(SeancePalette::text_faint())
-                    .child(format!("{caret} parked ({count})")),
+                    .child(format!("{caret} {title} ({count})")),
             )
             .children(att.map(|a| {
                 div().flex_none().text_xs().text_color(a.color()).child(
@@ -513,6 +519,107 @@ impl SeanceApp {
                 )
             }))
             .into_any_element()
+    }
+
+    /// A prefix cluster's header, indented under its band. Same accordion
+    /// idiom one level in, and collapsed it shows what it's hiding.
+    fn render_group_header(
+        &self,
+        section: Section,
+        prefix: &str,
+        members: &[String],
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let key = crate::subscriptions_pref::group_key(section.key(), prefix);
+        let collapsed = self.subs_pref.is_collapsed(&key);
+        let caret = if collapsed { "▸" } else { "▾" };
+        let count = members.len();
+        let att = if collapsed {
+            members
+                .iter()
+                .filter_map(|ws| self.workspace_attention_cx(ws))
+                .max_by_key(|a| a.priority())
+        } else {
+            None
+        };
+        let label = prefix.to_string();
+        let toggle_key = key.clone();
+        div()
+            .id(SharedString::from(format!("group-{key}")))
+            .pl_3()
+            .pr_2()
+            .py_1()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .hover(|s| s.bg(SeancePalette::surface()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.subs_pref.toggle_collapsed(&toggle_key);
+                this.save_subscriptions();
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(SeancePalette::text_dim())
+                    .child(format!("{caret} {label} ({count})")),
+            )
+            .children(att.map(|a| {
+                div().flex_none().text_xs().text_color(a.color()).child(
+                    if matches!(a, WorkspaceAttention::Working) {
+                        working_spinner_glyph()
+                    } else {
+                        "●"
+                    },
+                )
+            }))
+            .into_any_element()
+    }
+
+    /// One band, fully rendered: header, then its rows — loose circles at the
+    /// band's indent, clustered ones under their prefix header.
+    fn render_section(
+        &self,
+        section: Section,
+        circles: Vec<String>,
+        cx: &Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let mut out: Vec<gpui::AnyElement> = Vec::new();
+        if circles.is_empty() {
+            return out;
+        }
+        let parked = matches!(section, Section::Parked);
+        out.push(self.render_section_header(section, &circles, cx));
+        if self.subs_pref.is_collapsed(section.key()) {
+            return out;
+        }
+        for row in self.section_rows(&circles) {
+            match row {
+                SectionRow::Circle(ws) => {
+                    out.push(self.render_workspace_group(ws, parked, cx));
+                }
+                SectionRow::Group { prefix, members } => {
+                    out.push(self.render_group_header(section, &prefix, &members, cx));
+                    let key = crate::subscriptions_pref::group_key(section.key(), &prefix);
+                    if self.subs_pref.is_collapsed(&key) {
+                        continue;
+                    }
+                    for ws in members {
+                        out.push(
+                            div()
+                                .pl_2()
+                                .child(self.render_workspace_group(ws, parked, cx))
+                                .into_any_element(),
+                        );
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// One sidebar workspace group. Parked rows use the same builder, sort and
@@ -768,14 +875,13 @@ impl SeanceApp {
         // everything else lands in the collapsed parked group below it.
         // Pinned circles get their own section at the very top, separated by a
         // hairline rule; each band carries the same sort.
-        let (pinned, active, parked) = self.workspace_bands();
-        let has_pinned = !pinned.is_empty();
-        let parked_n = parked.len();
-        let parked_rows: Vec<String> = if self.parked_expanded {
-            parked
-        } else {
-            Vec::new()
-        };
+        // Four folding bands — pinned, active, sleeping, parked — each
+        // grouping its own circles by name prefix, independently.
+        let section_rows: Vec<gpui::AnyElement> = self
+            .workspace_sections()
+            .into_iter()
+            .flat_map(|(section, circles)| self.render_section(section, circles, cx))
+            .collect();
 
         let _ = window_active; // focus chrome reserved for future empty-window dimming
 
@@ -857,38 +963,7 @@ impl SeanceApp {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .children(
-                        pinned
-                            .into_iter()
-                            .map(|ws| self.render_workspace_group(ws, false, cx)),
-                    )
-                    // Divider: same hairline rule as the gui-menu separator.
-                    // NOTE: this is one child of the scroller — `select_workspace`
-                    // offsets its scroll_to_item index by it.
-                    .when(has_pinned, |d| {
-                        d.child(
-                            div()
-                                .mx_2()
-                                .my_1()
-                                .h(px(1.))
-                                .bg(SeancePalette::border())
-                                .into_any_element(),
-                        )
-                    })
-                    .children(
-                        active
-                            .into_iter()
-                            .map(|ws| self.render_workspace_group(ws, false, cx)),
-                    )
-                    // Parked group: one collapsed accordion under the active
-                    // band. Expanded state is session-local by design.
-                    .when(parked_n > 0, |d| {
-                        d.child(self.render_parked_header(parked_n, cx)).children(
-                            parked_rows
-                                .into_iter()
-                                .map(|ws| self.render_workspace_group(ws, true, cx)),
-                        )
-                    })
+                    .children(section_rows)
                     // Flex filler below the rows. The parked/subscribe menu
                     // that used to live here (pull / collect) went with the
                     // ownership model; phase 2 puts the parked group here.

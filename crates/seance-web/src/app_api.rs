@@ -63,6 +63,8 @@ pub trait Actions {
     /// Repaint chrome on the next frame (client-only view state changed —
     /// e.g. the parked accordion opened).
     fn request_rebuild(&self);
+    /// Fold / unfold a rail band or prefix cluster, and persist it.
+    fn toggle_collapsed(&self, key: &str);
     /// Ctrl+PageUp/Down — ACTIVE circles only.
     fn cycle_workspace(&self, delta: i32);
     fn cycle_pane(&self, delta: i32);

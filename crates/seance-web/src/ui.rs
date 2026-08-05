@@ -109,6 +109,8 @@ use seance_core::protocol::{FsOp, GuiRequest, PaneInfo, PrLink};
 use crate::app_api::Actions;
 use crate::menus::{close_menu, open_menu, MenuEntry};
 use crate::state::{Attention, ClientState, HostWidget};
+use crate::subs::group_key;
+use seance_core::grouping::{Section, SectionRow};
 
 type ClickClosure = Closure<dyn FnMut(MouseEvent)>;
 type KeyClosure = Closure<dyn FnMut(KeyboardEvent)>;
@@ -309,7 +311,6 @@ pub struct Chrome {
     last_scrolled_ws: Option<String>,
     /// Parked accordion open/closed. Session-local by design — collapsed on
     /// every fresh page load, never persisted (contract).
-    parked_open: Rc<Cell<bool>>,
 
     /// `✦` popover (GUI census) is open. Shared with its own listeners (they
     /// close it) and survives a rebuild — the card is re-rendered under the
@@ -395,7 +396,6 @@ impl Chrome {
             kill_armed: Rc::new(RefCell::new(HashMap::new())),
             conn: ("connecting".to_string(), false),
             last_scrolled_ws: None,
-            parked_open: Rc::new(Cell::new(false)),
             gui_menu_open: Rc::new(Cell::new(false)),
             gui_menu_clicks: Rc::new(RefCell::new(Vec::new())),
             gui_menu_dismiss: Rc::new(RefCell::new(None)),
@@ -438,17 +438,14 @@ impl Chrome {
         self.ws_refs.clear();
         self.focused = state.focused_pane.clone();
 
-        let pinned = state.pinned_workspaces();
-        let active = state.unpinned_active_workspaces();
-        let parked = state.parked_workspaces();
+        let visible = state.visible_workspaces();
         let selected = state
             .selected_workspace
             .clone()
-            .or_else(|| pinned.first().cloned())
-            .or_else(|| active.first().cloned());
+            .or_else(|| visible.first().cloned());
 
         self.build_topbar(state, selected.as_deref())?;
-        self.build_sidebar(state, &pinned, &active, &parked, selected.as_deref())?;
+        self.build_sidebar(state, selected.as_deref())?;
         self.build_tiles(state, selected.as_deref())?;
         self.render_asks(state)?;
         self.apply_badges(state);
@@ -563,27 +560,20 @@ impl Chrome {
     fn build_sidebar(
         &mut self,
         state: &ClientState,
-        pinned: &[String],
-        workspaces: &[String],
-        parked: &[String],
         selected: Option<&str>,
     ) -> Result<(), JsValue> {
+        let sections = state.workspace_sections();
         let doc = self.doc.clone();
         self.sidebar.set_inner_html("");
 
         // `◈+` / quicklaunch uniquify against EVERY known circle, parked too.
-        let all: Vec<String> = pinned
-            .iter()
-            .chain(workspaces.iter())
-            .chain(parked.iter())
-            .cloned()
-            .collect();
+        let all: Vec<String> = sections.iter().flat_map(|(_, c)| c.clone()).collect();
         self.build_brand(state, &all)?;
 
         let list = mk(&doc, "div", "ws-list")?;
         self.sidebar.append_child(&list)?;
 
-        if pinned.is_empty() && workspaces.is_empty() && parked.is_empty() {
+        if all.is_empty() {
             let empty = mk(&doc, "div", "empty")?;
             empty.append_child(text_el(&doc, "div", "", "no workspaces here")?.unchecked_ref())?;
             {
@@ -595,27 +585,10 @@ impl Chrome {
             list.append_child(&empty)?;
         }
 
-        // Pinned section: always at the top, same internal sort, then a rule
-        // separating it from the normal active band.
-        if !pinned.is_empty() {
-            let sect = mk(&doc, "div", "pinned-section")?;
-            sect.set_id("pinned-section");
-            list.append_child(&sect)?;
-            for ws in pinned {
-                self.build_ws_row(&sect, state, ws, selected, false)?;
-            }
-            let divider = mk(&doc, "div", "pinned-divider")?;
-            divider.set_id("pinned-divider");
-            list.append_child(&divider)?;
+        // Four folding bands, each grouping its own circles by name prefix.
+        for (section, circles) in &sections {
+            self.build_section(&list, state, *section, circles, selected)?;
         }
-
-        for ws in workspaces {
-            self.build_ws_row(&list, state, ws, selected, false)?;
-        }
-
-        // The parked group replaces the old "elsewhere" rail: same rows, same
-        // sort, one collapsed accordion (host-strip pattern).
-        self.build_parked(&list, state, parked, selected)?;
 
         // Flex filler below the rows.
         let hit = mk(&doc, "div", "side-empty-hit")?;
@@ -937,86 +910,121 @@ impl Chrome {
     /// `parked (N)` + caret; collapsed it carries the highest-priority
     /// attention dot among its rows, so a `ctl` spawn or a finished agent still
     /// pulls the eye. Expanded state is session-local (never persisted).
-    fn build_parked(
+    /// One band: a folding header, then its rows — loose circles at the band
+    /// indent, clustered ones under their prefix header.
+    fn build_section(
         &mut self,
         list: &Element,
         state: &ClientState,
-        parked: &[String],
+        section: Section,
+        circles: &[String],
         selected: Option<&str>,
     ) -> Result<(), JsValue> {
-        if parked.is_empty() {
+        if circles.is_empty() {
             return Ok(());
         }
         let doc = self.doc.clone();
-        let open = self.parked_open.get();
+        let key = section.key().to_string();
+        let open = !state.subs.is_collapsed(&key);
+        let parked = matches!(section, Section::Parked);
 
-        let group = mk(&doc, "div", "parked-group")?;
-        group.set_id("parked-group");
-        let head = mk(
-            &doc,
-            "div",
-            if open {
-                "parked-head open"
-            } else {
-                "parked-head"
-            },
-        )?;
-        head.set_id("parked-head");
-        head.set_attribute(
-            "title",
-            if open {
-                "parked circles — click to collapse"
-            } else {
-                "parked circles (not subscribed) — click to expand"
-            },
-        )?;
-        head.append_child(
-            text_el(&doc, "span", "parked-caret", if open { "▾" } else { "▸" })?.unchecked_ref(),
-        )?;
-        head.append_child(
-            text_el(
-                &doc,
-                "span",
-                "parked-title",
-                &format!("parked ({})", parked.len()),
-            )?
-            .unchecked_ref(),
-        )?;
-        // Collapsed only: one dot for the loudest thing hiding in there.
-        let (dot_text, dot_class) = match (open, state.parked_attention()) {
-            (false, Some(att)) => (
-                "●",
-                match att {
-                    Attention::NeedsHuman => "parked-dot needs",
-                    Attention::Working => "parked-dot working",
-                    Attention::Done => "parked-dot done",
-                },
-            ),
-            _ => ("", "parked-dot"),
+        let att = if open {
+            None
+        } else {
+            circles
+                .iter()
+                .filter_map(|w| state.row_attention(w))
+                .max_by_key(|a| a.priority())
         };
-        head.append_child(text_el(&doc, "span", dot_class, dot_text)?.unchecked_ref())?;
-        group.append_child(&head)?;
-        list.append_child(&group)?;
-
-        {
-            let open_cell = self.parked_open.clone();
-            let actions = self.actions.clone();
-            bind_click(&head, &mut self.structural, move |ev| {
-                ev.stop_propagation();
-                open_cell.set(!open_cell.get());
-                actions.request_rebuild();
-            })?;
+        let head = self.build_fold_head(
+            &format!("sect-{key}"),
+            "sect-head",
+            open,
+            &format!("{} ({})", section.title(), circles.len()),
+            att,
+            &key,
+        )?;
+        list.append_child(&head)?;
+        if !open {
+            return Ok(());
         }
 
-        if open {
-            let rows = mk(&doc, "div", "parked-list")?;
-            rows.set_id("parked-list");
-            group.append_child(&rows)?;
-            for ws in parked {
-                self.build_ws_row(&rows, state, ws, selected, true)?;
+        for row in state.section_rows(circles) {
+            match row {
+                SectionRow::Circle(ws) => {
+                    self.build_ws_row(list, state, &ws, selected, parked)?;
+                }
+                SectionRow::Group { prefix, members } => {
+                    let gkey = group_key(&key, &prefix);
+                    let gopen = !state.subs.is_collapsed(&gkey);
+                    let gatt = if gopen {
+                        None
+                    } else {
+                        members
+                            .iter()
+                            .filter_map(|w| state.row_attention(w))
+                            .max_by_key(|a| a.priority())
+                    };
+                    let ghead = self.build_fold_head(
+                        &format!("grp-{gkey}"),
+                        "grp-head",
+                        gopen,
+                        &format!("{prefix} ({})", members.len()),
+                        gatt,
+                        &gkey,
+                    )?;
+                    list.append_child(&ghead)?;
+                    if !gopen {
+                        continue;
+                    }
+                    let nest = mk(&doc, "div", "grp-rows")?;
+                    list.append_child(&nest)?;
+                    for ws in &members {
+                        self.build_ws_row(&nest, state, ws, selected, parked)?;
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    /// A folding header (band or cluster): caret, title, and — while folded —
+    /// one dot for the loudest thing hidden underneath.
+    fn build_fold_head(
+        &mut self,
+        id: &str,
+        class: &str,
+        open: bool,
+        title: &str,
+        att: Option<Attention>,
+        toggle_key: &str,
+    ) -> Result<Element, JsValue> {
+        let doc = self.doc.clone();
+        let cls = if open {
+            format!("{class} open")
+        } else {
+            class.to_string()
+        };
+        let head = mk(&doc, "div", &cls)?;
+        head.set_id(id);
+        head.append_child(
+            text_el(&doc, "span", "fold-caret", if open { "▾" } else { "▸" })?.unchecked_ref(),
+        )?;
+        head.append_child(text_el(&doc, "span", "fold-title", title)?.unchecked_ref())?;
+        let (dot_text, dot_class) = match att {
+            Some(Attention::NeedsHuman) => ("●", "fold-dot needs"),
+            Some(Attention::Working) => ("●", "fold-dot working"),
+            Some(Attention::Done) => ("●", "fold-dot done"),
+            None => ("", "fold-dot"),
+        };
+        head.append_child(text_el(&doc, "span", dot_class, dot_text)?.unchecked_ref())?;
+        let actions = self.actions.clone();
+        let key = toggle_key.to_string();
+        bind_click(&head, &mut self.structural, move |ev| {
+            ev.stop_propagation();
+            actions.toggle_collapsed(&key);
+        })?;
+        Ok(head)
     }
 
     // ── quicklaunch strip ───────────────────────────────────────────────

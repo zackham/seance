@@ -10,7 +10,8 @@ use base64::Engine as _;
 use seance_core::protocol::{AskInfo, GuiEvent, PaneInfo, PrLink, StatusInfo, WindowInfo};
 use seance_core::snapshot::{decode_grid_bin_onto, GridSnapshot};
 
-use crate::subs::SubPrefs;
+use crate::subs::{group_key, SubPrefs};
+use seance_core::grouping::{Section, SectionRow};
 
 /// What a folded event dirtied.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,7 +146,7 @@ impl Attention {
             Self::Done => "done",
         }
     }
-    fn priority(self) -> u8 {
+    pub fn priority(self) -> u8 {
         match self {
             Self::NeedsHuman => 3,
             Self::Working => 2,
@@ -398,18 +399,65 @@ impl ClientState {
         done.then_some(Attention::Done)
     }
 
-    /// Ctrl+PageUp/Down walks EXACTLY the active list the sidebar displays,
-    /// read live at each press — pageup/down must always correspond to what
-    /// the left sidebar shows (owner decision 2026-08-02; native mirrors).
-    /// With pins that is the pinned section first, then the unpinned band —
-    /// i.e. render order top-to-bottom.
+    /// Ctrl+PageUp/Down walks EXACTLY what the sidebar displays, read live at
+    /// each press (owner decision 2026-08-02; native mirrors). Folded bands
+    /// and clusters are not displayed, so they are not in the ring — folding
+    /// a pile is how you narrow the rotation to what you're working in.
     pub fn displayed_active_ring(&self) -> Vec<String> {
-        let mut out = self.pinned_workspaces();
-        out.extend(self.unpinned_active_workspaces());
-        out
+        self.visible_workspaces()
     }
 
     /// Bump recency (human typing here / context-menu touch / fresh spawn).
+    /// The rail's four bands in display order, each carrying the same sort.
+    pub fn workspace_sections(&self) -> Vec<(Section, Vec<String>)> {
+        let ordered = self.workspaces();
+        let active: std::collections::BTreeSet<String> = ordered
+            .iter()
+            .filter(|w| self.subs.is_active(w))
+            .cloned()
+            .collect();
+        let pinned: std::collections::BTreeSet<String> = ordered
+            .iter()
+            .filter(|w| self.subs.is_pinned(w))
+            .cloned()
+            .collect();
+        let asleep: std::collections::BTreeSet<String> = ordered
+            .iter()
+            .filter(|w| self.workspace_asleep(w))
+            .cloned()
+            .collect();
+        seance_core::grouping::partition_sections(&ordered, &active, &pinned, &asleep)
+    }
+
+    /// One band's rows: loose circles and prefix clusters, in sort order.
+    /// Grouping reads the LABEL, so retyping a name is how you regroup.
+    pub fn section_rows(&self, circles: &[String]) -> Vec<SectionRow> {
+        seance_core::grouping::group_by_prefix(circles, |ws| self.workspace_label(ws))
+    }
+
+    /// Every circle the rail is actually SHOWING, in draw order — the
+    /// ctrl+page ring. Folds count, so folding a pile narrows the rotation.
+    pub fn visible_workspaces(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (section, circles) in self.workspace_sections() {
+            if circles.is_empty() || self.subs.is_collapsed(section.key()) {
+                continue;
+            }
+            for row in self.section_rows(&circles) {
+                match row {
+                    SectionRow::Circle(ws) => out.push(ws),
+                    SectionRow::Group { prefix, members } => {
+                        let key = group_key(section.key(), &prefix);
+                        if !self.subs.is_collapsed(&key) {
+                            out.extend(members);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// What to show for a circle: its label, falling back to its slug — which
     /// is what every circle reads as until someone renames it.
     pub fn workspace_label(&self, ws: &str) -> String {

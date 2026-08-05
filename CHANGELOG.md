@@ -17,6 +17,52 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-08-05
+
+Four folding bands, and circles that cluster by the name you give them.
+
+### Added
+
+- **The rail is four folding bands: pinned, active, sleeping, parked.**
+  Sleeping is now its own band rather than circles sitting wherever they were
+  when they dozed off. A pinned circle stays pinned even asleep — a pin says
+  where you want to *look*, and the daemon dozing something is not a reason to
+  move it. Each band shows its count, and a folded band carries one dot for
+  the loudest thing hiding under it, so an agent asking for help is visible
+  without unfolding the pile.
+
+- **Circles cluster by the text before the first hyphen, per band,
+  independently.** Name three circles `mtg-growth`, `mtg-ai`, `mtg-carl` and
+  they gather under `mtg`. Grouping is a naming convention rather than a
+  stored attribute: you get it by typing, you undo it by typing, and it costs
+  nothing when you don't want it — which is the point when the grouping only
+  matters for an afternoon. A prefix only one circle carries is not a group,
+  and a name with no hyphen opts out. The `mtg` circles you're working in and
+  the `mtg` circles you've slept are separate piles that fold separately.
+
+  A cluster sits at the position of its **first** member, so it floats exactly
+  as high as its most-deserving circle would have on its own — the sort keeps
+  meaning what it meant. Matching ignores case; the header shows the prefix as
+  you first typed it. Grouping reads the **label**, so retyping a name is how
+  you regroup, and the slug underneath never moves.
+
+### Changed
+
+- **`ctrl+page` walks exactly what the rail is showing** — which now means
+  folds narrow it. Fold the bands and clusters you're not in and the rotation
+  is just your working set. Both GUIs.
+- Fold state persists per client (`subscriptions.json` / localStorage).
+  Untouched, `sleeping` and `parked` start folded; the first fold makes your
+  choices authoritative, so unfolding everything stays unfolded instead of
+  springing back to defaults. A cluster that stops existing takes its fold
+  with it.
+
+### Removed
+
+- The bespoke pinned-section + parked-accordion rendering in both GUIs, and
+  `partition3` — one generic band renderer replaced three special cases, and
+  the shared `seance_core::grouping` means the two rails cannot drift.
+
 ## [0.16.0] — 2026-08-05
 
 A circle's name stops being its identity.

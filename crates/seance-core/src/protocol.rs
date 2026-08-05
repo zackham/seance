@@ -681,6 +681,7 @@ mod workspace_meta_tests {
 
         let meta = WorkspaceMeta {
             workspace: "lab".into(),
+            name: None,
             last_output_ms: 1,
             last_touch_ms: 2,
             pr_links: vec![PrLink {

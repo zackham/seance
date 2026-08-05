@@ -7,6 +7,7 @@
 use gpui::{Context, Window};
 
 use super::util::now_ms;
+use seance_core::grouping::{Section, SectionRow};
 
 /// Coarse one-unit relative time for sidebar labels.
 pub(super) fn rel_label(delta_ms: u64) -> String {
@@ -47,7 +48,7 @@ impl WorkspaceAttention {
             Self::Done => crate::theme::SeancePalette::success(),
         }
     }
-    fn priority(self) -> u8 {
+    pub(super) fn priority(self) -> u8 {
         match self {
             Self::NeedsHuman => 3,
             Self::Working => 2,
@@ -93,6 +94,23 @@ impl SeanceApp {
             changed |= self.subs_pref.activate(&sel);
         }
         changed |= self.subs_pref.prune(known);
+        // A cluster that no longer exists shouldn't leave a fold behind to
+        // surprise you when that name comes back.
+        let live_groups: std::collections::BTreeSet<String> = self
+            .workspace_sections()
+            .into_iter()
+            .flat_map(|(section, circles)| {
+                self.section_rows(&circles)
+                    .into_iter()
+                    .filter_map(move |row| match row {
+                        SectionRow::Group { prefix, .. } => {
+                            Some(crate::subscriptions_pref::group_key(section.key(), &prefix))
+                        }
+                        SectionRow::Circle(_) => None,
+                    })
+            })
+            .collect();
+        changed |= self.subs_pref.prune_collapsed(&live_groups);
         if changed {
             self.save_subscriptions();
         }
@@ -138,7 +156,7 @@ impl SeanceApp {
     /// otherwise pick for us on `Unsubscribe`).
     pub(super) fn park_workspace(&mut self, ws: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_workspace.as_deref() == Some(ws) {
-            let order = self.active_workspaces();
+            let order = self.visible_workspaces();
             let next = order
                 .iter()
                 .position(|w| w == ws)
@@ -179,38 +197,92 @@ impl SeanceApp {
         }
     }
 
-    /// The three sidebar bands in display order: (pinned, active-unpinned,
-    /// parked). One sort ([`Self::workspaces`]) applied inside every band.
-    pub(super) fn workspace_bands(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
-        crate::subscriptions_pref::partition3(
+    /// The rail's four bands in display order, each carrying the single sort
+    /// from [`Self::workspaces`]: pinned, active, sleeping, parked.
+    pub(super) fn workspace_sections(&self) -> Vec<(Section, Vec<String>)> {
+        let asleep: std::collections::BTreeSet<String> = self
+            .known_workspace_names()
+            .into_iter()
+            .filter(|ws| self.workspace_asleep(ws))
+            .collect();
+        seance_core::grouping::partition_sections(
             &self.workspaces(),
             &self.subs_pref.active,
             &self.subs_pref.pinned,
+            &asleep,
         )
     }
 
-    /// Workspaces in the pinned section, sidebar display order.
-    pub(super) fn pinned_workspaces(&self) -> Vec<String> {
-        self.workspace_bands().0
+    /// One band's rows: loose circles and prefix clusters, in sort order.
+    /// Grouping reads the LABEL, so retyping a name is how you regroup.
+    pub(super) fn section_rows(&self, circles: &[String]) -> Vec<SectionRow> {
+        seance_core::grouping::group_by_prefix(circles, |ws| self.workspace_label(ws))
     }
 
-    /// Active-but-unpinned workspaces — the band below the divider.
-    pub(super) fn unpinned_active_workspaces(&self) -> Vec<String> {
-        self.workspace_bands().1
-    }
-
-    /// Every rendered (non-parked) workspace, top-to-bottom exactly as the
-    /// rail draws it: pinned section first, then the normal active band. This
-    /// is the ctrl+page ring and the neighbour list for park/kill.
-    pub(super) fn active_workspaces(&self) -> Vec<String> {
-        let mut out = self.pinned_workspaces();
-        out.extend(self.unpinned_active_workspaces());
+    /// Every circle the rail is actually SHOWING, top-to-bottom, in draw
+    /// order. This is the ctrl+page ring and the neighbour list for park/kill.
+    ///
+    /// Folds count: a collapsed band or cluster is not on screen, so cycling
+    /// skips it. That makes collapsing a way to narrow what ctrl+page walks —
+    /// fold the piles you're not in and the rotation is just your working set.
+    pub(super) fn visible_workspaces(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (section, circles) in self.workspace_sections() {
+            if circles.is_empty() || self.subs_pref.is_collapsed(section.key()) {
+                continue;
+            }
+            for row in self.section_rows(&circles) {
+                match row {
+                    SectionRow::Circle(ws) => out.push(ws),
+                    SectionRow::Group { prefix, members } => {
+                        let key = crate::subscriptions_pref::group_key(section.key(), &prefix);
+                        if !self.subs_pref.is_collapsed(&key) {
+                            out.extend(members);
+                        }
+                    }
+                }
+            }
+        }
         out
     }
 
-    /// Workspaces in the collapsed parked group, same sort as active rows.
-    pub(super) fn parked_workspaces(&self) -> Vec<String> {
-        self.workspace_bands().2
+    /// Position of a circle's row among the elements the rail emits, so
+    /// scroll-to-item lands on it. Headers are rows too.
+    fn rail_row_index(&self, workspace: &str) -> Option<usize> {
+        let mut i = 0usize;
+        for (section, circles) in self.workspace_sections() {
+            if circles.is_empty() {
+                continue;
+            }
+            i += 1; // band header
+            if self.subs_pref.is_collapsed(section.key()) {
+                continue;
+            }
+            for row in self.section_rows(&circles) {
+                match row {
+                    SectionRow::Circle(ws) => {
+                        if ws == workspace {
+                            return Some(i);
+                        }
+                        i += 1;
+                    }
+                    SectionRow::Group { prefix, members } => {
+                        i += 1; // cluster header
+                        let key = crate::subscriptions_pref::group_key(section.key(), &prefix);
+                        if self.subs_pref.is_collapsed(&key) {
+                            continue;
+                        }
+                        for ws in members {
+                            if ws == workspace {
+                                return Some(i);
+                            }
+                            i += 1;
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Badge for a parked row: the normal live attention, or `needs` for a
@@ -223,16 +295,6 @@ impl SeanceApp {
                 None
             }
         })
-    }
-
-    /// Collapsed parked header summary: (count, highest-priority attention).
-    pub(super) fn parked_summary(&self) -> (usize, Option<WorkspaceAttention>) {
-        let parked = self.parked_workspaces();
-        let att = parked
-            .iter()
-            .filter_map(|ws| self.parked_attention(ws))
-            .max_by_key(|a| a.priority());
-        (parked.len(), att)
     }
 
     /// All workspaces in sidebar display order.
@@ -550,18 +612,10 @@ impl SeanceApp {
         }
         self.selected_workspace = Some(workspace.to_string());
         // Reveal the selection in the sidebar — ctrl+page cycling can land on
-        // a row scrolled out of the rail. Row index = position in display
-        // order (one child per workspace group in the list), plus one for the
-        // pinned/unpinned divider element when the row sits below it.
-        let (pinned, active, _) = self.workspace_bands();
-        let divider = !pinned.is_empty();
-        let idx = pinned.iter().position(|w| w == workspace).or_else(|| {
-            active
-                .iter()
-                .position(|w| w == workspace)
-                .map(|i| i + pinned.len() + usize::from(divider))
-        });
-        if let Some(idx) = idx {
+        // a row scrolled out of the rail. Count the elements the rail actually
+        // emits above this row: one per band header, one per cluster header,
+        // one per circle.
+        if let Some(idx) = self.rail_row_index(workspace) {
             self.sidebar_scroll.scroll_to_item(idx);
         }
         // Selecting a circle clears sticky "done/needs" unread — does NOT bump touch.
@@ -642,7 +696,7 @@ impl SeanceApp {
         // read live at each press (owner decision 2026-08-02: pageup/down
         // must always correspond to what the left sidebar displays — no
         // snapshots, no alternate orders).
-        let list = self.active_workspaces();
+        let list = self.visible_workspaces();
         if list.is_empty() {
             return;
         }
@@ -722,7 +776,7 @@ impl SeanceApp {
         // last) in sidebar order — not the daemon's arbitrary first-pane
         // fallback — so the human lands somewhere predictable.
         if self.selected_workspace.as_deref() == Some(workspace) {
-            let order = self.active_workspaces();
+            let order = self.visible_workspaces();
             if let Some(idx) = order.iter().position(|w| w == workspace) {
                 let neighbor = order
                     .get(idx + 1)

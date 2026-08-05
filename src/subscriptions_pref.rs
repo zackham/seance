@@ -34,6 +34,22 @@ pub struct SubscriptionsPref {
     /// pre-pin files still parse.
     #[serde(default)]
     pub pinned: BTreeSet<String>,
+    /// Collapsed rail nodes: a section (`"active"`) or a prefix group inside
+    /// one (`"active/mtg"`). Collapsing is per-section by design — the `mtg`
+    /// circles you're working in and the ones you've slept are different
+    /// piles, and folding one shouldn't fold the other.
+    ///
+    /// `None` means never touched, which is not the same as "everything is
+    /// open": the quiet bands start folded. Once the human folds anything the
+    /// set becomes authoritative, so unfolding everything stays unfolded
+    /// instead of springing back to the defaults.
+    #[serde(default)]
+    pub collapsed: Option<BTreeSet<String>>,
+}
+
+/// Collapse key for a prefix group inside a section.
+pub fn group_key(section: &str, prefix: &str) -> String {
+    format!("{section}/{}", prefix.to_ascii_lowercase())
 }
 
 pub fn config_path() -> PathBuf {
@@ -67,6 +83,43 @@ pub fn save(pref: &SubscriptionsPref) {
 }
 
 impl SubscriptionsPref {
+    /// Is this rail node folded?
+    pub fn is_collapsed(&self, key: &str) -> bool {
+        match &self.collapsed {
+            // Never touched: sleeping and parked are piles you open on
+            // purpose; the rest of the rail is what you're working in.
+            None => matches!(key, "sleeping" | "parked"),
+            Some(set) => set.contains(key),
+        }
+    }
+
+    /// Fold / unfold. Always reports `true` — the caller persists.
+    pub fn toggle_collapsed(&mut self, key: &str) -> bool {
+        let set = self.collapsed.get_or_insert_with(|| {
+            // Materialise the defaults on first touch so they are a starting
+            // point rather than a rule that keeps reasserting itself.
+            ["sleeping", "parked"]
+                .iter()
+                .map(|k| k.to_string())
+                .collect()
+        });
+        if !set.remove(key) {
+            set.insert(key.to_string());
+        }
+        true
+    }
+
+    /// Drop group keys whose prefix no longer exists in that section, so a
+    /// cluster you renamed away doesn't leave a fold behind that surprises you
+    /// when the name comes back. Section keys are never pruned.
+    pub fn prune_collapsed(&mut self, live_groups: &BTreeSet<String>) -> bool {
+        let Some(set) = self.collapsed.as_mut() else {
+            return false;
+        };
+        let before = set.len();
+        set.retain(|k| !k.contains('/') || live_groups.contains(k));
+        before != set.len()
+    }
     /// First `State` after a migration Attach: adopt the daemon's seed as the
     /// active list, and treat everything currently known as already seen (a
     /// pre-existing circle isn't "new since you last looked").
@@ -165,27 +218,6 @@ pub fn partition(ordered: &[String], active: &BTreeSet<String>) -> (Vec<String>,
 /// Split a display-ordered workspace list into (pinned, active-unpinned,
 /// parked), preserving the caller's sort inside every band. Pinning implies
 /// active, so a pinned name is claimed by the first band regardless of what
-/// `active` says (defensive against a hand-edited config file).
-pub fn partition3(
-    ordered: &[String],
-    active: &BTreeSet<String>,
-    pinned: &BTreeSet<String>,
-) -> (Vec<String>, Vec<String>, Vec<String>) {
-    let mut pin = Vec::new();
-    let mut act = Vec::new();
-    let mut parked = Vec::new();
-    for ws in ordered {
-        if pinned.contains(ws) {
-            pin.push(ws.clone());
-        } else if active.contains(ws) {
-            act.push(ws.clone());
-        } else {
-            parked.push(ws.clone());
-        }
-    }
-    (pin, act, parked)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,26 +312,49 @@ mod tests {
         assert!(!pref.prune(&set(&["lab"])));
     }
 
-    /// Rename carries the pin (kill drops it — that's `prune`).
-
+    /// Collapse defaults: untouched means the quiet bands are folded, and the
+    /// first fold makes the set authoritative so unfolding everything stays
+    /// unfolded instead of springing back.
     #[test]
-    fn partition3_preserves_sort_and_floats_pins() {
-        let ordered: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
-        let (pin, act, parked) = partition3(&ordered, &set(&["a", "b", "c"]), &set(&["c", "a"]));
-        assert_eq!(pin, vec!["a".to_string(), "c".to_string()]);
-        assert_eq!(act, vec!["b".to_string()]);
-        assert_eq!(parked, vec!["d".to_string()]);
+    fn collapse_defaults_then_become_authoritative() {
+        let mut pref = SubscriptionsPref::default();
+        assert!(!pref.is_collapsed("active"));
+        assert!(pref.is_collapsed("sleeping"));
+        assert!(pref.is_collapsed("parked"));
+
+        pref.toggle_collapsed("parked");
+        assert!(!pref.is_collapsed("parked"), "unfolded on purpose");
+        assert!(pref.is_collapsed("sleeping"), "the other default survived");
+
+        pref.toggle_collapsed("sleeping");
+        assert!(!pref.is_collapsed("sleeping"));
+        assert!(!pref.is_collapsed("parked"), "does not spring back");
     }
 
-    /// A pinned name missing from `active` (hand-edited file) still renders
-    /// pinned rather than falling into the parked accordion.
+    /// A cluster fold is per section: folding `mtg` under active leaves the
+    /// slept `mtg` circles alone.
     #[test]
-    fn partition3_claims_pinned_even_if_not_active() {
-        let ordered: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
-        let (pin, act, parked) = partition3(&ordered, &set(&["b"]), &set(&["a"]));
-        assert_eq!(pin, vec!["a".to_string()]);
-        assert_eq!(act, vec!["b".to_string()]);
-        assert!(parked.is_empty());
+    fn group_folds_are_scoped_to_their_section() {
+        let mut pref = SubscriptionsPref::default();
+        let a = group_key("active", "mtg");
+        let s = group_key("sleeping", "MTG");
+        pref.toggle_collapsed(&a);
+        assert!(pref.is_collapsed(&a));
+        assert!(!pref.is_collapsed(&s));
+        assert_eq!(s, "sleeping/mtg", "prefix key is case-insensitive");
+    }
+
+    /// A cluster that no longer exists takes its fold with it; band folds stay.
+    #[test]
+    fn prune_drops_dead_group_folds_only() {
+        let mut pref = SubscriptionsPref::default();
+        pref.toggle_collapsed("active");
+        pref.toggle_collapsed(&group_key("active", "mtg"));
+        pref.toggle_collapsed(&group_key("active", "gone"));
+        assert!(pref.prune_collapsed(&set(&["active/mtg"])));
+        assert!(pref.is_collapsed("active/mtg"));
+        assert!(!pref.is_collapsed("active/gone"));
+        assert!(pref.is_collapsed("active"), "band folds are never pruned");
     }
 
     /// First run: no file → daemon subscribes everything → adopt it, and
