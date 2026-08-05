@@ -27,7 +27,10 @@ Visibility is the product. If `$SEANCE_SESSION` is set, you are in a pane now.
 ### Environment
 
 - `$SEANCE_SESSION`    your pane **slug** (use this id in ctl, not display name)
-- `$SEANCE_WORKSPACE`  auto-scopes ctl to this circle
+- `$SEANCE_WORKSPACE`  your circle's **slug** — stable for the pane's whole life,
+                       and what ctl auto-scopes to. Renaming a circle changes
+                       its label, never this.
+- `$SEANCE_WORKSPACE_NAME`  the circle's current label (display only)
 - `$SEANCE_SCRATCHPAD` shared notes path (screens scroll away)
 - `$SEANCE_SOCKET`     control socket (ctl finds it)
 
@@ -106,6 +109,8 @@ viewer vs process. Roster `kind` is `file` vs `terminal`.
 - `prompts [q]` — precanned prompt library
 
 Exit: 0 ok · 1 failed · 2 not reachable. Scope: `$SEANCE_WORKSPACE`; `--all` only if asked.
+Circles are addressable by slug or by label; `ctl whoami` is the authority on
+which one you are in.
 
 ### Co-presence
 

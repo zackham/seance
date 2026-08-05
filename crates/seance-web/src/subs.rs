@@ -103,17 +103,6 @@ impl SubPrefs {
         self.pinned.len() != before
     }
 
-    /// Carry per-GUI state across a workspace rename (the daemon re-subscribes
-    /// under the new name; the pin has no such channel).
-    pub fn rename(&mut self, old: &str, new: &str) -> bool {
-        let mut changed = false;
-        if self.is_pinned(old) {
-            self.unpin(old);
-            changed = self.pin(new) || changed;
-        }
-        changed
-    }
-
     /// Remove from active, keeping it seen. Returns whether anything changed.
     pub fn park(&mut self, ws: &str) -> bool {
         // Parking a pinned circle drops the pin.
@@ -307,20 +296,6 @@ mod tests {
         assert!(prefs.park("web"));
         assert!(!prefs.is_pinned("web"));
         assert!(!prefs.is_active("web"));
-    }
-
-    #[test]
-    fn rename_carries_the_pin() {
-        let mut prefs = SubPrefs::default();
-        prefs.seed(&v(&["lab"]), &v(&["lab"]));
-        prefs.pin("lab");
-        assert!(prefs.rename("lab", "lab-2"));
-        assert!(!prefs.is_pinned("lab"));
-        assert!(prefs.is_pinned("lab-2"));
-        // Renaming an UNPINNED circle is a no-op for pins.
-        prefs.activate("web");
-        assert!(!prefs.rename("web", "web-2"));
-        assert!(!prefs.is_pinned("web-2"));
     }
 
     #[test]

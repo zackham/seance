@@ -191,7 +191,15 @@ pub(crate) fn print_session_rows(arr: &[serde_json::Value]) {
                 None => "-",
             }
         };
-        let ws = str_field(s, "workspace").unwrap_or_default();
+        // Show the circle's label; append its slug when they differ, since the
+        // slug is what you address it by and what its panes' environments say.
+        let ws_slug = str_field(s, "workspace").unwrap_or_default();
+        let ws_label = str_field(s, "workspace_name").unwrap_or_default();
+        let ws = if ws_label.is_empty() || ws_label == ws_slug {
+            ws_slug
+        } else {
+            format!("{ws_label} ({ws_slug})")
+        };
         let mut line = format!("{label:<22} {state:<10} owner={owner:<18}");
         if !status.is_empty() {
             line.push_str(&format!(" status={status}"));

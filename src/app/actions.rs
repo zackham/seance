@@ -84,7 +84,8 @@ work in the open. Every pane is on my screen; visibility is the point.
 
 Your environment already has:
 - `$SEANCE_SESSION` — this pane's id
-- `$SEANCE_WORKSPACE` — circle name (`seance ctl` is scoped to it)
+- `$SEANCE_WORKSPACE` — circle **slug** (`seance ctl` is scoped to it). Stable: \
+  renaming a circle changes its label, not this. `ctl whoami` is the authority.
 - `$SEANCE_SCRATCHPAD` — notes we share (I flip this pane to read them)
 - `$SEANCE_SOCKET` — control socket
 

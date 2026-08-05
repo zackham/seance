@@ -1095,7 +1095,10 @@ pub(super) fn render_help() -> gpui::AnyElement {
         // ── env ────────────────────────────────────────────────────────────
         .child(h1("environment every pane gets"))
         .child(row("$SEANCE_SESSION", "this pane's slug"))
-        .child(row("$SEANCE_WORKSPACE", "workspace name (auto-scopes ctl)"))
+        .child(row(
+            "$SEANCE_WORKSPACE",
+            "circle slug — stable across rename (auto-scopes ctl)",
+        ))
         .child(row("$SEANCE_SCRATCHPAD", "absolute path to shared notes file"))
         .child(row("$SEANCE_SOCKET", "control socket path"))
         // ── files ──────────────────────────────────────────────────────────

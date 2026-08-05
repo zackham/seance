@@ -86,6 +86,10 @@ pub struct ClientState {
     /// Per-pane deadline until which grid content changes count as resize
     /// reflow, not output. Armed by any frame that arrives at new dims.
     pub resize_settle: HashMap<String, f64>,
+    /// slug → display label, mirrored from `WorkspaceMeta.name`. A circle's
+    /// slug is its identity; nothing here is keyed by the label, so a rename
+    /// disturbs none of it — including the localStorage pin/park prefs.
+    pub workspace_names: HashMap<String, String>,
     /// PR links per workspace, daemon-owned (`WorkspaceMeta.pr_links`),
     /// most-recently-seen LAST. Statuses come from the external poller.
     pub workspace_pr_links: HashMap<String, Vec<PrLink>>,
@@ -406,6 +410,15 @@ impl ClientState {
     }
 
     /// Bump recency (human typing here / context-menu touch / fresh spawn).
+    /// What to show for a circle: its label, falling back to its slug — which
+    /// is what every circle reads as until someone renames it.
+    pub fn workspace_label(&self, ws: &str) -> String {
+        self.workspace_names
+            .get(ws)
+            .cloned()
+            .unwrap_or_else(|| ws.to_string())
+    }
+
     /// Any pane of this circle is asleep — the circle reads as asleep.
     pub fn workspace_asleep(&self, ws: &str) -> bool {
         self.panes.iter().any(|p| p.workspace == ws && p.asleep)
@@ -627,9 +640,15 @@ impl ClientState {
                 // known workspace, so the map is rebuilt (not merged) — a
                 // cleared list must actually clear.
                 self.workspace_pr_links.clear();
+                // Labels arrive for every known circle, so rebuild wholesale:
+                // a circle renamed back to its slug must lose its entry.
+                self.workspace_names.clear();
                 for m in workspace_meta {
                     self.merge_activity(&m.workspace, m.last_output_ms);
                     self.merge_touch(&m.workspace, m.last_touch_ms);
+                    if let Some(n) = m.name.clone() {
+                        self.workspace_names.insert(m.workspace.clone(), n);
+                    }
                     if !m.pr_links.is_empty() {
                         self.workspace_pr_links
                             .insert(m.workspace.clone(), m.pr_links);
@@ -1296,6 +1315,55 @@ mod tests {
             st.workspaces(),
             vec!["alpha", "mike", "zulu", "idle-new", "idle-old"]
         );
+    }
+
+    /// A circle is keyed by its slug and shown by its label. Renaming moves
+    /// only the label, so everything the client files under the slug — pins,
+    /// park state, activity clocks — is untouched by construction.
+    #[test]
+    fn a_label_changes_what_is_shown_and_nothing_else() {
+        let mut st = ClientState::default();
+        st.apply_event(state_with(&[("lab", "w-1", false)]), 0.0);
+        st.subs.seed(&["lab".to_string()], &["lab".to_string()]);
+        st.subs.pin("lab");
+        st.workspace_touch.insert("lab".into(), 123.0);
+
+        assert_eq!(
+            st.workspace_label("lab"),
+            "lab",
+            "unnamed reads as its slug"
+        );
+
+        // The daemon reports the new label against the same slug.
+        st.apply_event(state_labeled("lab", "w-1", Some("Growth Work")), 1.0);
+        assert_eq!(st.workspace_label("lab"), "Growth Work");
+        assert!(st.subs.is_pinned("lab"), "the pin is filed under the slug");
+        assert_eq!(st.workspace_touch.get("lab"), Some(&123.0));
+        assert_eq!(st.workspaces(), vec!["lab"]);
+
+        // Renamed back to its slug: the label entry disappears rather than
+        // lingering as a duplicate of the slug.
+        st.apply_event(state_labeled("lab", "w-1", None), 2.0);
+        assert!(st.workspace_names.is_empty());
+        assert_eq!(st.workspace_label("lab"), "lab");
+    }
+
+    /// One circle, with an optional label in its `workspace_meta` row.
+    fn state_labeled(ws: &str, slug: &str, label: Option<&str>) -> GuiEvent {
+        let name = match label {
+            Some(l) => format!(r#","name":"{l}""#),
+            None => String::new(),
+        };
+        serde_json::from_str(&format!(
+            r#"{{"event":"state","panes":[{{"kind":"term","name":"p","slug":"{slug}",
+                "workspace":"{ws}","command":"bash","cwd":"/","tiled":true,
+                "running":true,"title":null,"scratchpad":"/tmp/p"}}],
+                "selected_workspace":null,"focused_pane":null,"extra_workspaces":[],
+                "workspace_order":["{ws}"],"asks":[],"statuses":[],
+                "workspace_meta":[{{"workspace":"{ws}","last_output_ms":0,
+                                   "last_touch_ms":0{name}}}]}}"#
+        ))
+        .unwrap()
     }
 
     /// Sleep verbs are gated on the daemon's restorability verdict, and a

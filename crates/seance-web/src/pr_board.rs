@@ -83,7 +83,10 @@ impl BoardRow {
 /// One circle's section.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BoardSection {
+    /// The circle's slug — its identity, and what a click sends back.
     pub circle: String,
+    /// What to show. Falls back to the slug when the circle has no label.
+    pub label: String,
     pub parked: bool,
     /// Any row wants a human — sorts this section to the top.
     pub needs: bool,
@@ -175,6 +178,7 @@ impl Board {
             });
             board.sections.push(BoardSection {
                 circle: ws.clone(),
+                label: state.workspace_label(ws),
                 parked: !state.subs.is_active(ws),
                 needs,
                 last_ms,
@@ -364,7 +368,7 @@ pub fn board_html(board: &Board) -> String {
         out.push_str(r#"<div class="prb-circle"><div class="prb-circle-head" data-ws=""#);
         out.push_str(&esc(&sec.circle));
         out.push_str(r#"" title="select this circle"><span class="prb-circle-name">"#);
-        out.push_str(&esc(&sec.circle));
+        out.push_str(&esc(&sec.label));
         out.push_str("</span>");
         if sec.needs {
             out.push_str(r#"<span class="prb-circle-needs">needs</span>"#);

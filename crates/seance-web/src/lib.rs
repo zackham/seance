@@ -865,15 +865,12 @@ impl Actions for AppActions {
             .send(&GuiRequest::CreateWorkspace { name: name.into() });
     }
     fn rename_workspace(&self, old: &str, new: &str) {
+        // A rename sets the label; the slug this circle is pinned/parked under
+        // does not move, so there is nothing to carry.
         self.0.send(&GuiRequest::RenameWorkspace {
             old: old.into(),
             new: new.into(),
         });
-        // The daemon re-subscribes under the new name; the pin has no such
-        // channel, so carry it here (reconcile prunes the old one).
-        if self.0.state.borrow_mut().subs.rename(old, new) {
-            self.0.persist_subs();
-        }
     }
     fn kill_workspace(&self, ws: &str) {
         self.0.kill_workspace_selecting_neighbor(ws);

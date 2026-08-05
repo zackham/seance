@@ -275,6 +275,9 @@ pub struct Chrome {
 
     tile_refs: HashMap<String, TileRefs>,
     ws_refs: HashMap<String, WsRefs>,
+    /// slug → label, captured each rebuild so imperative paths (inline rename)
+    /// can seed with what the human sees without a `ClientState` in hand.
+    ws_labels: HashMap<String, String>,
 
     /// Rebuild-scoped listeners (topbar, sidebar, tiles).
     structural: Vec<ClickClosure>,
@@ -378,6 +381,7 @@ impl Chrome {
             actions,
             tile_refs: HashMap::new(),
             ws_refs: HashMap::new(),
+            ws_labels: HashMap::new(),
             structural: Vec::new(),
             ask_clicks: Vec::new(),
             ask_keys: Vec::new(),
@@ -743,7 +747,9 @@ impl Chrome {
             ws_glyph_class(working, is_selected, asleep),
             ws_glyph_char(working, is_selected, asleep),
         )?;
-        let name = text_el(&doc, "span", "ws-name", ws)?;
+        let label = state.workspace_label(ws);
+        self.ws_labels.insert(ws.to_string(), label.clone());
+        let name = text_el(&doc, "span", "ws-name", &label)?;
         // Text badges only for needs/done — working is the left-hand glyph.
         let (att_text, att_class) = ws_att(att, is_selected);
         let att_el = text_el(&doc, "span", att_class, att_text)?;
@@ -1507,11 +1513,18 @@ impl Chrome {
             return;
         };
         let (row, main) = (refs.row.clone(), refs.main.clone());
+        // Prefill the LABEL — you edit what you're looking at — while the
+        // rename still targets the slug.
+        let seed = self
+            .ws_labels
+            .get(ws)
+            .cloned()
+            .unwrap_or_else(|| ws.to_string());
         open_rename(
             &self.rename,
             &row,
             &main,
-            ws,
+            &seed,
             RenameKind::Workspace(ws.to_string()),
         );
     }
