@@ -69,6 +69,9 @@ src/app/               the GPUI app, split by surface:
   prlinks.rs           PR header chip + all-links popover + pr_attention helper
   prboard.rs           `PRs (N)` sweep overlay: pure board model (grouping,
                        ordering, staleness, dup annotation) + render half
+src/runtime/engine/workspaces.rs  circle identity: stable slug + mutable
+                       label, resolve-by-either, and the one generic
+                       scope/workspace normalizer both request planes run
 src/runtime/engine/    the daemon: mod.rs (~0.6k: Engine, persist, upgrade
                        handoff) + gui.rs (conn registry, state/grid push,
                        handle_gui) + spawn.rs (PTY lifecycle) + control.rs
@@ -176,6 +179,20 @@ to synchronize.
 - **Self-only** note/finish/status-set when `$SEANCE_SESSION` is set (orchestrators outside a pane may cross)
 - Sidebar **working** badge derives from *observed* TUI title spinners, not
   sticky `status-set` — don't "fix" idle circles by re-sticking status
+
+### Circle identity (0.16+) — slug is the id, label is the text
+
+A circle has a **slug** (minted once at creation, never rewritten) and a
+**label** (free text, what a rename changes). Same split panes have. Everything
+is keyed by the slug: panes, activity clocks, PR links + dismissals,
+selections, subscriptions, client pin/park prefs, and `$SEANCE_WORKSPACE` in
+every running pane's environment — which is the case that forced the change,
+since nothing can write into the environment of a process already running.
+**Do not reintroduce rename migrations**; if you find yourself carrying state
+from an old workspace name to a new one, the identity moved and it shouldn't
+have. `scope`/`workspace` accept either form (slug wins, then an unambiguous
+label) via `normalize_workspace_keys` at the daemon door — don't add per-handler
+resolution. `ctl whoami` answers from the pane and is the authority.
 
 ### ctl contract (current)
 

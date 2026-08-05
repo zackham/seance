@@ -96,6 +96,27 @@ in workspace `lab` can only drive `lab` panes. Overrides: `--all` lifts the
 scope for one call; `--scope WS` targets another workspace explicitly.
 Callers outside seance (no env var) are unscoped and see everything.
 
+### Circle identity: slug vs label (0.16+)
+
+A circle has a **slug** — its identity, minted once from the name it was
+created with — and a **label**, the mutable text you read. This is the same
+split panes have always had (`slug` / `name`), and it exists for the same
+reason: a rename must not move an identity that other things are holding.
+
+`$SEANCE_WORKSPACE` is the **slug**, so it stays true for the life of the
+pane. Under the old model the display name *was* the key, so renaming a circle
+orphaned every holder of the old string — including the environment of every
+process already running in it, which nothing can reach.
+
+`scope` / `workspace` accept **either form**, resolved at the daemon door on
+both the control and GUI planes: an exact slug wins, then an unambiguous
+label. A label two circles share resolves to neither and errors, rather than
+picking one. A key matching nothing is left as-is, so it goes on matching no
+circle instead of being silently promoted to unscoped.
+
+**`seance ctl whoami` is the authority on which circle you are in** — it
+answers from the pane, not from the caller's environment.
+
 Naming note: panes were called "sessions" in v0.1; the wire protocol accepts
 both `pane` and `session` keys for pane ids. Terminals are the first pane
 kind (`"kind": "terminal"` in `list`/`status`) — the protocol is
@@ -165,10 +186,15 @@ single screen and that the human can watch update in real time.
 
 ### Session environment
 
-Spawned sessions get four env vars so the agent inside knows it's under seance:
+Spawned sessions get five env vars so the agent inside knows it's under seance:
 
 - `SEANCE_SESSION` — the session's slug/id,
-- `SEANCE_WORKSPACE` — its workspace (this is what makes scoping automatic),
+- `SEANCE_WORKSPACE` — its circle's **slug** (what makes scoping automatic).
+  Stable for the pane's whole life: renaming a circle changes its label, never
+  this,
+- `SEANCE_WORKSPACE_NAME` — the circle's current label, for display only. This
+  one *can* go stale after a rename, which is exactly why nothing addresses by
+  it,
 - `SEANCE_SCRATCHPAD` — absolute path to its own scratchpad file,
 - `SEANCE_SOCKET` — the control socket to talk back on.
 

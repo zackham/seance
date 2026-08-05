@@ -46,7 +46,7 @@ useful as the contract. Remaining future work: OSC-133 shell-agnostic markers
 
 Four new `ControlRequest` variants, tagged `snake_case` by `op` like the rest.
 Every op carries the standard `from` (calling pane, auto-filled from
-`$SEANCE_SESSION`) and `scope` (workspace, from `$SEANCE_WORKSPACE`) fields, so
+`$SEANCE_SESSION`) and `scope` (circle slug, from `$SEANCE_WORKSPACE`) fields, so
 they thread through `with_identity` in `ctl.rs` exactly like the existing ops.
 
 ### Reporting ops (the shell → app direction)
@@ -250,7 +250,8 @@ restore/respawn path in `spawn.rs` re-injects the rc into *any* stored command
 that starts with `bash`, so an explicit `--command "bash -l"` pane picks up the
 hooks after a restart even though its first spawn did not.
 
-The pane already gets `SEANCE_SESSION`/`SEANCE_SOCKET`/`SEANCE_WORKSPACE` in its
+The pane already gets `SEANCE_SESSION`/`SEANCE_SOCKET`/`SEANCE_WORKSPACE`
+(plus `SEANCE_WORKSPACE_NAME`) in its
 env (see `spawn_pane`), which is exactly what the hooks and `seance ctl` need —
 no new env vars.
 

@@ -17,6 +17,62 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-08-05
+
+A circle's name stops being its identity.
+
+### Changed
+
+- **A circle has a stable slug and a mutable label.** Panes have always had
+  this split — `slug` is the id, `name` is what you read — and it is why
+  renaming a pane costs nothing. A circle's display name *was* its key, so a
+  rename rewrote its identity and every holder of the old string had to be
+  migrated by hand: eight structures in the daemon, six more plus the pin/park
+  prefs in the native GUI, the same again in the web client. And one that no
+  migration can ever reach — the `SEANCE_WORKSPACE` already baked into a
+  running pane's environment. You cannot write into the environment of a
+  process that is already running, so under the old model **an agent in a
+  renamed circle could no longer tell `seance ctl` where it was**: its scope
+  named a circle that no longer existed, `list` came back empty and `send`
+  answered "outside your workspace".
+
+  The slug is now minted once, from the name the circle was created with, and
+  never rewritten. **Rename sets a label and nothing else** — panes, activity
+  clocks, PR links and dismissals, selections, subscriptions, per-GUI pin/park
+  prefs and every running pane's environment all keep pointing at the same
+  circle, because none of them moved.
+
+- **Addressing accepts either form.** An exact slug wins, then an unambiguous
+  label; a label two circles share resolves to neither and says so rather than
+  picking one — the same precedence pane lookup got in 0.14.2, for the same
+  reason. Resolution happens once at the daemon door, generically over the
+  serialized request on **both** the control and GUI planes, so a future op
+  carrying a `workspace` inherits it without anyone remembering. A key that
+  matches nothing is left verbatim: it goes on matching no circle rather than
+  being silently promoted to unscoped.
+
+- **`seance ctl whoami` answers from the pane**, not from the caller's
+  environment — the canonical "which circle am I in".
+
+### Added
+
+- `SEANCE_WORKSPACE_NAME` carries the circle's label for display.
+  `SEANCE_WORKSPACE` is the slug and is now genuinely stable. `ctl list` shows
+  `label (slug)` when they differ; `whoami` reports both.
+- Labels render in both GUIs — sidebar, overview, PR board, command palette —
+  and a new circle keeps the name you typed ("Growth Work" reads as itself
+  while being keyed by `growth-work`). The palette matches **either** form, so
+  you can find a circle by what you see or by what it is, and rename prefills
+  the label so you edit what you're looking at.
+
+### Removed
+
+- `rename_pr_links`, `SubscriptionsPref::rename` and `SubPrefs::rename` — the
+  three hand-written rename follow-throughs. Carrying a pin across a rename is
+  no longer something that can be got wrong, because the key those pins are
+  filed under does not move. Their tests were retargeted to assert the new
+  invariant rather than deleted.
+
 ## [0.15.1] — 2026-08-04
 
 ### Fixed
