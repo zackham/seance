@@ -11,6 +11,17 @@ use crate::runtime::protocol::GuiRequest;
 use crate::theme::SeancePalette;
 use seance_core::grouping::{Section, SectionRow};
 
+/// Rail metrics. One left axis and one right edge: every glyph slot, every
+/// name, and every time/count line up regardless of row kind.
+const ROW_H: f32 = 28.;
+/// Glyph column — fixed so a row with no glyph still starts its name on the
+/// same line as one that has a spinner.
+const GLYPH_W: f32 = 15.;
+/// Time / count column, right-aligned.
+const TIME_W: f32 = 34.;
+/// How far a cluster's members sit inside their header.
+const CLUSTER_INDENT: f32 = 14.;
+
 use super::actions::*;
 use super::util::{
     selected_row_fill, sidebar_press_no_select, tip, tip_s, ui_debug, working_spinner_glyph,
@@ -465,18 +476,19 @@ impl SeanceApp {
         .detach();
     }
 
-    /// A band header: caret, name, count. Collapsed, it carries the highest
-    /// attention among the circles it hides, so an agent asking for help is
-    /// visible without unfolding the pile.
+    /// A band header. Deliberately a different species from a cluster header:
+    /// uppercase, letterspaced, quiet — a landmark you navigate by, not a line
+    /// you read. Its caret sits in the same column as every row's glyph, so
+    /// the rail has ONE left axis instead of three.
     fn render_section_header(
         &self,
         section: Section,
         rows: &[String],
+        first: bool,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let key = section.key();
         let collapsed = self.subs_pref.is_collapsed(key);
-        let caret = if collapsed { "▸" } else { "▾" };
         let count = rows.len();
         let att = if collapsed {
             rows.iter()
@@ -485,11 +497,15 @@ impl SeanceApp {
         } else {
             None
         };
-        let title = section.title();
+        let title = section.title().to_uppercase();
         div()
             .id(SharedString::from(format!("section-{key}")))
-            .px_2()
-            .py_1p5()
+            // Air above, tight below: a header belongs to what follows it.
+            .when(!first, |d| d.mt(px(12.)))
+            .mb(px(2.))
+            .pl(px(5.))
+            .pr_2()
+            .h(px(18.))
             .flex()
             .items_center()
             .gap_1p5()
@@ -502,27 +518,45 @@ impl SeanceApp {
             }))
             .child(
                 div()
+                    .flex_none()
+                    .w(px(GLYPH_W))
+                    .text_xs()
+                    .text_color(SeancePalette::text_faint())
+                    .child(if collapsed { "\u{25b8}" } else { "\u{25be}" }),
+            )
+            .child(
+                div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_xs()
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(SeancePalette::text_faint())
-                    .child(format!("{caret} {title} ({count})")),
+                    .child(title),
             )
             .children(att.map(|a| {
                 div().flex_none().text_xs().text_color(a.color()).child(
                     if matches!(a, WorkspaceAttention::Working) {
                         working_spinner_glyph()
                     } else {
-                        "●"
+                        "\u{25cf}"
                     },
                 )
             }))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(TIME_W))
+                    .text_xs()
+                    .text_right()
+                    .text_color(SeancePalette::text_faint())
+                    .child(count.to_string()),
+            )
             .into_any_element()
     }
 
-    /// A prefix cluster's header, indented under its band. Same accordion
-    /// idiom one level in, and collapsed it shows what it's hiding.
+    /// A cluster header. Reads like a row, not like a band — same size and
+    /// axis as the circles it holds, because conceptually it is one of them.
     fn render_group_header(
         &self,
         section: Section,
@@ -532,7 +566,6 @@ impl SeanceApp {
     ) -> gpui::AnyElement {
         let key = crate::subscriptions_pref::group_key(section.key(), prefix);
         let collapsed = self.subs_pref.is_collapsed(&key);
-        let caret = if collapsed { "▸" } else { "▾" };
         let count = members.len();
         let att = if collapsed {
             members
@@ -546,9 +579,9 @@ impl SeanceApp {
         let toggle_key = key.clone();
         div()
             .id(SharedString::from(format!("group-{key}")))
-            .pl_3()
+            .h(px(ROW_H))
+            .pl(px(5.))
             .pr_2()
-            .py_1()
             .flex()
             .items_center()
             .gap_1p5()
@@ -561,22 +594,39 @@ impl SeanceApp {
             }))
             .child(
                 div()
+                    .flex_none()
+                    .w(px(GLYPH_W))
+                    .text_xs()
+                    .text_color(SeancePalette::text_faint())
+                    .child(if collapsed { "\u{25b8}" } else { "\u{25be}" }),
+            )
+            .child(
+                div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_xs()
+                    .text_sm()
                     .text_color(SeancePalette::text_dim())
-                    .child(format!("{caret} {label} ({count})")),
+                    .child(label),
             )
             .children(att.map(|a| {
                 div().flex_none().text_xs().text_color(a.color()).child(
                     if matches!(a, WorkspaceAttention::Working) {
                         working_spinner_glyph()
                     } else {
-                        "●"
+                        "\u{25cf}"
                     },
                 )
             }))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(TIME_W))
+                    .text_xs()
+                    .text_right()
+                    .text_color(SeancePalette::text_faint())
+                    .child(count.to_string()),
+            )
             .into_any_element()
     }
 
@@ -586,6 +636,7 @@ impl SeanceApp {
         &self,
         section: Section,
         circles: Vec<String>,
+        first: bool,
         cx: &Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let mut out: Vec<gpui::AnyElement> = Vec::new();
@@ -593,7 +644,7 @@ impl SeanceApp {
             return out;
         }
         let parked = matches!(section, Section::Parked);
-        out.push(self.render_section_header(section, &circles, cx));
+        out.push(self.render_section_header(section, &circles, first, cx));
         if self.subs_pref.is_collapsed(section.key()) {
             return out;
         }
@@ -608,11 +659,16 @@ impl SeanceApp {
                     if self.subs_pref.is_collapsed(&key) {
                         continue;
                     }
+                    // A hairline down the members ties them into one object,
+                    // so a cluster reads as a block rather than as rows that
+                    // happen to be indented.
                     for ws in members {
                         out.push(
                             div()
-                                .pl_2()
-                                .child(self.render_workspace_group(ws, parked, cx))
+                                .ml(px(CLUSTER_INDENT))
+                                .border_l_1()
+                                .border_color(SeancePalette::border())
+                                .child(self.render_workspace_row(ws, parked, true, cx))
                                 .into_any_element(),
                         );
                     }
@@ -628,6 +684,17 @@ impl SeanceApp {
         &self,
         workspace: String,
         parked: bool,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        self.render_workspace_row(workspace, parked, false, cx)
+    }
+
+    /// `in_cluster` dims the shared prefix — see the name column below.
+    fn render_workspace_row(
+        &self,
+        workspace: String,
+        parked: bool,
+        in_cluster: bool,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let selected = self.selected_workspace.as_deref() == Some(workspace.as_str());
@@ -663,13 +730,23 @@ impl SeanceApp {
             div()
                 .id(SharedString::from(format!("ws-{workspace}")))
                 .group(SharedString::from(format!("wsgrp-{workspace}")))
-                .px_2()
-                .py_1p5()
+                .h(px(ROW_H))
+                .pr_2()
+                // 3px of the left inset is the selection anchor, so the text
+                // never shifts when a row becomes selected.
+                .border_l_3()
+                .border_color(if selected {
+                    SeancePalette::flame()
+                } else {
+                    gpui::transparent_black()
+                })
+                .pl(px(5.))
                 .flex()
                 .items_center()
                 .gap_1p5()
                 .cursor_pointer()
-                .when(selected, |d| d.bg(selected_row_fill()))
+                .when(asleep && !selected, |d| d.opacity(0.62))
+                .when(selected, |d| d.bg(SeancePalette::surface()))
                 .hover(|s| {
                     if selected {
                         s.bg(selected_row_fill().lighten(0.04))
@@ -752,45 +829,89 @@ impl SeanceApp {
                     }
                 })
                 .child({
-                    // Working → spinner in the icon slot (no "working"
-                    // text badge), so more of the workspace name shows.
+                    // The glyph slot earns its ink or stays empty. A diamond
+                    // on every idle row is a dozen identical marks that say
+                    // nothing; leaving them off is what makes the two rows
+                    // that ARE doing something impossible to miss.
                     let working = matches!(attention, Some(WorkspaceAttention::Working));
-                    let (glyph, color) = if asleep {
-                        ("☾", SeancePalette::violet())
+                    let needs = matches!(attention, Some(WorkspaceAttention::NeedsHuman));
+                    // Selection is carried by the flame anchor down the left
+                    // edge, which frees the glyph to keep saying what the
+                    // circle is DOING — the selected row can be working too.
+                    let (glyph, color) = if needs {
+                        ("●", SeancePalette::violet())
                     } else if working {
                         (working_spinner_glyph(), SeancePalette::flame())
                     } else if selected {
                         ("◆", SeancePalette::flame())
+                    } else if asleep {
+                        ("☾", SeancePalette::text_faint())
                     } else {
-                        ("◈", SeancePalette::text_faint())
+                        ("", SeancePalette::text_faint())
                     };
-                    div().flex_none().text_sm().text_color(color).child(glyph)
+                    // Fixed width: every name in the rail starts on the same
+                    // vertical line whether or not its row has a glyph.
+                    div()
+                        .flex_none()
+                        .w(px(GLYPH_W))
+                        .text_sm()
+                        .text_color(color)
+                        .child(glyph)
                 })
-                .child(
+                .child({
+                    // Inside a cluster the shared prefix is already in the
+                    // header above; repeating it at full strength makes you
+                    // re-read it on every row, so it recedes.
+                    let label = self.workspace_label(&workspace);
+                    let needs = matches!(attention, Some(WorkspaceAttention::NeedsHuman));
+                    let name_color = if selected {
+                        SeancePalette::text()
+                    } else if needs {
+                        SeancePalette::violet()
+                    } else {
+                        SeancePalette::text_dim()
+                    };
+                    let (head, tail) = match in_cluster {
+                        true => match label.split_once('-') {
+                            Some((h, t)) => (format!("{h}-"), t.to_string()),
+                            None => (String::new(), label.clone()),
+                        },
+                        false => (String::new(), label.clone()),
+                    };
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
+                        .flex()
+                        .items_center()
                         .text_sm()
                         .font_weight(if selected {
                             gpui::FontWeight::SEMIBOLD
                         } else {
                             gpui::FontWeight::NORMAL
                         })
-                        .text_color(if selected {
-                            SeancePalette::text()
-                        } else {
-                            SeancePalette::text_dim()
+                        .when(!head.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(SeancePalette::text_faint())
+                                    .child(head),
+                            )
                         })
-                        .child(self.workspace_label(&workspace)),
-                )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(name_color)
+                                .child(tail),
+                        )
+                })
                 .children({
-                    // Text badges only for needs/done — working is
-                    // the left-side spinner above.
+                    // `done` is worth a mark but not a shout; `needs` already
+                    // owns the glyph and the name colour, so it needs no pill.
                     let att = if selected {
                         None
                     } else {
-                        attention.filter(|a| !matches!(a, WorkspaceAttention::Working))
+                        attention.filter(|a| matches!(a, WorkspaceAttention::Done))
                     };
                     att.map(|a| {
                         div()
@@ -798,6 +919,7 @@ impl SeanceApp {
                             .px_1()
                             .rounded_sm()
                             .text_xs()
+                            .bg(a.color().opacity(0.14))
                             .text_color(a.color())
                             .child(a.label())
                     })
@@ -829,19 +951,22 @@ impl SeanceApp {
                         .tooltip(tip("banish workspace (kill all panes)"))
                         .child("×"),
                 )
-                .children({
-                    // Time since last output (was: pane count).
-                    self.workspace_activity_label(&workspace).map(|label| {
-                        div()
-                            .flex_none()
-                            .text_xs()
-                            .text_color(if selected {
-                                SeancePalette::text_dim()
-                            } else {
-                                SeancePalette::text_faint()
-                            })
-                            .child(label)
-                    })
+                .child({
+                    // Fixed width, right-aligned — headers put their counts in
+                    // the same column, so the whole rail has one hard right
+                    // edge instead of a ragged gutter.
+                    let label = self.workspace_activity_label(&workspace);
+                    div()
+                        .flex_none()
+                        .w(px(TIME_W))
+                        .text_xs()
+                        .text_right()
+                        .text_color(if selected {
+                            SeancePalette::text_dim()
+                        } else {
+                            SeancePalette::text_faint()
+                        })
+                        .child(label.unwrap_or_default())
                 })
                 .into_any_element()
         };
@@ -880,7 +1005,8 @@ impl SeanceApp {
         let section_rows: Vec<gpui::AnyElement> = self
             .workspace_sections()
             .into_iter()
-            .flat_map(|(section, circles)| self.render_section(section, circles, cx))
+            .enumerate()
+            .flat_map(|(i, (section, circles))| self.render_section(section, circles, i == 0, cx))
             .collect();
 
         let _ = window_active; // focus chrome reserved for future empty-window dimming

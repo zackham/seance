@@ -17,6 +17,43 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-08-05
+
+Design pass on the rail. Same theme, same information — far less work to read.
+
+### Changed
+
+- **One left axis.** The band caret, the cluster caret and every row's glyph
+  now share a single fixed 15px column, so band titles, cluster titles and
+  circle names all begin on the same vertical line. The rail used to have
+  three different left edges and your eye had to zig-zag down it.
+- **The glyph slot earns its ink or stays empty.** A diamond on every idle row
+  was a dozen identical marks that said nothing. Idle now draws nothing, which
+  is what makes the rows that *are* doing something impossible to miss. Order:
+  needs-human (violet ●) > working (spinner) > selected (◆) > asleep (☾).
+  Selection no longer steals the slot from a working circle — the flame anchor
+  says "here" instead.
+- **Bands and clusters read as different species.** A band is a landmark you
+  navigate by: uppercase, letterspaced, 11px, quiet, with air above and none
+  below. A cluster header is row-sized, because conceptually it is one of the
+  circles it holds.
+- **A cluster reads as one object** — a hairline runs down its members, and
+  the shared prefix is dimmed on each row (`mtg-`**growth**). The header above
+  already says the prefix; repeating it at full strength made you re-read it
+  on every line.
+- **One hard right edge.** Times and header counts share a fixed 34px
+  right-aligned column instead of a ragged gutter. Counts lost their
+  parentheses.
+- **The selected row has a flame anchor** down the left edge plus a `surface`
+  fill — the old fill alone was nearly invisible on a dark screen. The anchor
+  lives in the row's left inset, so text never shifts when selection moves.
+- **`needs-human` colours the whole row** (violet glyph + violet name) rather
+  than hiding in a badge; it is the one state that must not be missed. `done`
+  became a proper tinted pill instead of text floating mid-row. Sleeping rows
+  recede to 62%.
+- **Rows are 28px, down from 41.** Four bands and thirteen circles now fit
+  where nine circles used to.
+
 ## [0.17.0] — 2026-08-05
 
 Four folding bands, and circles that cluster by the name you give them.

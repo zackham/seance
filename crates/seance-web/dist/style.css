@@ -530,24 +530,35 @@ input:focus {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 8px;
+  /* 3px of the left inset is the selection anchor, so text never shifts. */
+  height: 28px;
+  padding: 0 8px 0 5px;
+  border-left: 3px solid transparent;
   min-width: 0;
 }
 .ws-row:hover {
   background: var(--surface);
 }
-.ws-row.selected {
-  background: var(--border); /* native selected_row_fill() */
+.ws-row.selected .ws-main {
+  background: var(--surface);
+  border-left-color: var(--flame);
 }
-.ws-row.selected:hover {
-  background: var(--border-lit);
+.ws-row.asleep .ws-main {
+  opacity: 0.62;
+}
+.ws-row.asleep.selected .ws-main {
+  opacity: 1;
 }
 
 .ws-glyph {
   flex: 0 0 auto;
+  width: 15px;
   font-size: var(--fs-row);
   line-height: 1;
   color: var(--text-faint);
+}
+.ws-glyph.needs {
+  color: var(--violet);
 }
 .ws-glyph.selected {
   color: var(--flame);
@@ -580,19 +591,38 @@ input:focus {
   color: var(--text);
   font-weight: 600;
 }
+.ws-row.needs .ws-name {
+  color: var(--violet);
+}
+/* The cluster header above already says the prefix; repeating it at full
+   strength makes you re-read it on every row. */
+.ws-prefix {
+  flex: 0 0 auto;
+  font-size: var(--fs-row);
+  color: var(--text-faint);
+}
+/* No gap here: the prefix and the rest of the name are one word. */
+.ws-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
 
 .ws-att {
   flex: 0 0 auto;
-  padding: 0 4px;
+  padding: 1px 4px;
   border-radius: var(--r-sm);
   font-size: var(--fs-xs);
   color: var(--text-faint);
 }
+/* `needs` already owns the glyph and the name colour — no pill needed. */
 .ws-att.needs {
-  color: var(--violet);
+  display: none;
 }
 .ws-att.done {
   color: var(--success);
+  background: rgba(134, 182, 124, 0.14);
 }
 .ws-att:empty {
   display: none;
@@ -625,8 +655,11 @@ input:focus {
   border-color: var(--danger);
 }
 
-.ws-count {
+.ws-count,
+.fold-count {
   flex: 0 0 auto;
+  width: 34px;
+  text-align: right;
   font-size: var(--fs-xs);
   color: var(--text-faint);
 }
@@ -646,24 +679,33 @@ input:focus {
   font-size: var(--fs-xs);
 }
 .sect-head {
-  padding: 5px 8px 3px;
+  height: 18px;
+  padding: 0 8px 0 5px;
+  margin: 12px 0 2px;
   color: var(--text-faint);
-  letter-spacing: 0.04em;
+  /* A landmark you navigate by, not a line you read. */
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
 }
-.sect-head:not(:first-child) {
-  margin-top: 4px;
-  border-top: 1px solid var(--border);
+.sect-head:first-child {
+  margin-top: 2px;
 }
+/* A cluster header reads like a row, because conceptually it is one. */
 .grp-head {
-  padding: 2px 8px 2px 18px;
+  height: 28px;
+  padding: 0 8px 0 5px;
+  font-size: var(--fs-row);
   color: var(--text-dim);
 }
 .sect-head:hover,
 .grp-head:hover {
   background: var(--surface);
 }
+/* Same column as every row's glyph — the rail has ONE left axis. */
 .fold-caret {
   flex: 0 0 auto;
+  width: 15px;
   line-height: 1;
 }
 .fold-title {

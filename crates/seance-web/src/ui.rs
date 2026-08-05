@@ -693,6 +693,7 @@ impl Chrome {
         ws: &str,
         selected: Option<&str>,
         parked: bool,
+        in_cluster: bool,
     ) -> Result<(), JsValue> {
         let doc = self.doc.clone();
         let is_selected = Some(ws) == selected && !parked;
@@ -700,29 +701,45 @@ impl Chrome {
         let activity = state.activity_label(ws, self.now_ms());
         let att = state.row_attention(ws);
         let working = matches!(att, Some(Attention::Working));
+        let asleep_pre = state.workspace_asleep(ws);
 
-        let row = mk(
-            &doc,
-            "div",
-            match (is_selected, parked) {
-                (true, _) => "ws-row selected",
-                (false, true) => "ws-row parked",
-                (false, false) => "ws-row",
-            },
-        )?;
+        let row = mk(&doc, "div", &{
+            let mut c = String::from("ws-row");
+            if is_selected {
+                c.push_str(" selected");
+            }
+            if parked {
+                c.push_str(" parked");
+            }
+            if asleep_pre {
+                c.push_str(" asleep");
+            }
+            if matches!(att, Some(Attention::NeedsHuman)) {
+                c.push_str(" needs");
+            }
+            c
+        })?;
         let main = mk(&doc, "div", "ws-main")?;
 
         // WEB DIVERGENCE #1: braille spinner → `◆` with a CSS pulse.
-        let asleep = state.workspace_asleep(ws);
+        let asleep = asleep_pre;
+        let needs = matches!(att, Some(Attention::NeedsHuman));
         let glyph = text_el(
             &doc,
             "span",
-            ws_glyph_class(working, is_selected, asleep),
-            ws_glyph_char(working, is_selected, asleep),
+            ws_glyph_class(working, is_selected, asleep, needs),
+            ws_glyph_char(working, is_selected, asleep, needs),
         )?;
         let label = state.workspace_label(ws);
         self.ws_labels.insert(ws.to_string(), label.clone());
-        let name = text_el(&doc, "span", "ws-name", &label)?;
+        // Inside a cluster the shared prefix is already in the header above,
+        // so it recedes rather than being re-read on every row.
+        let (head_txt, tail_txt) = match in_cluster.then(|| label.split_once('-')).flatten() {
+            Some((h, t)) => (format!("{h}-"), t.to_string()),
+            None => (String::new(), label.clone()),
+        };
+        let prefix_el = text_el(&doc, "span", "ws-prefix", &head_txt)?;
+        let name = text_el(&doc, "span", "ws-name", &tail_txt)?;
         // Text badges only for needs/done — working is the left-hand glyph.
         let (att_text, att_class) = ws_att(att, is_selected);
         let att_el = text_el(&doc, "span", att_class, att_text)?;
@@ -731,7 +748,14 @@ impl Chrome {
         let count_el = text_el(&doc, "span", "ws-count", &activity)?;
 
         main.append_child(&glyph)?;
-        main.append_child(&name)?;
+        // Prefix + name share one container so the row's gap does not open a
+        // hole in the middle of a name (`cadence- mint`).
+        let label_box = mk(&doc, "div", "ws-label")?;
+        if !head_txt.is_empty() {
+            label_box.append_child(&prefix_el)?;
+        }
+        label_box.append_child(&name)?;
+        main.append_child(&label_box)?;
         main.append_child(&att_el)?;
         main.append_child(&banish)?;
         main.append_child(&count_el)?;
@@ -940,7 +964,7 @@ impl Chrome {
             &format!("sect-{key}"),
             "sect-head",
             open,
-            &format!("{} ({})", section.title(), circles.len()),
+            &format!("{} {}", section.title(), circles.len()),
             att,
             &key,
         )?;
@@ -952,7 +976,7 @@ impl Chrome {
         for row in state.section_rows(circles) {
             match row {
                 SectionRow::Circle(ws) => {
-                    self.build_ws_row(list, state, &ws, selected, parked)?;
+                    self.build_ws_row(list, state, &ws, selected, parked, false)?;
                 }
                 SectionRow::Group { prefix, members } => {
                     let gkey = group_key(&key, &prefix);
@@ -969,7 +993,7 @@ impl Chrome {
                         &format!("grp-{gkey}"),
                         "grp-head",
                         gopen,
-                        &format!("{prefix} ({})", members.len()),
+                        &format!("{prefix} {}", members.len()),
                         gatt,
                         &gkey,
                     )?;
@@ -980,7 +1004,7 @@ impl Chrome {
                     let nest = mk(&doc, "div", "grp-rows")?;
                     list.append_child(&nest)?;
                     for ws in &members {
-                        self.build_ws_row(&nest, state, ws, selected, parked)?;
+                        self.build_ws_row(&nest, state, ws, selected, parked, true)?;
                     }
                 }
             }
@@ -1010,7 +1034,11 @@ impl Chrome {
         head.append_child(
             text_el(&doc, "span", "fold-caret", if open { "▾" } else { "▸" })?.unchecked_ref(),
         )?;
-        head.append_child(text_el(&doc, "span", "fold-title", title)?.unchecked_ref())?;
+        let (title_text, count_text) = match title.rsplit_once(' ') {
+            Some((t, c)) => (t.to_string(), c.to_string()),
+            None => (title.to_string(), String::new()),
+        };
+        head.append_child(text_el(&doc, "span", "fold-title", &title_text)?.unchecked_ref())?;
         let (dot_text, dot_class) = match att {
             Some(Attention::NeedsHuman) => ("●", "fold-dot needs"),
             Some(Attention::Working) => ("●", "fold-dot working"),
@@ -1018,6 +1046,7 @@ impl Chrome {
             None => ("", "fold-dot"),
         };
         head.append_child(text_el(&doc, "span", dot_class, dot_text)?.unchecked_ref())?;
+        head.append_child(text_el(&doc, "span", "fold-count", &count_text)?.unchecked_ref())?;
         let actions = self.actions.clone();
         let key = toggle_key.to_string();
         bind_click(&head, &mut self.structural, move |ev| {
@@ -1626,10 +1655,11 @@ impl Chrome {
             let att = state.row_attention(ws);
             let working = matches!(att, Some(Attention::Working));
             let asleep = state.workspace_asleep(ws);
+            let needs = matches!(att, Some(Attention::NeedsHuman));
             refs.glyph
-                .set_class_name(ws_glyph_class(working, refs.selected, asleep));
+                .set_class_name(ws_glyph_class(working, refs.selected, asleep, needs));
             refs.glyph
-                .set_text_content(Some(ws_glyph_char(working, refs.selected, asleep)));
+                .set_text_content(Some(ws_glyph_char(working, refs.selected, asleep, needs)));
             let (text, class) = ws_att(att, refs.selected);
             refs.att.set_text_content(Some(text));
             refs.att.set_class_name(class);
@@ -2844,25 +2874,36 @@ fn arm_or_fire(
 }
 
 /// Workspace glyph: `◆` selected / working, `◈` idle (native sidebar).
-fn ws_glyph_char(working: bool, selected: bool, asleep: bool) -> &'static str {
-    if asleep {
-        "☾"
-    } else if working || selected {
+/// The glyph slot earns its ink or stays empty. A diamond on every idle row
+/// is a dozen identical marks that say nothing; leaving them off is what makes
+/// the rows that ARE doing something impossible to miss. Selection is carried
+/// by the flame anchor down the left edge, so it never steals this slot from a
+/// circle that is working.
+fn ws_glyph_char(working: bool, selected: bool, asleep: bool, needs: bool) -> &'static str {
+    if needs {
+        "●"
+    } else if working {
         "◆"
+    } else if selected {
+        "◆"
+    } else if asleep {
+        "☾"
     } else {
-        "◈"
+        ""
     }
 }
 
 /// WEB DIVERGENCE #1: `.working` is a CSS pulse standing in for the native
 /// braille frame cycle.
-fn ws_glyph_class(working: bool, selected: bool, asleep: bool) -> &'static str {
-    if asleep {
-        "ws-glyph asleep"
+fn ws_glyph_class(working: bool, selected: bool, asleep: bool, needs: bool) -> &'static str {
+    if needs {
+        "ws-glyph needs"
     } else if working {
         "ws-glyph working"
     } else if selected {
         "ws-glyph selected"
+    } else if asleep {
+        "ws-glyph asleep"
     } else {
         "ws-glyph idle"
     }
@@ -3002,13 +3043,19 @@ mod tests {
 
     #[test]
     fn glyph_and_attention_match_the_native_rules() {
-        assert_eq!(ws_glyph_char(false, true, false), "◆");
-        assert_eq!(ws_glyph_char(true, false, false), "◆");
-        assert_eq!(ws_glyph_char(false, false, false), "◈");
-        assert_eq!(ws_glyph_class(true, true, false), "ws-glyph working");
-        // Asleep outranks both: no process, so no spinner and no selection ◆.
-        assert_eq!(ws_glyph_char(true, true, true), "☾");
-        assert_eq!(ws_glyph_class(true, true, true), "ws-glyph asleep");
+        assert_eq!(ws_glyph_char(false, true, false, false), "◆");
+        assert_eq!(ws_glyph_char(true, false, false, false), "◆");
+        // Idle draws NOTHING — the slot is reserved for meaning.
+        assert_eq!(ws_glyph_char(false, false, false, false), "");
+        assert_eq!(ws_glyph_class(true, true, false, false), "ws-glyph working");
+        // Working outranks selection: the flame anchor already says "here".
+        assert_eq!(ws_glyph_class(true, true, true, false), "ws-glyph working");
+        // Asleep shows the moon only when nothing louder is true.
+        assert_eq!(ws_glyph_char(false, false, true, false), "☾");
+        assert_eq!(ws_glyph_class(false, false, true, false), "ws-glyph asleep");
+        // Needs beats everything — it is the one state you must not miss.
+        assert_eq!(ws_glyph_char(true, true, true, true), "●");
+        assert_eq!(ws_glyph_class(true, true, true, true), "ws-glyph needs");
         // Selected rows never show a text badge; working is the glyph.
         assert_eq!(ws_att(Some(Attention::NeedsHuman), true).0, "");
         assert_eq!(ws_att(Some(Attention::Working), false).0, "");
