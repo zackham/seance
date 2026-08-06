@@ -27,10 +27,11 @@
 //! That is the entire contract, and it is why a menu can add a workflow to
 //! seance without seance learning the workflow.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use gpui::{div, prelude::*, px, Context, SharedString, Window};
+use gpui::{canvas, div, prelude::*, px, Bounds, Context, Pixels, SharedString, Window};
 use gpui_component::WindowExt as _;
 
 use crate::host::{HostItem, HostSelectResult};
@@ -90,6 +91,53 @@ fn first_line(s: &str) -> String {
         .chars()
         .take(160)
         .collect()
+}
+
+/// Where each menu chip last painted, in window coordinates, so the panel can
+/// sit directly above the chip that opened it.
+///
+/// A side-channel rather than app state because it is written from a `canvas`
+/// prepaint, which runs outside an Entity update — the same reason the terminal
+/// view keeps its cell metrics here. The panel reads the previous frame's
+/// bounds; the chip is painted every frame, so by the time a menu can be open
+/// its chip has already reported.
+fn chip_bounds_map() -> &'static Mutex<HashMap<String, Bounds<Pixels>>> {
+    static M: OnceLock<Mutex<HashMap<String, Bounds<Pixels>>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn store_chip_bounds(id: &str, b: Bounds<Pixels>) {
+    if let Ok(mut g) = chip_bounds_map().lock() {
+        g.insert(id.to_string(), b);
+    }
+}
+
+fn load_chip_bounds(id: &str) -> Option<Bounds<Pixels>> {
+    chip_bounds_map()
+        .lock()
+        .ok()
+        .and_then(|g| g.get(id).copied())
+}
+
+/// Where the panel sits, in `(left, bottom, max_height)` window offsets — the
+/// bottom being distance from the window's bottom edge, which is how the panel
+/// grows UPWARD from the chip.
+///
+/// The chip lives at the foot of the rail, so a panel hanging below it would
+/// hang off the screen. Growing up from the chip's top edge is the only
+/// placement that works there, and it's clamped so a tall list stops short of
+/// the window top instead of running past it.
+fn panel_placement(
+    chip: Bounds<Pixels>,
+    viewport_h: f32,
+    gap: f32,
+    margin: f32,
+) -> (f32, f32, f32) {
+    let chip_top = f32::from(chip.origin.y);
+    let left = f32::from(chip.origin.x);
+    let bottom = (viewport_h - chip_top + gap).max(margin);
+    let max_h = (chip_top - gap - margin).max(80.);
+    (left, bottom, max_h)
 }
 
 /// Row tint, matching the polled-widget strip's vocabulary.
@@ -397,19 +445,45 @@ impl SeanceApp {
             // to nowhere visible. Both problems come from the same root: the
             // panel does not belong to the chip's layout. It is drawn beside the
             // rail, from the app root. See [`Self::render_host_menu_scrim`].
+            // Reports where this chip is so the panel can sit above it. Out of
+            // flow, so it costs the chip's layout nothing.
+            .child(
+                canvas(
+                    {
+                        let id = id.clone();
+                        move |bounds, _, _| store_chip_bounds(&id, bounds)
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             .child(format!("▾ {}", cfg.title))
             .into_any_element()
     }
 
-    /// The panel: positioned against the window, beside the rail and at its
-    /// foot, where the launch strip is. Not anchored to the chip — see the
-    /// note on [`Self::render_host_menu_chip`] for the two bugs that cost.
+    /// The panel: drawn from the app root but positioned directly above the
+    /// chip that opened it, using the chip's last painted bounds.
+    ///
+    /// It is not a *child* of the chip — that is what broke it twice (see the
+    /// note on [`Self::render_host_menu_chip`]) — but it is anchored to it.
+    /// Those are different things, and conflating them is what sent the panel
+    /// to the corner of the window.
     fn render_host_menu_panel(
         &self,
         cfg: &crate::host::HostMenuConfig,
         open: &HostMenuOpen,
+        viewport_h: f32,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
+        // Fallback (chip never painted): foot of the rail, where it lives.
+        let chip = load_chip_bounds(&open.id);
+        let (left, bottom, max_h) = match chip {
+            Some(b) => panel_placement(b, viewport_h, 6., 8.),
+            None => (super::sidebar::RAIL_WIDTH + 8., 8., 400.),
+        };
+        // The list scrolls inside whatever room there is above the chip.
+        let list_max_h = (max_h - 34.).clamp(80., 400.);
         let body: gpui::AnyElement = match &open.items {
             None => div()
                 .p_2()
@@ -430,7 +504,7 @@ impl SeanceApp {
                 .into_any_element(),
             Some(items) => div()
                 .id(SharedString::from(format!("hostmenu-list-{}", open.id)))
-                .max_h(px(400.))
+                .max_h(px(list_max_h))
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
@@ -445,11 +519,9 @@ impl SeanceApp {
         div()
             .id(SharedString::from(format!("hostmenu-drop-{}", open.id)))
             .absolute()
-            // Beside the rail, sitting on the bottom edge: the launch strip is
-            // down there, so this reads as belonging to the chip that opened it
-            // without depending on the chip's own layout for a single pixel.
-            .left(px(super::sidebar::RAIL_WIDTH + 8.))
-            .bottom(px(8.))
+            // Left edge flush with the chip, bottom edge just above it.
+            .left(px(left))
+            .bottom(px(bottom))
             .w(px(340.))
             .flex()
             .flex_col()
@@ -494,9 +566,14 @@ impl SeanceApp {
     /// menu. That includes the chip, which now sits *under* the scrim, so
     /// clicking it while open closes the menu rather than closing and
     /// immediately reopening it.
-    pub(super) fn render_host_menu_scrim(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn render_host_menu_scrim(
+        &self,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let open = self.host_menu.as_ref()?;
         let cfg = self.host_menus.iter().find(|m| m.id == open.id)?;
+        let viewport_h = f32::from(window.viewport_size().height);
         Some(
             div()
                 .id("hostmenu-scrim")
@@ -515,7 +592,7 @@ impl SeanceApp {
                         this.close_host_menu(cx);
                     }),
                 )
-                .child(self.render_host_menu_panel(cfg, open, cx))
+                .child(self.render_host_menu_panel(cfg, open, viewport_h, cx))
                 .into_any_element(),
         )
     }
@@ -596,6 +673,35 @@ impl SeanceApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds {
+            origin: gpui::point(px(x), px(y)),
+            size: gpui::size(px(w), px(h)),
+        }
+    }
+
+    #[test]
+    fn the_panel_sits_directly_above_its_chip() {
+        // Chip near the foot of a 900px window: the panel's bottom edge lands
+        // `gap` above the chip's top, measured from the window's bottom edge.
+        let (left, bottom, _) = panel_placement(bounds(64., 800., 60., 18.), 900., 6., 8.);
+        assert_eq!(left, 64.);
+        assert_eq!(bottom, 106.); // 900 - 800 + 6
+    }
+
+    #[test]
+    fn the_panel_never_grows_past_the_top_of_the_window() {
+        // A chip high up leaves little room; max height shrinks to fit rather
+        // than letting the list run off the top edge.
+        let (_, _, max_h) = panel_placement(bounds(64., 120., 60., 18.), 900., 6., 8.);
+        assert_eq!(max_h, 106.); // 120 - 6 - 8
+                                 // And a chip flush against the top still yields a usable floor, not a
+                                 // negative height (which would be a panic or an invisible panel).
+        let (_, bottom, max_h) = panel_placement(bounds(64., 0., 60., 18.), 900., 6., 8.);
+        assert_eq!(max_h, 80.);
+        assert!(bottom >= 8.);
+    }
 
     fn item(id: &str, group: &str) -> HostItem {
         HostItem {

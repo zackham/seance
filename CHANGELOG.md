@@ -17,6 +17,18 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A host menu's panel opens above its chip again**, instead of parked at the
+  foot of the rail. Fixing the click bug moved the panel out of the chip's
+  element tree, and the placement went with it — but "not a child of the chip"
+  and "not anchored to the chip" are different things, and conflating them is
+  what sent it to the corner. The chip now reports its painted bounds through a
+  side-channel (the idiom the terminal view already uses for cell metrics) and
+  the panel positions itself against them: left edge flush, growing upward,
+  clamped so a long list stops short of the window top rather than running off
+  it.
+
 ## [0.18.2] — 2026-08-06
 
 ### Fixed
