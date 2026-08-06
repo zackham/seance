@@ -91,6 +91,11 @@ src/ctl/               the CLI client: mod.rs, parse.rs, wait.rs, print.rs, phon
 src/control.rs         control-plane wire types + serde
 src/gui_client.rs      GUI→daemon request client + fs-bridge fs_call plumbing
 src/tunnel.rs          thin-client ssh -N -L forward supervisor (docs/REMOTE.md)
+src/fileview.rs        live file pane: markdown/monospace body, history stepping
+src/mdfold.rs          markdown section folding — a PURE model over the source
+                       (path-keyed folds, `seance-h` fences the pane renders
+                       itself). Deliberately not a fork of gpui-component's
+                       markdown stack; see docs/FILE-PANES.md
 src/subscriptions_pref.rs  per-GUI active-set persistence (~/.config/seance/subscriptions.json)
 src/launch.rs          launch preference (local vs remote host, persisted)
 src/picker.rs          startup picker window (choose daemon location)

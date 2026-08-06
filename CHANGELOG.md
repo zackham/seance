@@ -17,6 +17,34 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-08-06
+
+Markdown panes fold.
+
+### Added
+
+- **Foldable sections in markdown file panes.** Click a heading's caret to
+  collapse its section — the whole subtree, not one level — or use `⊟` / `⊞`
+  in the pane header for all of them. A flat 200-line agenda becomes its
+  eight-line spine, and a collapsed heading still says `N lines`, because a
+  fold that leaves no trace of its size reads like the document ends there.
+  The chrome appears only for markdown that actually has headings.
+
+  The fold happens **before** the renderer (`src/mdfold.rs`): a collapsed
+  section's lines are never handed to the TextView, and each heading becomes a
+  `seance-h` fence the file pane draws itself. So `gpui_component`'s markdown
+  stack — ~7k lines of parsing, inline layout and cross-block selection — is
+  untouched and unforked; it just receives a shorter document. Selection still
+  crosses a folded heading (the custom node carries its markdown as its text).
+
+  **Fold state is keyed by heading path, not by line.** The canonical file pane
+  is watching a document an agent is writing while a human reads it, and a
+  line-indexed fold set would silently reopen on every write, or fold the wrong
+  section. Path keys survive insertions above, edits elsewhere, and the section
+  moving; a fold is forgotten only when its heading is renamed, which is the
+  one case where there's no honest way to claim it still refers to that
+  section. Duplicate headings under one parent fold independently.
+
 ## [0.19.0] — 2026-08-06
 
 Jumping remembers where you've been.

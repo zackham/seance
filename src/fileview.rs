@@ -38,6 +38,15 @@
 //!   Theme from `cx.theme()`. Non-markdown uses an outer scroll + per-line
 //!   monospace. See `docs/FILE-PANES.md`.
 //!
+//! - **Section folding.** Markdown headings fold, and the fold happens *before*
+//!   the renderer: [`crate::mdfold`] rewrites the source so a collapsed
+//!   section's lines are never handed over and each heading becomes a
+//!   `seance-h` fence this file draws itself (caret + hidden-line count). The
+//!   TextView therefore sees an ordinary, shorter document — virtualization,
+//!   selection and theming are untouched, and we don't fork the pinned dep.
+//!   Fold state is keyed by heading PATH, not line, so an agent rewriting the
+//!   file under a reader doesn't reopen what they folded.
+//!
 //! - **History storage.** Plain file copies under
 //!   `~/.local/share/seance/filehist/<hash>/NNNN.snap` **on the daemon
 //!   machine**, capped at the most recent [`MAX_SNAPSHOTS`]. Snapshot `0000` is
@@ -74,18 +83,82 @@ fn candlelit_markdown_style() -> TextViewStyle {
     TextViewStyle {
         paragraph_gap: rems(0.55),
         heading_base_font_size: px(15.),
-        heading_font_size: Some(Arc::new(|level, base| match level {
-            1 => px(22.),
-            2 => px(18.),
-            3 => px(16.),
-            _ => base,
-        })),
+        // Shared with the fold headings we draw ourselves — one source, so a
+        // caret can never change a heading's size on the page.
+        heading_font_size: Some(Arc::new(|level, _base| heading_px(level))),
         highlight_theme: HighlightTheme::default_dark(),
         code_block: code,
         table: StyleRefinement::default(),
         table_cell: StyleRefinement::default(),
         is_dark: true,
     }
+}
+
+/// Heading sizes, shared by the renderer's own headings and the ones we draw
+/// for folding, so a fold caret never changes a heading's weight on the page.
+fn heading_px(level: u8) -> gpui::Pixels {
+    match level {
+        1 => px(22.),
+        2 => px(18.),
+        3 => px(16.),
+        _ => px(15.),
+    }
+}
+
+/// A foldable heading: caret, the heading text at its normal size, and — when
+/// collapsed — what it is hiding.
+///
+/// The line count is the honest part. A collapsed section that leaves no trace
+/// of its size reads like the document just ends there; "12 lines" is the
+/// difference between a fold and a disappearance.
+fn render_fold_heading(
+    head: &crate::mdfold::FoldHead,
+    view: WeakEntity<FileView>,
+) -> impl IntoElement {
+    let key = head.key.clone();
+    let collapsed = head.collapsed;
+    let hidden = head.hidden_lines;
+    div()
+        .id(SharedString::from(format!("fold-{}", head.key)))
+        .flex()
+        .flex_row()
+        .items_baseline()
+        .gap_1p5()
+        .py_0p5()
+        .cursor_pointer()
+        .hover(|s| s.bg(SeancePalette::surface()))
+        .on_click(move |_, _, cx| {
+            if let Some(view) = view.upgrade() {
+                view.update(cx, |this, cx| this.toggle_fold(&key, cx));
+            }
+        })
+        .child(
+            div()
+                .flex_none()
+                .w(px(14.))
+                .text_xs()
+                .text_color(if collapsed {
+                    SeancePalette::flame()
+                } else {
+                    SeancePalette::text_faint()
+                })
+                .child(if collapsed { "▸" } else { "▾" }),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .text_size(heading_px(head.level))
+                .font_semibold()
+                .text_color(SeancePalette::text())
+                .child(head.text.clone()),
+        )
+        .children(collapsed.then(|| {
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(SeancePalette::text_faint())
+                .child(format!("{hidden} lines"))
+        }))
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +432,13 @@ pub struct FileView {
     /// bridge. `None` in live mode or at the oldest snapshot.
     pinned_prev: Option<String>,
 
+    /// Collapsed markdown sections, by [`crate::mdfold`] path key.
+    ///
+    /// Keyed by path rather than position on purpose: this pane watches a live
+    /// file, and the normal case is an agent rewriting the document while a
+    /// human reads it. Line-indexed folds would reopen on every write.
+    collapsed: std::collections::BTreeSet<String>,
+
     /// Last mtime (daemon ms-since-epoch) we are "in sync" with. Compared
     /// against the bridge stat by the poller to detect external edits.
     last_seen_mtime: Option<u64>,
@@ -495,6 +575,7 @@ impl FileView {
             snapshots: Vec::new(),
             changed_since_pin: false,
             show_diff: false,
+            collapsed: std::collections::BTreeSet::new(),
             pinned_prev: None,
             last_seen_mtime: None,
             _watch_task: Task::ready(()),
@@ -596,6 +677,10 @@ impl FileView {
                         // Following the tail: adopt the new content.
                         self.content = contents;
                         self.unreadable = false;
+                        // Folds are path-keyed, so they ride the rewrite. Drop
+                        // only the ones whose heading is gone, so the set can't
+                        // grow forever in a pane left open for days.
+                        self.collapsed = crate::mdfold::prune(&self.collapsed, &self.content);
                     }
                     ViewMode::History(_) => {
                         // Pinned to history: don't yank the view, just flag that
@@ -774,6 +859,39 @@ impl FileView {
         )
     }
 
+    /// Headings the body currently has — drives the fold chrome (which is
+    /// hidden entirely for a document with no sections to fold).
+    fn fold_head_count(&self) -> usize {
+        if !self.is_markdown() {
+            return 0;
+        }
+        crate::mdfold::headings(&self.content).len()
+    }
+
+    /// Toggle one section. Called from the heading renderer's caret.
+    fn toggle_fold(&mut self, key: &str, cx: &mut gpui::Context<Self>) {
+        if !self.collapsed.remove(key) {
+            self.collapsed.insert(key.to_string());
+        }
+        cx.notify();
+    }
+
+    fn collapse_all(&mut self, cx: &mut gpui::Context<Self>) {
+        self.collapsed = crate::mdfold::all_keys(&self.content);
+        cx.notify();
+    }
+
+    fn expand_all(&mut self, cx: &mut gpui::Context<Self>) {
+        self.collapsed.clear();
+        cx.notify();
+    }
+
+    /// Every section is folded. Drives which of ⊟/⊞ is the live affordance.
+    fn all_folded(&self) -> bool {
+        let heads = crate::mdfold::headings(&self.content);
+        !heads.is_empty() && heads.iter().all(|h| self.collapsed.contains(&h.key))
+    }
+
     /// "+N/-N" line-count delta vs. the snapshot immediately before the one
     /// being viewed. Cheap line-multiset delta for the hint bar; the real
     /// ordered diff is in [`unified_line_diff`]. `None` when there's no
@@ -884,6 +1002,19 @@ impl FileView {
                     })
                     .child(if is_live { "● live" } else { "◐ history" }.to_string()),
             )
+            // ⊟/⊞ fold — markdown with sections only; nothing to fold, no chrome.
+            .children((self.fold_head_count() > 0).then(|| {
+                let folded = self.all_folded();
+                btn("fold", if folded { "⊞" } else { "⊟" }, true).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        if folded {
+                            this.expand_all(cx)
+                        } else {
+                            this.collapse_all(cx)
+                        }
+                    },
+                ))
+            }))
             // ◀ N/M ▶
             .child(
                 btn("older", "◀", can_older)
@@ -999,10 +1130,10 @@ impl FileView {
                 self.render_diff_body(prev)
             } else {
                 // Race: predecessor vanished — fall through to normal body.
-                self.render_content_body()
+                self.render_content_body(cx)
             }
         } else {
-            self.render_content_body()
+            self.render_content_body(cx)
         };
 
         div()
@@ -1019,20 +1150,26 @@ impl FileView {
 
     /// Normal (non-diff) content: markdown with optional frontmatter box, or
     /// preserved-newline monospace for everything else.
-    fn render_content_body(&self) -> gpui::AnyElement {
+    fn render_content_body(&self, cx: &mut gpui::Context<Self>) -> gpui::AnyElement {
         if self.is_markdown() {
             let (frontmatter, body) = split_frontmatter(&self.content);
             // Virtualized TextView (scrollable true): only visible blocks paint.
             // Frontmatter is injected as a custom first block so it scrolls away
             // with the doc (same UX as the old outer-scroll layout).
+            // Fold BEFORE the renderer sees it: collapsed sections' lines are
+            // simply not handed over, and each heading becomes a `seance-h`
+            // fence we draw ourselves with a caret. The TextView gets an
+            // ordinary, shorter document — virtualization and selection intact.
+            let folded = crate::mdfold::fold_source(body, &self.collapsed);
             let source = match frontmatter {
                 Some(ref fields) => {
                     let mut s = frontmatter_fence(fields);
-                    s.push_str(body);
+                    s.push_str(&folded);
                     s
                 }
-                None => body.to_string(),
+                None => folded,
             };
+            let view = cx.entity().downgrade();
 
             let md = markdown(source)
                 .style(candlelit_markdown_style())
@@ -1058,6 +1195,30 @@ impl FileView {
                     } else {
                         div().into_any_element()
                     }
+                })
+                .markdown_block_parser(|node, _cx| {
+                    let markdown_ast::Node::Code(code) = node else {
+                        return None;
+                    };
+                    if code.lang.as_deref() != Some(crate::mdfold::HEAD_FENCE) {
+                        return None;
+                    }
+                    let head = crate::mdfold::parse_head_fence(&code.value)?;
+                    // `.text()` is what a cross-block selection copies, so a
+                    // heading we draw ourselves still yields its markdown when
+                    // you drag across it.
+                    let as_text = format!("{} {}", "#".repeat(head.level as usize), head.text);
+                    Some(
+                        MarkdownNode::new(crate::mdfold::HEAD_FENCE, head)
+                            .text(as_text.clone())
+                            .markdown(as_text),
+                    )
+                })
+                .markdown_block_renderer(crate::mdfold::HEAD_FENCE, move |node, _window, _cx| {
+                    let Some(head) = node.data::<crate::mdfold::FoldHead>() else {
+                        return div().into_any_element();
+                    };
+                    render_fold_heading(head, view.clone()).into_any_element()
                 })
                 .w_full()
                 .h_full()

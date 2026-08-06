@@ -60,6 +60,38 @@ line-multiset delta (`+added/-removed`) between the viewed snapshot and the one
 immediately before it. The click-to-toggle body is a real ordered unified line
 diff (LCS under 2500 lines per side; greedy lookahead beyond that).
 
+## Folding sections
+
+Markdown headings fold. Click a heading's caret to collapse its section — the
+whole subtree, not one level — and `⊟` / `⊞` in the pane header collapse or
+expand everything. A flat 200-line agenda becomes its eight-line spine. The
+chrome only appears for a markdown file that actually has headings.
+
+The fold happens **before** the renderer, in `src/mdfold.rs`: a collapsed
+section's lines are never handed to the TextView, and every heading is swapped
+for a `seance-h` fence that `fileview.rs` draws itself (caret, heading text at
+its normal size, and the hidden line count). Seance therefore never forks
+`gpui_component`'s markdown stack — ~7k lines of parsing, inline layout and
+cross-block selection stay exactly as they are, and the document the renderer
+virtualizes is just a shorter one.
+
+A collapsed heading still reports `N lines`. A fold that leaves no trace of its
+size reads like the document ends there.
+
+### Fold state is keyed by heading PATH, not by line
+
+The canonical file pane is watching a document an agent is writing while a
+human reads it. Line-indexed folds would silently reopen on every write — or
+fold the wrong section. Keys are the chain of ancestor heading texts plus the
+heading's own, so a fold survives insertions above it, edits elsewhere, and the
+section moving. It is forgotten only when the heading itself is renamed, which
+is the one case where there is no honest way to say the fold still refers to
+that section. Duplicate headings under the same parent get an occurrence
+suffix so they fold independently.
+
+Selection still works across a folded heading: the custom node carries its
+markdown as `.text()`, so dragging across it copies `### The heading`.
+
 ## History storage
 
 Plain, uncompressed file copies — no diffs — under:
