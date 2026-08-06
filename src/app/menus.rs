@@ -387,19 +387,24 @@ impl SeanceApp {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_host_menu(&click_id, cx);
             }))
-            // Click-away closes, including a click on another chip (which then
-            // opens its own menu on the click that follows this one).
-            .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
-                this.close_host_menu(cx);
-            }))
-            .children(open.map(|m| self.render_host_menu_dropdown(cfg, m, cx)))
+            // The panel is NOT a child of this chip. Two failed attempts said
+            // why: as a chip child it needed `on_mouse_down_out` for dismissal,
+            // which fires in the CAPTURE phase for anything outside the *chip's*
+            // hitbox — so every click on a row read as a click-away and the row
+            // died on mouse-down. Reparenting the dismissal to a scrim fixed
+            // that but left the panel `absolute().bottom_full()` inside a
+            // `deferred`, whose layout is detached from the chip, so it resolved
+            // to nowhere visible. Both problems come from the same root: the
+            // panel does not belong to the chip's layout. It is drawn beside the
+            // rail, from the app root. See [`Self::render_host_menu_scrim`].
             .child(format!("▾ {}", cfg.title))
             .into_any_element()
     }
 
-    /// The dropdown itself. Opens UPWARD — the launch strip lives at the foot
-    /// of the rail, so a list that grew downward would grow off the screen.
-    fn render_host_menu_dropdown(
+    /// The panel: positioned against the window, beside the rail and at its
+    /// foot, where the launch strip is. Not anchored to the chip — see the
+    /// note on [`Self::render_host_menu_chip`] for the two bugs that cost.
+    fn render_host_menu_panel(
         &self,
         cfg: &crate::host::HostMenuConfig,
         open: &HostMenuOpen,
@@ -437,47 +442,82 @@ impl SeanceApp {
                 )
                 .into_any_element(),
         };
-        gpui::deferred(
+        div()
+            .id(SharedString::from(format!("hostmenu-drop-{}", open.id)))
+            .absolute()
+            // Beside the rail, sitting on the bottom edge: the launch strip is
+            // down there, so this reads as belonging to the chip that opened it
+            // without depending on the chip's own layout for a single pixel.
+            .left(px(super::sidebar::RAIL_WIDTH + 8.))
+            .bottom(px(8.))
+            .w(px(340.))
+            .flex()
+            .flex_col()
+            .rounded_md()
+            .border_1()
+            .border_color(SeancePalette::flame_dim())
+            .bg(SeancePalette::bg_elevated())
+            // Own the mouse over the panel so a click inside it isn't also a
+            // click on the scrim underneath.
+            .occlude()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(SeancePalette::border())
+                    .text_xs()
+                    .text_color(SeancePalette::text_faint())
+                    .child(open.title.clone()),
+            )
+            .child(body)
+            .children(open.error.as_ref().map(|e| {
+                // (error line, below the body)
+                div()
+                    .px_2()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(SeancePalette::border())
+                    .text_xs()
+                    .text_color(SeancePalette::danger())
+                    .child(e.clone())
+            }))
+            .into_any_element()
+    }
+
+    /// The open menu, mounted from `render()` at the app root: a full-window
+    /// click-away catcher with the panel inside it.
+    ///
+    /// Invisible and non-dimming — the scrim exists only to own the mouse
+    /// everywhere the panel isn't. The panel is its child, so it paints after
+    /// it and takes the clicks over its own area; everything else closes the
+    /// menu. That includes the chip, which now sits *under* the scrim, so
+    /// clicking it while open closes the menu rather than closing and
+    /// immediately reopening it.
+    pub(super) fn render_host_menu_scrim(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let open = self.host_menu.as_ref()?;
+        let cfg = self.host_menus.iter().find(|m| m.id == open.id)?;
+        Some(
             div()
-                .id(SharedString::from(format!("hostmenu-drop-{}", open.id)))
+                .id("hostmenu-scrim")
                 .absolute()
-                .bottom_full()
-                .left_0()
-                .mb(px(6.))
-                .w(px(340.))
-                .flex()
-                .flex_col()
-                .rounded_md()
-                .border_1()
-                .border_color(SeancePalette::flame_dim())
-                .bg(SeancePalette::bg_elevated())
-                // Swallow clicks so choosing a row doesn't also read as the
-                // chip's click-away dismissal.
-                .on_click(|_, _, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .border_b_1()
-                        .border_color(SeancePalette::border())
-                        .text_xs()
-                        .text_color(SeancePalette::text_faint())
-                        .child(open.title.clone()),
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.close_host_menu(cx);
+                    }),
                 )
-                .child(body)
-                .children(open.error.as_ref().map(|e| {
-                    div()
-                        .px_2()
-                        .py_1()
-                        .border_t_1()
-                        .border_color(SeancePalette::border())
-                        .text_xs()
-                        .text_color(SeancePalette::danger())
-                        .child(e.clone())
-                }))
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(|this, _, _, cx| {
+                        this.close_host_menu(cx);
+                    }),
+                )
+                .child(self.render_host_menu_panel(cfg, open, cx))
                 .into_any_element(),
         )
-        .into_any_element()
     }
 
     fn render_host_menu_row(

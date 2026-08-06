@@ -2507,6 +2507,9 @@ impl Render for SeanceApp {
                 (self.pr_board && !self.overview)
                     .then(|| self.render_pr_board(cx).into_any_element()),
             )
+            // Below the (deferred) menu dropdown, above everything else — the
+            // click-away catcher for an open host menu.
+            .children(self.render_host_menu_scrim(cx))
             .children(self.render_palette(cx))
             .children(self.render_quicklaunch_editor(cx))
             .children(self.render_gui_menu(cx))

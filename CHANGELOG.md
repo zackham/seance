@@ -17,6 +17,22 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.18.2] — 2026-08-06
+
+### Fixed
+
+- **Picking a row in a host menu did nothing.** Two bugs stacked, both from the
+  panel being a child of the chip's layout when it is drawn nowhere near it.
+  First, dismissal used `on_mouse_down_out` on the chip — which fires in the
+  CAPTURE phase for any press outside *the chip's* hitbox, and the panel is
+  absolutely positioned outside it. Every click on a row was therefore read as
+  a click-away: the menu closed on mouse-down and the row was gone before
+  mouse-up could complete the click. Second, the panel was
+  `absolute().bottom_full()` inside a `deferred`, whose layout is detached from
+  its parent, so once dismissal was fixed the panel resolved to nowhere
+  visible. The panel now renders from the app root, positioned against the
+  window beside the rail, inside a full-window scrim that owns click-away.
+
 ## [0.18.1] — 2026-08-05
 
 ### Fixed

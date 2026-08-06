@@ -21,6 +21,9 @@ const GLYPH_W: f32 = 15.;
 const TIME_W: f32 = 34.;
 /// How far a cluster's members sit inside their header.
 const CLUSTER_INDENT: f32 = 14.;
+/// The left rail's width. Anything drawn beside the rail (a host menu's panel)
+/// needs it too, so it lives here rather than as a literal in the layout.
+pub(super) const RAIL_WIDTH: f32 = 232.;
 
 use super::actions::*;
 use super::util::{
@@ -1014,7 +1017,7 @@ impl SeanceApp {
         div()
             .id("sidebar")
             .flex_none()
-            .w(px(232.))
+            .w(px(RAIL_WIDTH))
             .h_full()
             .flex()
             .flex_col()
