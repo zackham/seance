@@ -62,10 +62,25 @@ diff (LCS under 2500 lines per side; greedy lookahead beyond that).
 
 ## Folding sections
 
-Markdown headings fold. Click a heading's caret to collapse its section — the
-whole subtree, not one level — and `⊟` / `⊞` in the pane header collapse or
-expand everything. A flat 200-line agenda becomes its eight-line spine. The
-chrome only appears for a markdown file that actually has headings.
+Markdown panes **open folded to their outline**: every heading on screen, no
+prose under any of them. A flat 200-line agenda opens as its nine-line spine,
+which is usually why you put a long document in a pane at all.
+
+Click a heading's caret to open one section — or to collapse it again, which
+takes its whole subtree, not one level. `⊟` / `⊞` in the pane header fold back
+to the outline or open everything. The chrome only appears for a markdown file
+that actually has headings.
+
+"Fold everything" means the **leaves**, not every heading. Collapsing hides a
+subtree, so folding a document's `#` title would collapse the document to one
+line — obedient and useless. Folding the leaves is the deepest fold that still
+lets you see the shape of what you folded, and it leaves a parent's own
+preamble visible, which is normally the orientation text you want.
+
+A section that appears *after* the pane opened arrives folded, like anything
+else new; one you deliberately expanded stays expanded across a rewrite. An
+agent appending to a file you are reading cannot dump prose into a view you had
+arranged.
 
 The fold happens **before** the renderer, in `src/mdfold.rs`: a collapsed
 section's lines are never handed to the TextView, and every heading is swapped

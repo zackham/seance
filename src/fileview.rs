@@ -439,6 +439,12 @@ pub struct FileView {
     /// human reads it. Line-indexed folds would reopen on every write.
     collapsed: std::collections::BTreeSet<String>,
 
+    /// Every heading key this pane has already seen. A section that appears
+    /// after the pane opened is folded on arrival (the default), while one the
+    /// human deliberately expanded stays expanded across rewrites — the two
+    /// are indistinguishable from the collapsed set alone.
+    known_heads: std::collections::BTreeSet<String>,
+
     /// Last mtime (daemon ms-since-epoch) we are "in sync" with. Compared
     /// against the bridge stat by the poller to detect external edits.
     last_seen_mtime: Option<u64>,
@@ -576,6 +582,7 @@ impl FileView {
             changed_since_pin: false,
             show_diff: false,
             collapsed: std::collections::BTreeSet::new(),
+            known_heads: std::collections::BTreeSet::new(),
             pinned_prev: None,
             last_seen_mtime: None,
             _watch_task: Task::ready(()),
@@ -603,7 +610,7 @@ impl FileView {
                 .await;
             if let Some(this) = this.upgrade() {
                 let _ = this.update(cx, |this, cx| {
-                    this.content = outcome.content;
+                    this.adopt_content(outcome.content);
                     this.unreadable = outcome.unreadable;
                     this.last_seen_mtime = outcome.mtime;
                     this.snapshots = outcome.snapshots;
@@ -660,7 +667,7 @@ impl FileView {
                 // that; in history mode keep showing the pinned snapshot.
                 if matches!(self.mode, ViewMode::Live) {
                     self.unreadable = true;
-                    self.content = String::new();
+                    self.adopt_content(String::new());
                     cx.notify();
                 }
             }
@@ -675,12 +682,8 @@ impl FileView {
                 match self.mode {
                     ViewMode::Live => {
                         // Following the tail: adopt the new content.
-                        self.content = contents;
+                        self.adopt_content(contents);
                         self.unreadable = false;
-                        // Folds are path-keyed, so they ride the rewrite. Drop
-                        // only the ones whose heading is gone, so the set can't
-                        // grow forever in a pane left open for days.
-                        self.collapsed = crate::mdfold::prune(&self.collapsed, &self.content);
                     }
                     ViewMode::History(_) => {
                         // Pinned to history: don't yank the view, just flag that
@@ -721,12 +724,12 @@ impl FileView {
                     }
                     match read {
                         Ok((c, _)) => {
-                            this.content = c;
+                            this.adopt_content(c);
                             this.unreadable = false;
                         }
                         Err(_) => {
                             this.unreadable = true;
-                            this.content = String::new();
+                            this.adopt_content(String::new());
                         }
                     }
                     cx.notify();
@@ -798,7 +801,7 @@ impl FileView {
                 let _ = this.update(cx, |this, cx| {
                     match content {
                         Some(c) => {
-                            this.content = c;
+                            this.adopt_content(c);
                             this.unreadable = false;
                             this.mode = ViewMode::History(idx);
                             this.pinned_prev = prev;
@@ -859,6 +862,29 @@ impl FileView {
         )
     }
 
+    /// Adopt new body content and reconcile fold state against it.
+    ///
+    /// Markdown opens **folded to its outline** — every heading on screen, no
+    /// prose — because the reason to put a long document in a pane is usually
+    /// to see its shape. Sections the human has since expanded stay expanded
+    /// across a rewrite; sections that are genuinely new arrive folded, so an
+    /// agent appending to the file can't dump prose into a view you'd arranged.
+    fn adopt_content(&mut self, next: String) {
+        if self.is_markdown() {
+            let live = crate::mdfold::all_keys(&next);
+            let fresh: Vec<String> = crate::mdfold::outline_keys(&next)
+                .into_iter()
+                .filter(|k| !self.known_heads.contains(k))
+                .collect();
+            self.collapsed = crate::mdfold::prune(&self.collapsed, &next);
+            self.collapsed.extend(fresh);
+            // Only live keys are "known", so a section that leaves and comes
+            // back is new again — and folded again, like anything else new.
+            self.known_heads = live;
+        }
+        self.content = next;
+    }
+
     /// Headings the body currently has — drives the fold chrome (which is
     /// hidden entirely for a document with no sections to fold).
     fn fold_head_count(&self) -> usize {
@@ -877,7 +903,7 @@ impl FileView {
     }
 
     fn collapse_all(&mut self, cx: &mut gpui::Context<Self>) {
-        self.collapsed = crate::mdfold::all_keys(&self.content);
+        self.collapsed = crate::mdfold::outline_keys(&self.content);
         cx.notify();
     }
 
@@ -886,10 +912,11 @@ impl FileView {
         cx.notify();
     }
 
-    /// Every section is folded. Drives which of ⊟/⊞ is the live affordance.
+    /// The document is down to its outline. Drives which of ⊟/⊞ is offered:
+    /// once everything foldable is folded, the only useful move is to open it.
     fn all_folded(&self) -> bool {
-        let heads = crate::mdfold::headings(&self.content);
-        !heads.is_empty() && heads.iter().all(|h| self.collapsed.contains(&h.key))
+        let outline = crate::mdfold::outline_keys(&self.content);
+        !outline.is_empty() && outline.iter().all(|k| self.collapsed.contains(k))
     }
 
     /// "+N/-N" line-count delta vs. the snapshot immediately before the one

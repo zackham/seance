@@ -17,6 +17,21 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.20.1] — 2026-08-06
+
+### Changed
+
+- **Markdown panes open folded to their outline** rather than fully expanded —
+  every heading on screen, no prose. Seeing a long document's shape is usually
+  why it's in a pane. `⊞` opens everything; a section you expand stays expanded
+  across rewrites, while one that appears after the pane opened arrives folded,
+  so an agent appending to a file can't dump prose into a view you'd arranged.
+- **"Fold everything" now means the leaves, not every heading.** Collapsing
+  hides a subtree, so the previous behaviour folded a document's `#` title too
+  and collapsed the whole thing to a single line — obedient and useless.
+  Folding the leaves is the deepest fold that still shows the shape of what was
+  folded, and it leaves a parent's preamble visible.
+
 ## [0.20.0] — 2026-08-06
 
 Markdown panes fold.

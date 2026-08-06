@@ -160,9 +160,28 @@ pub fn headings(source: &str) -> Vec<Heading> {
     out
 }
 
-/// Every fold key in the document — what "collapse all" sets.
+/// Every fold key in the document. Used to prune state against a rewrite —
+/// deliberately NOT what "collapse all" sets; see [`outline_keys`].
 pub fn all_keys(source: &str) -> BTreeSet<String> {
     headings(source).into_iter().map(|h| h.key).collect()
+}
+
+/// The keys that fold a document down to its **outline**: every heading still
+/// on screen, no prose under any of them.
+///
+/// These are the leaves — headings with no headings beneath them — not every
+/// heading. Collapsing hides a whole subtree, so collapsing *everything* in a
+/// document with a single `#` title collapses the document to one line:
+/// technically obedient, completely useless. The leaves are the deepest thing
+/// you can fold while still being able to see the shape of what you folded.
+pub fn outline_keys(source: &str) -> BTreeSet<String> {
+    let heads = headings(source);
+    heads
+        .iter()
+        .enumerate()
+        .filter(|(i, h)| !heads[(*i + 1)..].iter().any(|c| c.line < h.end))
+        .map(|(_, h)| h.key.clone())
+        .collect()
 }
 
 /// Encode one heading as the fence `fileview.rs` renders itself.
@@ -409,6 +428,54 @@ beta body
         assert!(!out.contains("completely new body"), "still folded");
         assert!(out.contains('y'), "the new sibling is open");
         assert_eq!(prune(&folded, after), folded, "key still live");
+    }
+
+    #[test]
+    fn the_outline_set_keeps_every_heading_visible() {
+        // Leaves only: folding Title too would collapse the whole document to
+        // one line, which is what "collapse everything" naively means and what
+        // nobody wants.
+        let keys = outline_keys(DOC);
+        assert!(!keys.contains("Title"), "an ancestor is not folded");
+        assert!(!keys.contains("Title\u{1f}Alpha"), "nor a parent");
+        assert_eq!(
+            keys,
+            set(&["Title\u{1f}Alpha\u{1f}Alpha child", "Title\u{1f}Beta"])
+        );
+        // And folding that set really does leave every heading on screen.
+        let out = fold_source(DOC, &keys);
+        for text in ["Title", "Alpha", "Alpha child", "Beta"] {
+            assert!(out.contains(text), "{text} still visible");
+        }
+        for body in ["child body", "beta body"] {
+            assert!(!out.contains(body), "{body} folded away");
+        }
+        // A parent's own preamble survives — it is the orientation text.
+        assert!(out.contains("intro line"));
+    }
+
+    #[test]
+    fn a_flat_document_folds_to_its_spine() {
+        // The shape of a real agenda: one title, sections all at one level.
+        let doc = "# Agenda\npreamble\n### One\nfirst body\nmore first\n### Two\nsecond body\n";
+        let out = fold_source(doc, &outline_keys(doc));
+        assert!(out.contains("Agenda") && out.contains("One") && out.contains("Two"));
+        assert!(
+            out.contains("preamble"),
+            "the preamble is orientation, kept"
+        );
+        for body in ["first body", "more first", "second body"] {
+            assert!(!out.contains(body), "{body} folded");
+        }
+        // Each folded leaf reports what it hid.
+        assert!(out.contains("\t2\t"), "One hid two lines");
+    }
+
+    #[test]
+    fn a_document_of_one_heading_still_folds_that_heading() {
+        // Degenerate but real: a single section IS a leaf.
+        let doc = "# Only\nbody\n";
+        assert_eq!(outline_keys(doc), set(&["Only"]));
     }
 
     #[test]
