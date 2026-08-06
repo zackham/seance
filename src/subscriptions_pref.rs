@@ -93,6 +93,19 @@ impl SubscriptionsPref {
         }
     }
 
+    /// Unfold `key` if it is folded. Reports whether anything changed, so the
+    /// caller only persists on a real edit.
+    ///
+    /// Used when the rail has to *reveal* a row — jumping to a circle inside a
+    /// folded band can't just scroll to it, because the row isn't drawn at all.
+    pub fn uncollapse(&mut self, key: &str) -> bool {
+        if !self.is_collapsed(key) {
+            return false;
+        }
+        self.toggle_collapsed(key);
+        true
+    }
+
     /// Fold / unfold. Always reports `true` — the caller persists.
     pub fn toggle_collapsed(&mut self, key: &str) -> bool {
         let set = self.collapsed.get_or_insert_with(|| {

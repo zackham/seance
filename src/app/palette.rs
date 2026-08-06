@@ -9,6 +9,35 @@ use crate::theme::SeancePalette;
 
 use super::{Drawer, PaletteMode, PaneStatus, SeanceApp};
 
+/// Filter + order the jump list: every query token must appear in the slug or
+/// the label, then most-recently-active first.
+///
+/// Name breaks ties so circles that have never been live (both clocks zero)
+/// hold a stable order at the bottom instead of reshuffling every keystroke.
+pub(super) fn rank_jump_items(
+    rows: Vec<(String, String, u64)>,
+    query: &str,
+) -> Vec<(String, String)> {
+    let q = query.trim().to_ascii_lowercase();
+    let mut hits: Vec<(String, String, u64)> = rows
+        .into_iter()
+        .filter(|(slug, label, _)| {
+            if q.is_empty() {
+                return true;
+            }
+            let hay = format!("{slug} {label}").to_ascii_lowercase();
+            q.split_whitespace().all(|t| hay.contains(t))
+        })
+        .collect();
+    hits.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
+    hits.into_iter()
+        .map(|(slug, label, _)| (slug, label))
+        .collect()
+}
+
 impl SeanceApp {
     /// Prompt library, render-safe: builtins merged with the DAEMON-side user
     /// file via the remote cache (seeded at boot, refreshed every ~2s — never
@@ -16,6 +45,41 @@ impl SeanceApp {
     fn prompt_entries(&self) -> Vec<crate::prompts::PromptEntry> {
         let user = self.remote_cache.get(&crate::prompts::remote_config_path());
         crate::prompts::merge_with_user(user.as_deref())
+    }
+
+    /// The jump list: circles only, most-recently-active first.
+    ///
+    /// ONE source for the three things that must agree — the row count arrow
+    /// keys wrap against, the item activated on Enter, and what is drawn. They
+    /// used to be computed separately and had drifted apart: two of them still
+    /// included panes after the list became circles-only, so the highlighted
+    /// row and the thing Enter jumped to were different entries.
+    ///
+    /// Ordering is recency, not the rail's. The rail groups by band so it can
+    /// stay still while agents come and go; jumping wants the opposite — the
+    /// circle you were just in, then the one before that, so the hotkey plus
+    /// arrows walks back through where you've been.
+    pub(super) fn jump_items(&self, query: &str) -> Vec<(String, String)> {
+        let rows: Vec<(String, String, u64)> = self
+            .known_workspace_names()
+            .into_iter()
+            .map(|ws| {
+                let label = self.workspace_label(&ws);
+                let at = self.jump_recency(&ws);
+                (ws, label, at)
+            })
+            .collect();
+        rank_jump_items(rows, query)
+    }
+
+    /// When a circle was last live: real output, or human touch, whichever is
+    /// later. Same pair the rail's idle band sorts on.
+    fn jump_recency(&self, ws: &str) -> u64 {
+        self.workspace_activity
+            .get(ws)
+            .copied()
+            .max(self.workspace_touch.get(ws).copied())
+            .unwrap_or(0)
     }
 
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -36,22 +100,7 @@ impl SeanceApp {
             PaletteMode::Prompts { query, .. } => {
                 crate::prompts::filter(&self.prompt_entries(), query).len()
             }
-            PaletteMode::Jump { query, .. } => {
-                let q = query.trim().to_ascii_lowercase();
-                let pane_n = self
-                    .panes
-                    .iter()
-                    .filter(|p| {
-                        if q.is_empty() {
-                            return true;
-                        }
-                        let hay = format!("{} {} {} {}", p.name, p.slug, p.command, p.workspace)
-                            .to_ascii_lowercase();
-                        q.split_whitespace().all(|t| hay.contains(t))
-                    })
-                    .count();
-                pane_n + self.known_workspace_names().len()
-            }
+            PaletteMode::Jump { query, .. } => self.jump_items(query).len(),
             PaletteMode::Closed => 0,
         };
         match &mut self.palette {
@@ -140,37 +189,12 @@ impl SeanceApp {
                 }
             }
             PaletteMode::Jump { query, selected } => {
-                let q = query.trim().to_ascii_lowercase();
-                let mut items: Vec<String> = self
-                    .panes
-                    .iter()
-                    .filter(|p| {
-                        if q.is_empty() {
-                            return true;
-                        }
-                        let hay = format!("{} {} {} {}", p.name, p.slug, p.command, p.workspace)
-                            .to_ascii_lowercase();
-                        q.split_whitespace().all(|t| hay.contains(t))
-                    })
-                    .map(|p| p.slug.clone())
-                    .collect();
-                for ws in self.workspaces() {
-                    // Match either form: you should be able to find a circle
-                    // by what you see (label) or by what it is (slug).
-                    let label = self.workspace_label(&ws).to_ascii_lowercase();
-                    if q.is_empty() || ws.to_ascii_lowercase().contains(&q) || label.contains(&q) {
-                        items.push(format!("ws:{ws}"));
-                    }
-                }
-                if let Some(id) = items.get(*selected).cloned() {
-                    if let Some(ws) = id.strip_prefix("ws:") {
-                        self.select_workspace(ws, window, cx);
-                        self.close_palette(window, cx);
-                    } else {
-                        self.focus_pane_slug(&id, window, cx);
-                        self.palette = PaletteMode::Closed;
-                        cx.notify();
-                    }
+                let items = self.jump_items(query);
+                if let Some((ws, _)) = items.get(*selected).cloned() {
+                    // `select_workspace` reveals the row in the rail, so a jump
+                    // lands the same way ctrl+page cycling does.
+                    self.select_workspace(&ws, window, cx);
+                    self.close_palette(window, cx);
                 }
             }
         }
@@ -203,26 +227,15 @@ impl SeanceApp {
                         items,
                     )
                 }
-                PaletteMode::Jump { query, selected } => {
-                    // Workspaces only (owner decision 2026-08-02): pane
-                    // entries made the list mostly noise — jumping means
-                    // switching circles; panes are reachable within one.
-                    let q = query.trim().to_ascii_lowercase();
-                    let mut items: Vec<(String, String)> = Vec::new();
-                    for ws in self.workspaces() {
-                        let label = self.workspace_label(&ws).to_ascii_lowercase();
-                        let hay = format!("{} {label}", ws.to_ascii_lowercase());
-                        if q.is_empty() || q.split_whitespace().all(|t| hay.contains(t)) {
-                            items.push((format!("ws:{ws}"), self.workspace_label(&ws)));
-                        }
-                    }
-                    (
-                        "jump · ctrl+shift+j".into(),
-                        query.clone(),
-                        *selected,
-                        items,
-                    )
-                }
+                // Circles only (owner decision 2026-08-02): pane entries made
+                // the list mostly noise — jumping means switching circles.
+                // Most-recently-active first, from the one shared source.
+                PaletteMode::Jump { query, selected } => (
+                    "jump · ctrl+shift+j · most recent first".into(),
+                    query.clone(),
+                    *selected,
+                    self.jump_items(query),
+                ),
             };
         let n = items.len();
         let sel = if n == 0 { 0 } else { selected.min(n - 1) };
@@ -303,5 +316,69 @@ impl SeanceApp {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows() -> Vec<(String, String, u64)> {
+        vec![
+            ("mtg-growth".into(), "mtg-growth".into(), 300),
+            ("seance".into(), "seance".into(), 900),
+            ("wbr".into(), "wbr".into(), 700),
+            ("never-opened".into(), "never-opened".into(), 0),
+            ("also-never".into(), "also-never".into(), 0),
+        ]
+    }
+
+    fn slugs(v: Vec<(String, String)>) -> Vec<String> {
+        v.into_iter().map(|(s, _)| s).collect()
+    }
+
+    #[test]
+    fn most_recently_active_comes_first() {
+        // The point of the ordering: hotkey then arrows walks back through
+        // where you have actually been, newest first.
+        assert_eq!(
+            slugs(rank_jump_items(rows(), "")),
+            ["seance", "wbr", "mtg-growth", "also-never", "never-opened"]
+        );
+    }
+
+    #[test]
+    fn circles_that_were_never_live_hold_a_stable_order_at_the_bottom() {
+        // Both clocks zero: name decides, so the tail doesn't reshuffle.
+        let a = slugs(rank_jump_items(rows(), ""));
+        let b = slugs(rank_jump_items(rows().into_iter().rev().collect(), ""));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn every_query_token_must_match_slug_or_label() {
+        assert_eq!(slugs(rank_jump_items(rows(), "mtg")), ["mtg-growth"]);
+        // Tokens are ANDed, and order between them doesn't matter.
+        assert_eq!(slugs(rank_jump_items(rows(), "growth mtg")), ["mtg-growth"]);
+        assert!(rank_jump_items(rows(), "mtg wbr").is_empty());
+        assert!(rank_jump_items(rows(), "zzz").is_empty());
+    }
+
+    #[test]
+    fn filtering_keeps_the_recency_order() {
+        let v = vec![
+            ("fix-a".into(), "fix-a".into(), 10),
+            ("fix-b".into(), "fix-b".into(), 50),
+            ("other".into(), "other".into(), 99),
+        ];
+        assert_eq!(slugs(rank_jump_items(v, "fix")), ["fix-b", "fix-a"]);
+    }
+
+    #[test]
+    fn a_label_is_searchable_not_just_the_slug() {
+        // Circle identity: slug is the id, label is the text. Either finds it.
+        let v = vec![("term-2-3".into(), "seance".into(), 5)];
+        assert_eq!(slugs(rank_jump_items(v.clone(), "seance")), ["term-2-3"]);
+        assert_eq!(slugs(rank_jump_items(v, "term-2")), ["term-2-3"]);
     }
 }

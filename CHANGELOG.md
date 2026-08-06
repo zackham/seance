@@ -17,8 +17,34 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-08-06
+
+Jumping remembers where you've been.
+
+### Changed
+
+- **`ctrl+shift+j` lists circles most-recently-active first**, instead of the
+  rail's order. The rail groups by band so it can hold still while agents start
+  and finish; jumping wants the opposite — the circle you were just in, then
+  the one before that — so the hotkey plus arrows walks back through where
+  you've actually been. Title says so.
+
 ### Fixed
 
+- **The jump palette's three code paths disagreed about what was in the list.**
+  The row count arrows wrap against, the item Enter activates, and what is
+  drawn were computed separately, and two of them still included panes after
+  the list became circles-only (owner decision, 0.17). So the highlighted row
+  and the thing you jumped to were different entries, and often the jump landed
+  on a *pane* — which is also why it didn't move the rail. One shared source
+  now, pinned by tests.
+- **Selecting a circle reveals its row in the rail**, rather than only scrolling
+  toward it. Scrolling alone can't help when the target sits inside a folded
+  band or cluster — there is no row to scroll to, and the sleeping and parked
+  bands start folded — so jumping into one left the rail sitting where it was,
+  showing no sign of where you'd gone. It now unfolds what hides the row first,
+  then scrolls. Applies to every select: `ctrl+shift+pageup/down`, a jump, and a
+  host menu creating a circle all land the same way.
 - **A host menu's panel opens above its chip again**, instead of parked at the
   foot of the rail. Fixing the click bug moved the panel out of the chip's
   element tree, and the placement went with it — but "not a child of the chip"

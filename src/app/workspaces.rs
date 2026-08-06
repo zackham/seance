@@ -285,6 +285,53 @@ impl SeanceApp {
         None
     }
 
+    /// The band + cluster keys a circle's row lives under, if the rail knows
+    /// it. Pure lookup over the same sectioning the rail renders from, so the
+    /// unfold and the row index can never disagree about where a circle is.
+    fn rail_row_keys(&self, workspace: &str) -> Option<(String, Option<String>)> {
+        for (section, circles) in self.workspace_sections() {
+            for row in self.section_rows(&circles) {
+                match row {
+                    SectionRow::Circle(ws) if ws == workspace => {
+                        return Some((section.key().to_string(), None));
+                    }
+                    SectionRow::Group { prefix, members }
+                        if members.iter().any(|m| m == workspace) =>
+                    {
+                        return Some((
+                            section.key().to_string(),
+                            Some(crate::subscriptions_pref::group_key(section.key(), &prefix)),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Bring a circle's row into view: unfold whatever hides it, then scroll.
+    ///
+    /// Called on every select, so ctrl+page cycling, a jump, and a host menu
+    /// creating a circle all land the same way — the rail always shows you
+    /// where you just went.
+    pub(super) fn reveal_workspace_row(&mut self, workspace: &str) {
+        if let Some((band, cluster)) = self.rail_row_keys(workspace) {
+            let mut changed = self.subs_pref.uncollapse(&band);
+            if let Some(key) = cluster {
+                changed |= self.subs_pref.uncollapse(&key);
+            }
+            if changed {
+                self.save_subscriptions();
+            }
+        }
+        // Count the elements the rail actually emits above this row: one per
+        // band header, one per cluster header, one per circle.
+        if let Some(idx) = self.rail_row_index(workspace) {
+            self.sidebar_scroll.scroll_to_item(idx);
+        }
+    }
+
     /// Badge for a parked row: the normal live attention, or `needs` for a
     /// circle this window has never looked at (ctl spawns land parked+needs).
     pub(super) fn parked_attention(&self, ws: &str) -> Option<WorkspaceAttention> {
@@ -611,13 +658,12 @@ impl SeanceApp {
             }
         }
         self.selected_workspace = Some(workspace.to_string());
-        // Reveal the selection in the sidebar — ctrl+page cycling can land on
-        // a row scrolled out of the rail. Count the elements the rail actually
-        // emits above this row: one per band header, one per cluster header,
-        // one per circle.
-        if let Some(idx) = self.rail_row_index(workspace) {
-            self.sidebar_scroll.scroll_to_item(idx);
-        }
+        // Reveal the selection in the rail. Scrolling alone isn't enough: a
+        // circle inside a folded band or cluster has no row to scroll TO, so
+        // jumping into one (the sleeping and parked bands start folded) left
+        // the rail sitting wherever it was, showing no sign of where you went.
+        // Unfold first, then scroll.
+        self.reveal_workspace_row(workspace);
         // Selecting a circle clears sticky "done/needs" unread — does NOT bump touch.
         self.workspace_unread.remove(workspace);
         // When entering a circle that was off-screen, zero local revs for its
