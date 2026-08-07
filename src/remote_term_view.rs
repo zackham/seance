@@ -92,6 +92,38 @@ fn spawn_wl_copy(text: &str, primary: bool) -> bool {
     true
 }
 
+/// Read the PRIMARY selection — the middle-click paste source. Mirrors the
+/// copy path: on Wayland prefer `wl-paste` (keeps compositor clipboard traffic
+/// out of the GPUI process, same rationale as `copy_text_to_clipboard`), then
+/// fall back to GPUI's primary-selection read.
+fn read_primary_text(cx: &App) -> Option<String> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if let Ok(out) = Command::new("wl-paste")
+            .args(["--primary", "--no-newline"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        {
+            if out.status.success() {
+                if let Ok(text) = String::from_utf8(out.stdout) {
+                    if !text.is_empty() {
+                        return Some(text);
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        cx.read_from_primary().and_then(|i| i.text())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    {
+        let _ = cx;
+        None
+    }
+}
+
 /// Visible-grid cell coordinate (0-based).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CellPos {
@@ -780,8 +812,20 @@ impl Render for RemoteTerminalView {
             )
             .on_mouse_down(
                 gpui::MouseButton::Middle,
-                cx.listener(|this, ev: &gpui::MouseDownEvent, window, cx| {
-                    this.open_link_at(ev.position, window, cx);
+                cx.listener(|this, _ev: &gpui::MouseDownEvent, window, cx| {
+                    // X11/Wayland convention: middle-click pastes the PRIMARY
+                    // selection (paste lands at the terminal cursor, not the
+                    // click position). Link-opening lives on ctrl+click.
+                    let handle = this.focus_handle.clone();
+                    window.focus(&handle, cx);
+                    if let Some(text) = read_primary_text(cx) {
+                        this.clear_selection();
+                        this.terminal.update(cx, |t, _| {
+                            t.scroll_to_bottom();
+                            t.paste(&text);
+                        });
+                        cx.notify();
+                    }
                 }),
             )
             .child(
