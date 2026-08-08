@@ -86,14 +86,18 @@ impl Pane {
         }
     }
 
-    /// Focus handle for the pane content, if any.
-    pub fn focus_content(&self, window: &mut gpui::Window, cx: &mut gpui::App) {
+    /// Focus the pane content, if it can take keyboard focus. Returns whether
+    /// focus moved: file panes have no focus handle, so a caller responsible
+    /// for landing the keyboard somewhere needs the answer (leaving focus
+    /// where it was strands the keyboard when that handle stops rendering).
+    pub fn focus_content(&self, window: &mut gpui::Window, cx: &mut gpui::App) -> bool {
         match &self.body {
             PaneBody::Remote { view, .. } => {
                 let h = view.read(cx).focus_handle();
                 window.focus(&h, cx);
+                true
             }
-            PaneBody::File { .. } => {}
+            PaneBody::File { .. } => false,
         }
     }
 }
