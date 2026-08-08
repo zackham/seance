@@ -1178,6 +1178,26 @@ impl SeanceApp {
         }
     }
 
+    /// Would the current frame render this pane's content in the tile
+    /// region? Mirrors render_tiles' filter (tiled, not popped, selected
+    /// workspace, zoom shows exactly one). These are the ONLY handles
+    /// keyboard focus may legitimately rest on besides the root: anything
+    /// scarcer (another circle's pane, untiled, popped, hidden by zoom) is
+    /// out of the dispatch tree, where focus silently strands the keyboard.
+    fn pane_content_rendered(&self, p: &Pane) -> bool {
+        if let Some(z) = self.zoomed_slug.as_deref() {
+            if self.panes.iter().any(|q| q.slug == z) {
+                return p.slug == z;
+            }
+        }
+        p.tiled
+            && p.popped.is_none()
+            && self
+                .selected_workspace
+                .as_deref()
+                .is_none_or(|ws| p.workspace == ws)
+    }
+
     /// Put keyboard focus somewhere useful after rename / overlay dismiss /
     /// empty-circle create. Prefer the active pane in the selected workspace;
     /// if the circle is empty, land on the app root so capture chords
@@ -1191,7 +1211,15 @@ impl SeanceApp {
                 .iter()
                 .find(|p| p.slug == slug && ws.as_ref().is_none_or(|w| p.workspace == *w))
             {
-                pane.focus_content(window, cx);
+                if self.pane_content_rendered(pane) && pane.focus_content(window, cx) {
+                    return;
+                }
+                // The active pane can't take the keyboard (file pane, or its
+                // content isn't rendered). Park on the root so capture chords
+                // stay alive — recovery must never focus a handle the frame
+                // doesn't render, or the keyboard strands all over again.
+                let fh = self.focus_handle.clone();
+                window.focus(&fh, cx);
                 return;
             }
         }
@@ -1217,20 +1245,61 @@ impl SeanceApp {
                 if matches!(&self.renaming, Some((RenameTarget::Pane(s), _)) if s == &slug) {
                     return;
                 }
-                pane.focus_content(window, cx);
+                if pane.focus_content(window, cx) {
+                    self.pending_focus = None;
+                    return;
+                }
+                // File pane — nothing focusable. Clear pending and fall
+                // through to recovery so the keyboard doesn't stay stranded
+                // wherever the last circle left it.
                 self.pending_focus = None;
+            } else {
+                // View not ready yet — keep pending for a later frame.
                 return;
             }
-            // View not ready yet — keep pending for a later frame.
-            return;
         }
         // Keep active_slug coherent with the selected workspace (invariant:
         // never no active pane when the workspace has panes).
         self.ensure_active_pane_in_workspace();
-        // Cold launch / dead handle / post-rename: GPUI focus is None →
-        // key events never reach capture or the terminal. Park on the
-        // active pane, or the root handle for empty circles.
-        if window.focused(cx).is_none() {
+        // THE focus invariant, enforced in one place: keyboard focus must
+        // rest on a handle the current frame renders — a visible pane's
+        // terminal, or the root when the active pane can't take keys (file
+        // pane) or the circle is empty. GPUI keeps focus on handles that
+        // left the dispatch tree, and a stranded handle kills capture-phase
+        // key handling outright — every chord dies, only a mouse click
+        // (positional dispatch) revives. Stranded shapes all reduce to
+        // "focus is not on something rendered":
+        //  * None: cold launch, before anything took focus.
+        //  * Root-parked while the active pane could take keys: the
+        //    cold-launch recovery ran BEFORE the daemon's first State push
+        //    (no panes yet) and parked on the root; the pane looks active
+        //    but keys miss the terminal until a click.
+        //  * A dropped handle: a killed pane's terminal or a disposed
+        //    overlay input.
+        //  * A live pane whose content this frame does NOT render: another
+        //    circle's terminal after a workspace switch that landed on a
+        //    file pane (focus_content is a no-op there, so focus stayed
+        //    behind), or an untiled / popped / zoom-hidden pane.
+        let focused = window.focused(cx);
+        let active_pane_focusable = self.active_slug.as_ref().is_some_and(|slug| {
+            self.panes.iter().any(|p| {
+                p.slug == *slug
+                    && matches!(p.body, PaneBody::Remote { .. })
+                    && self.pane_content_rendered(p)
+            })
+        });
+        let recover = match &focused {
+            None => true,
+            Some(f) if *f == self.focus_handle => active_pane_focusable,
+            Some(f) => !self.panes.iter().any(|p| {
+                self.pane_content_rendered(p)
+                    && match &p.body {
+                        PaneBody::Remote { view, .. } => view.read(cx).focus_handle() == *f,
+                        PaneBody::File { .. } => false,
+                    }
+            }),
+        };
+        if recover {
             self.restore_keyboard_focus(window, cx);
         }
     }
@@ -1873,15 +1942,18 @@ impl SeanceApp {
                     let fh = drawer.read(cx).focus_handle(cx);
                     window.focus(&fh, cx);
                 }
-            } else {
+            } else if pane.focus_content(window, cx) {
                 // Eager focus for the common case + a render-time backstop:
                 // when this navigation just switched workspaces, the target
                 // tile may not exist yet — pending_focus re-applies once it
                 // renders (ensure_keyboard_focus), killing the recurring
                 // "jumped but can't type until I click" class.
-                pane.focus_content(window, cx);
                 self.pending_focus = Some(slug.to_string());
             }
+            // File pane: no handle to focus. Leave focus where it is —
+            // render-side recovery (ensure_keyboard_focus) keeps a same-
+            // circle terminal, and parks on the root when the previous
+            // handle stops rendering (workspace switch).
         }
         cx.notify();
     }
