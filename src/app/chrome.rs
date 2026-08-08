@@ -1047,6 +1047,7 @@ pub(super) fn render_help() -> gpui::AnyElement {
         .child(row("ctrl+shift+f", "jump to last failed shell command"))
         .child(row("ctrl+pgup / pgdn", "previous / next workspace (sidebar order, wraps)"))
         .child(row("ctrl+shift+pgup / pgdn", "previous / next pane in this workspace"))
+        .child(row("ctrl+shift+arrows", "navigate panes spatially (grid directions)"))
         .child(row("escape", "dismiss whisper / palette / unzoom"))
         .child(section("terminal focus"))
         .child(row("ctrl+shift+c / v", "copy selection / paste"))
