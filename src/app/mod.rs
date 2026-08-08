@@ -1230,7 +1230,38 @@ impl SeanceApp {
         // Cold launch / dead handle / post-rename: GPUI focus is None →
         // key events never reach capture or the terminal. Park on the
         // active pane, or the root handle for empty circles.
-        if window.focused(cx).is_none() {
+        //
+        // Beyond None, two stale-focus shapes strand the keyboard (GPUI
+        // keeps focus on handles that left the dispatch tree — capture
+        // never runs, so even the recovery chords are dead):
+        //  * Root-parked with panes: the cold-launch None-recovery runs
+        //    BEFORE the daemon's first State push (no panes yet) and parks
+        //    on the root; once the push lands an active pane, focus is
+        //    Some(root) so the None check never fires again — the pane
+        //    looks active but keys miss the terminal until a click. Root
+        //    parking is only ever deliberate for pane-less circles.
+        //  * A handle we don't recognize: a killed pane's terminal (the
+        //    view is dropped with the pane) or a disposed overlay input.
+        //    The only legitimate focus targets when this code runs (the
+        //    palette / rename / whisper / flip / quicklaunch guards
+        //    already returned) are the root and live panes' terminals —
+        //    anything else is stale, take the keyboard back.
+        let focused = window.focused(cx);
+        let ws = self.selected_workspace.clone();
+        let active_pane_present = self.active_slug.as_ref().is_some_and(|slug| {
+            self.panes
+                .iter()
+                .any(|p| p.slug == *slug && ws.as_ref().is_none_or(|w| p.workspace == *w))
+        });
+        let recover = match &focused {
+            None => true,
+            Some(f) if *f == self.focus_handle => active_pane_present,
+            Some(f) => !self.panes.iter().any(|p| match &p.body {
+                PaneBody::Remote { view, .. } => view.read(cx).focus_handle() == *f,
+                PaneBody::File { .. } => false,
+            }),
+        };
+        if recover {
             self.restore_keyboard_focus(window, cx);
         }
     }
