@@ -5,10 +5,22 @@
 //! Pure state — no rendering lives here (the sidebar/overview views call
 //! these to compute their layout).
 
+use std::time::{Duration, Instant};
+
 use gpui::{Context, Window};
 
 use super::util::now_ms;
 use seance_core::grouping::{Section, SectionRow};
+
+/// How long the sidebar banish × stays armed after a first click. Matches the
+/// web client's `KILL_CONFIRM_MS` so both clients feel the same.
+pub(super) const BANISH_ARM: Duration = Duration::from_millis(2000);
+
+/// Is `ws` the armed circle, with the arm still live at `now`? Pure so the
+/// two-click window is testable without leaning on a real clock.
+pub(super) fn banish_arm_live(armed: Option<&(String, Instant)>, ws: &str, now: Instant) -> bool {
+    armed.is_some_and(|(w, at)| w == ws && now.duration_since(*at) < BANISH_ARM)
+}
 
 /// Coarse one-unit relative time for sidebar labels.
 pub(super) fn rel_label(delta_ms: u64) -> String {
@@ -968,6 +980,44 @@ impl SeanceApp {
     }
 
     /// Kill every pane in a workspace, then drop the workspace itself.
+    /// Sidebar banish × click. Banishing kills every pane's PTY and nothing
+    /// brings them back, so a bare click only *arms* the ×; the kill needs a
+    /// second click on the same circle inside `BANISH_ARM`.
+    pub(super) fn banish_click(
+        &mut self,
+        workspace: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if banish_arm_live(self.banish_armed.as_ref(), workspace, Instant::now()) {
+            self.banish_armed = None;
+            self.kill_workspace(workspace, window, cx);
+            return;
+        }
+        // Arming a different circle replaces the old arm, so only ever one ×
+        // is hot.
+        self.banish_armed = Some((workspace.to_string(), Instant::now()));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BANISH_ARM).await;
+            if let Some(this) = this.upgrade() {
+                this.update(cx, |app: &mut SeanceApp, cx| {
+                    // Only clear a *stale* arm — a click that re-armed while
+                    // this timer slept owns the × now.
+                    if app
+                        .banish_armed
+                        .as_ref()
+                        .is_some_and(|(_, at)| at.elapsed() >= BANISH_ARM)
+                    {
+                        app.banish_armed = None;
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn kill_workspace(
         &mut self,
         workspace: &str,
@@ -999,7 +1049,7 @@ impl SeanceApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{NavHistory, NAV_HISTORY_MAX};
+    use super::*;
 
     /// Drive the history the way the app does: every selection change is
     /// folded in by the render-time observer, including the ones our own
@@ -1107,5 +1157,29 @@ mod tests {
             nav.back(all).as_deref(),
             Some(format!("c{}", NAV_HISTORY_MAX + 8).as_str())
         );
+    }
+
+    #[test]
+    fn banish_arm_is_per_circle_and_expires() {
+        let now = Instant::now();
+        let armed = Some(("circle-7".to_string(), now));
+
+        // Live only for the circle actually armed, and only inside the window.
+        assert!(banish_arm_live(armed.as_ref(), "circle-7", now));
+        assert!(banish_arm_live(
+            armed.as_ref(),
+            "circle-7",
+            now + BANISH_ARM - Duration::from_millis(1)
+        ));
+        assert!(!banish_arm_live(armed.as_ref(), "circle-2", now));
+
+        // Dead on the boundary, and a never-clicked × is never live — so the
+        // second click can only land on the circle the first one named.
+        assert!(!banish_arm_live(
+            armed.as_ref(),
+            "circle-7",
+            now + BANISH_ARM
+        ));
+        assert!(!banish_arm_live(None, "circle-7", now));
     }
 }

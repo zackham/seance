@@ -30,7 +30,7 @@ use super::util::{
     selected_row_fill, sidebar_press_no_select, tip, tip_s, ui_debug, working_spinner_glyph,
     DraggedPane,
 };
-use super::workspaces::WorkspaceAttention;
+use super::workspaces::{banish_arm_live, WorkspaceAttention};
 use super::{RenameTarget, SeanceApp};
 
 impl SeanceApp {
@@ -927,18 +927,36 @@ impl SeanceApp {
                             .child(a.label())
                     })
                 })
-                .child(
+                .child({
                     // Banish ×: revealed only while the row is hovered
-                    // (group-hover), so idle rows stay quiet.
+                    // (group-hover), so idle rows stay quiet. A first click
+                    // only arms it — armed, it names the damage ("banish? 3")
+                    // and stays lit until a second click or BANISH_ARM.
+                    let armed = banish_arm_live(
+                        self.banish_armed.as_ref(),
+                        &workspace,
+                        std::time::Instant::now(),
+                    );
+                    let panes = self
+                        .panes
+                        .iter()
+                        .filter(|p| p.workspace == workspace)
+                        .count();
                     div()
                         .id(SharedString::from(format!("ws-banish-{workspace}")))
                         .flex_none()
                         .px_1()
                         .rounded_sm()
                         .text_xs()
-                        .text_color(gpui::transparent_black())
-                        .group_hover(SharedString::from(format!("wsgrp-{workspace}")), |s| {
-                            s.text_color(SeancePalette::text_faint())
+                        .when(!armed, |d| {
+                            d.text_color(gpui::transparent_black()).group_hover(
+                                SharedString::from(format!("wsgrp-{workspace}")),
+                                |s| s.text_color(SeancePalette::text_faint()),
+                            )
+                        })
+                        .when(armed, |d| {
+                            d.text_color(SeancePalette::danger())
+                                .bg(SeancePalette::surface())
                         })
                         .hover(|s| {
                             s.text_color(SeancePalette::danger())
@@ -948,12 +966,20 @@ impl SeanceApp {
                         .on_click({
                             let ws = workspace.clone();
                             cx.listener(move |this, _, window, cx| {
-                                this.kill_workspace(&ws, window, cx);
+                                this.banish_click(&ws, window, cx);
                             })
                         })
-                        .tooltip(tip("banish workspace (kill all panes)"))
-                        .child("×"),
-                )
+                        .tooltip(tip(if armed {
+                            "click again to banish — kills every pane in this circle"
+                        } else {
+                            "banish workspace (kill all panes)"
+                        }))
+                        .child(if armed {
+                            format!("banish? {panes}")
+                        } else {
+                            "×".to_string()
+                        })
+                })
                 .child({
                     // Fixed width, right-aligned — headers put their counts in
                     // the same column, so the whole rail has one hard right
