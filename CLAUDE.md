@@ -109,6 +109,10 @@ src/sysopen.rs         portability helpers + THE link-open seam (open_detached
 src/scrylink.rs        route our own hosts (localhost, ham.xyz) to scry's
                        control socket, workspace `general`; fails to the
                        default browser on anything unexpected
+src/runtime/outqueue.rs per-connection send queue; grid frames COALESCE (one
+                       pending frame per pane, damage row-sets unioned against
+                       the newest snapshot). Semantic events stay strict FIFO.
+                       Encoding happens at drain, not at push
 src/daemon/fsbridge.rs daemon side of the fs bridge + host widget poller
 src/daemon/prwatch.rs  external PR-poller ingest (`pr_watch.json`, mtime-polled)
 src/remote_term*.rs    daemon-backed terminal model + GPUI view

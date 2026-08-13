@@ -19,6 +19,51 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ### Fixed
 
+- **Grid frames coalesce per connection, so a bad link no longer makes you
+  watch a backlog drain.** The daemon handed every push to an unbounded
+  `mpsc` feeding a blocking socket write. On a healthy link that's free — the
+  queue is always empty. On a degraded one it was the whole problem: the write
+  blocks, the engine keeps generating frames at up to 62fps, and they pile up
+  with no ceiling, so every frame that arrives is already stale. Measured on a
+  bad wifi association: `key→grid-apply` p50 **1053ms**, max **8355ms**, while
+  every GUI-side stage stayed under a millisecond — `bridge age` 0.0ms, `grid
+  apply` 0.2ms, `gpui draw` 7.5ms. The GUI was fine. It was drinking from a
+  queue.
+
+  `runtime::outqueue` keeps **one pending frame per pane** and merges into it.
+  The merge is exact, not lossy, which is what makes it cheap: damage is a
+  list of dirty *row indices* and the payload is the current snapshot
+  restricted to those rows — not a diff against a base. So composing N queued
+  frames is "union the row sets, encode against the newest snapshot". No delta
+  chain to break, and therefore **no full-frame resync** — which would have
+  meant sending *more* bytes exactly when the link can least carry them.
+
+  Healthy link: the queue is empty when each frame arrives, nothing merges,
+  behavior is identical to before. Degraded: the backlog collapses to the
+  newest state per pane. Recovery is immediate and automatic — there's no
+  threshold, no hysteresis, and deliberately **no rate controller**, because
+  once the queue can't back up the effective frame rate already *is* the
+  link's measured capacity. A controller on top of that is two feedback loops
+  fighting.
+
+  Promotes to a full frame on a reflow (row indices stop naming the same
+  cells) and once the union passes half the rows — the same threshold
+  `broadcast_grid` already uses to pick damage over full in the first place.
+
+  Encoding moved to drain time, so a backed-up connection encodes once per
+  frame it actually sends instead of once per frame it never sends. The CPU
+  saving lands on the machine that's already struggling.
+
+  Only grids coalesce. `State`, `Ack`, `PaneSpawned`, `RailPrefs` hold strict
+  FIFO — dropping one is a correctness bug. `State` was left uncoalesced on
+  purpose despite being a complete latest-wins snapshot: it fires on discrete
+  events (exit, title, spawn), not on the output path, so it isn't a volume
+  problem, and a smaller change is the right one to make to a daemon someone
+  else now depends on.
+
+  Daemon-side only — no wire change, so `seance upgrade` alone delivers this
+  to already-running GUIs.
+
 - **⌘Q quits the macOS app.** Shipping the `.app` in 0.23.0 removed the only
   way to stop seance without adding one: there's no terminal to ctrl-C, and
   closing the window doesn't quit on macOS. The app had no menu bar at all, so

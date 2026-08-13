@@ -3,7 +3,7 @@
 //! `handle_gui` (GuiRequest dispatch).
 
 use std::collections::HashSet;
-use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use serde_json::json;
 use super::helpers::{base64_decode, now_ms};
 use super::{Engine, EnginePane, SpawnSpec};
 use crate::events;
+use crate::runtime::outqueue::OutQueue;
 use crate::runtime::protocol::*;
 use crate::runtime::pty_session::SessionEvent;
 use crate::runtime::snapshot::{
@@ -25,7 +26,7 @@ use crate::runtime::snapshot::{
 /// selection/focus. Two windows may subscribe to the same workspace.
 pub(super) struct GuiConn {
     id: String,
-    tx: Sender<GuiEvent>,
+    out: Arc<OutQueue>,
     selected_workspace: Option<String>,
     focused_pane: Option<String>,
     overview: bool,
@@ -45,12 +46,12 @@ pub(super) struct LastGridFrame {
 }
 
 impl Engine {
-    pub fn register_gui(&mut self, tx: Sender<GuiEvent>) -> String {
+    pub fn register_gui(&mut self, out: Arc<OutQueue>) -> String {
         let id = format!("w{}", self.next_window_seq);
         self.next_window_seq = self.next_window_seq.wrapping_add(1).max(1);
         self.gui_conns.push(GuiConn {
             id: id.clone(),
-            tx,
+            out,
             selected_workspace: None,
             focused_pane: None,
             overview: false,
@@ -102,7 +103,7 @@ impl Engine {
         let alive: Vec<String> = self
             .gui_conns
             .iter()
-            .filter(|c| c.tx.send(GuiEvent::Pong).is_ok())
+            .filter(|c| c.out.push_event(GuiEvent::Pong))
             .map(|c| c.id.clone())
             .collect();
         let dead: Vec<String> = self
@@ -117,13 +118,13 @@ impl Engine {
     }
 
     pub fn broadcast(&mut self, ev: GuiEvent) {
-        self.gui_conns.retain(|c| c.tx.send(ev.clone()).is_ok());
+        self.gui_conns.retain(|c| c.out.push_event(ev.clone()));
     }
 
     fn send_to(&mut self, window_id: &str, ev: GuiEvent) {
         self.gui_conns.retain(|c| {
             if c.id == window_id {
-                c.tx.send(ev.clone()).is_ok()
+                c.out.push_event(ev.clone())
             } else {
                 true
             }
@@ -135,10 +136,19 @@ impl Engine {
     /// gets it; there is no broadcast fallback, an unsubscribed workspace is
     /// deliberately silent on the wire (the recorder tap still runs — see
     /// `handle_session_event`).
-    fn send_grid_to_subscribers(&mut self, pane: &str, ev: GuiEvent) {
-        for id in self.conns_streaming(pane) {
-            self.send_to(&id, ev.clone());
-        }
+    fn send_grid_to_subscribers(
+        &mut self,
+        pane: &str,
+        snap: Arc<GridSnapshot>,
+        dirty: Option<Vec<u16>>,
+    ) {
+        // Queued unencoded: each connection coalesces independently (a slow
+        // link merges, a fast one doesn't) and the winning frame is encoded
+        // once, at drain time, by that connection's writer.
+        let ids = self.conns_streaming(pane);
+        self.gui_conns.retain(|c| {
+            !ids.iter().any(|id| id == &c.id) || c.out.push_grid(Arc::clone(&snap), dirty.clone())
+        });
     }
 
     /// Window ids whose subscription/selection makes them want `pane`'s frames.
@@ -418,8 +428,7 @@ impl Engine {
         }
         crate::latency_probe::complete("d_input", &snap.pane, "daemon input→gridpush");
         let pane = snap.pane.clone();
-        let ev = Self::grid_event(snap, damage.as_deref());
-        self.send_grid_to_subscribers(&pane, ev);
+        self.send_grid_to_subscribers(&pane, Arc::new(snap), damage);
     }
 
     /// The pane's push rate = the FASTEST any interested connection wants

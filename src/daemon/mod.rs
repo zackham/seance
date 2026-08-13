@@ -17,6 +17,7 @@ pub mod sleepsweep;
 
 use crate::control::{self, ControlRequest, ControlResponse};
 use crate::runtime::engine::{Engine, OwnedFdAdopt};
+use crate::runtime::outqueue::OutQueue;
 use crate::runtime::protocol::{GuiEvent, GuiRequest, HandoffBundle, Hello};
 use crate::runtime::{daemon_pid_path, SessionEvent, SharedEngine};
 
@@ -376,30 +377,44 @@ fn serve_gui(
     engine: SharedEngine,
 ) -> Result<()> {
     let writer = Arc::new(Mutex::new(writer));
-    let (tx, rx) = mpsc::channel::<GuiEvent>();
+    // Coalescing queue, not an unbounded channel: a blocked socket write must
+    // not let grid frames pile up unbounded behind it, or the client ends up
+    // watching a backlog drain instead of the present. See runtime::outqueue.
+    let out = Arc::new(OutQueue::new());
 
     // Register for broadcasts — one connection = one window.
     let window_id = {
         let mut eng = engine.lock().unwrap();
-        eng.register_gui(tx.clone())
+        eng.register_gui(Arc::clone(&out))
     };
 
     // Fresh window gets the latest host widgets without waiting a poll tick.
     if let Some(widgets) = fsbridge::latest_host_widgets() {
-        let _ = tx.send(GuiEvent::HostWidgets { widgets });
+        out.push_event(GuiEvent::HostWidgets { widgets });
     }
 
     // Writer thread for push events.
     {
         let writer = Arc::clone(&writer);
+        let out = Arc::clone(&out);
         thread::spawn(move || {
-            while let Ok(ev) = rx.recv() {
-                let Ok(json) = serde_json::to_string(&ev) else {
-                    continue;
-                };
-                let mut w = writer.lock().unwrap();
-                if writeln!(w, "{json}").is_err() {
-                    break;
+            loop {
+                let batch = out.drain_blocking();
+                if batch.is_empty() {
+                    break; // queue closed
+                }
+                for item in batch {
+                    // Encoding here rather than at push time is the point: a
+                    // backed-up connection encodes once per frame it actually
+                    // sends, not once per frame it never sends.
+                    let Ok(json) = serde_json::to_string(&item.into_event()) else {
+                        continue;
+                    };
+                    let mut w = writer.lock().unwrap();
+                    if writeln!(w, "{json}").is_err() {
+                        out.close();
+                        return;
+                    }
                 }
             }
         });
@@ -423,20 +438,20 @@ fn serve_gui(
                 let ev = GuiEvent::Error {
                     message: format!("bad gui request: {e}"),
                 };
-                let _ = tx.send(ev);
+                out.push_event(ev);
                 continue;
             }
         };
         // Fs bridge ops run on their own thread: disk / host-select latency
         // must never stall the input pipeline. Correlated by id.
         if let GuiRequest::Fs { id, fs } = req {
-            let tx = tx.clone();
+            let out = Arc::clone(&out);
             let engine = Arc::clone(&engine);
             thread::Builder::new()
                 .name("seance-fs-op".into())
                 .spawn(move || {
                     let (ok, data, error) = fsbridge::run(fs, &engine);
-                    let _ = tx.send(GuiEvent::FsResult {
+                    out.push_event(GuiEvent::FsResult {
                         id,
                         ok,
                         data,
@@ -465,7 +480,7 @@ fn serve_gui(
         }
         drop(eng);
         if let Some(ev) = reply {
-            let _ = tx.send(ev);
+            out.push_event(ev);
         }
         if is_bye {
             // Bye already ran unregister_gui; drop the connection.

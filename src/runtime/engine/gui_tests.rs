@@ -1,17 +1,18 @@
 //! Hermetic `handle_gui` tests for the SUBSCRIPTION model (0.12): Attach
 //! seeding, Subscribe/Unsubscribe, auto-subscribe on select/spawn/create/fork,
 //! the grid-rate matrix, and the recorder invariant. Driven through a fake
-//! `GuiConn` (an in-memory mpsc channel registered via `register_gui`). No real
+//! `GuiConn` (an in-memory `OutQueue` registered via `register_gui`). No real
 //! sockets, no PTYs (stub panes only), `SEANCE_STATE_DIR` guarded by
 //! `test_env_lock` via `with_test_state_dir`.
 
 use super::helpers::now_ms;
 use super::tests::with_test_state_dir;
 use super::*;
+use crate::runtime::outqueue::OutQueue;
 use crate::runtime::protocol::{GuiEvent, GuiRequest};
 use crate::runtime::pty_session::SessionEvent;
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 
 fn temp_scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -24,31 +25,40 @@ fn temp_scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// A fake GUI window: a registered mpsc receiver we can drain and inspect.
-/// Keeping the `Receiver` alive is what makes `prune_dead_guis` treat the
-/// window as live (it liveness-probes via `tx.send(Pong)`).
+/// A fake GUI window: a registered `OutQueue` we can drain and inspect.
+/// Keeping it alive is what makes `prune_dead_guis` treat the window as live
+/// (it liveness-probes by pushing a `Pong`); dropping it closes the queue,
+/// which is this harness's way of saying "that window died".
 struct FakeGui {
     id: String,
-    rx: Receiver<GuiEvent>,
+    out: Arc<OutQueue>,
+}
+
+impl Drop for FakeGui {
+    fn drop(&mut self) {
+        self.out.close();
+    }
 }
 
 impl FakeGui {
     fn attach_to(eng: &mut Engine) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let id = eng.register_gui(tx);
-        FakeGui { id, rx }
+        let out = Arc::new(OutQueue::new());
+        let id = eng.register_gui(Arc::clone(&out));
+        FakeGui { id, out }
     }
 
     /// Drain everything queued so far, dropping the `Pong` liveness probes that
     /// `push_state_to_all` injects on every broadcast.
+    ///
+    /// Grid frames encode here, the same as the daemon's writer does — so a
+    /// test sees exactly the bytes a real client would.
     fn drain(&self) -> Vec<GuiEvent> {
-        let mut out = Vec::new();
-        while let Ok(ev) = self.rx.try_recv() {
-            if !matches!(ev, GuiEvent::Pong) {
-                out.push(ev);
-            }
-        }
-        out
+        self.out
+            .drain_now()
+            .into_iter()
+            .map(|o| o.into_event())
+            .filter(|ev| !matches!(ev, GuiEvent::Pong))
+            .collect()
     }
 
     /// The most recent `State` event pushed to this window (after draining).
