@@ -91,6 +91,26 @@ fn run_inner(op: FsOp, engine: &SharedEngine) -> Result<Value, String> {
             atomic_write(&path, body.as_bytes()).map_err(|e| format!("layout save: {e}"))?;
             Ok(json!({}))
         }
+        FsOp::SubsLoad => {
+            let path = subs_path();
+            match std::fs::read_to_string(&path) {
+                Ok(s) => Ok(json!({ "json": s })),
+                Err(_) => Ok(json!({ "json": null })),
+            }
+        }
+        FsOp::SubsSave { json: body } => {
+            let path = subs_path();
+            atomic_write(&path, body.as_bytes()).map_err(|e| format!("subs save: {e}"))?;
+            // Persisting is only half of it: every other window is now
+            // rendering a rail that disagrees with the one on disk. Push
+            // rather than wait for their next attach — a pin made at the desk
+            // should land on the laptop while both are open, which is the
+            // whole point of the daemon owning this.
+            if let Ok(mut eng) = engine.lock() {
+                eng.broadcast(GuiEvent::RailPrefs { json: body });
+            }
+            Ok(json!({}))
+        }
         FsOp::Shell { cmd } => {
             let out = std::process::Command::new("sh")
                 .args(["-lc", &cmd])
@@ -145,14 +165,25 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Shared GUI layout lives beside the daemon's state.json.
 fn layout_path() -> PathBuf {
+    state_dir_file("layout.json")
+}
+
+/// The shared rail arrangement, beside the layout. Note this is the daemon's
+/// *state* dir, not `~/.config/seance/` where the pre-0.23 per-GUI file lived
+/// — a thin client writing the config path would have written its own disk.
+fn subs_path() -> PathBuf {
+    state_dir_file("subscriptions.json")
+}
+
+fn state_dir_file(name: &str) -> PathBuf {
     if let Ok(dir) = std::env::var("SEANCE_STATE_DIR") {
         if !dir.is_empty() {
             if let Ok(expanded) = shellexpand::full(&dir) {
-                return PathBuf::from(expanded.as_ref()).join("layout.json");
+                return PathBuf::from(expanded.as_ref()).join(name);
             }
         }
     }
-    PathBuf::from(shellexpand::tilde("~/.local/share/seance/layout.json").as_ref())
+    PathBuf::from(shellexpand::tilde("~/.local/share/seance/").as_ref()).join(name)
 }
 
 // ── daemon-side host widget poller ─────────────────────────────────────────

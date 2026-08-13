@@ -13,7 +13,7 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.22.0
+**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.23.0
 
 Release notes: [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -146,6 +146,7 @@ Upgrade load test: `./scripts/upgrade-load-test.sh` (upgrades live daemon)
 | state | `~/.local/share/seance/state.json` |
 | scratchpads | `~/.local/share/seance/scratch/<slug>.md` |
 | layout weights | `~/.local/share/seance/layout.json` |
+| rail arrangement | `~/.local/share/seance/subscriptions.json` (daemon-owned; every window shares it) |
 | events | `~/.local/share/seance/events.jsonl` |
 | socket | `$XDG_RUNTIME_DIR/seance.sock` |
 

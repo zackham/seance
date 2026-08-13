@@ -1,13 +1,17 @@
-//! Per-GUI active/parked presentation state (subscriptions phase 2).
+//! Active/parked/pinned rail arrangement — the shape of this module, not its
+//! storage. **The daemon owns the arrangement** (`FsOp::SubsLoad/SubsSave`,
+//! beside `layout.json` in its state dir), so the circles you keep in front of
+//! you follow you to any window: desk, mac thin client, browser. Changing it
+//! anywhere pushes [`GuiEvent::RailPrefs`] to every other window.
 //!
-//! The daemon owns the canonical workspace list and this connection's
-//! subscription set; *which* of those the human wants in the sidebar's active
-//! band is presentation state belonging to this GUI alone. It is persisted at
-//! `~/.config/seance/subscriptions.json` (or `$XDG_CONFIG_HOME/seance/`) —
-//! same local-config seam as `launch.json`, deliberately outside the
-//! thin-client fs-bridge invariant (it affects nothing but this window's
-//! chrome, and it must be readable *before* a daemon connection exists so the
-//! `Attach` seed can carry it).
+//! `~/.config/seance/subscriptions.json` survives as a **local seed cache**,
+//! not the source of truth. It exists for one reason: the `Attach` seed has to
+//! be readable *before* a daemon connection exists, and attaching with the
+//! arrangement we last saw beats attaching to everything and unsubscribing 40
+//! circles a beat later. The daemon's copy is read straight after connecting
+//! and wins any disagreement.
+//!
+//! Was per-GUI local state through 0.22; see the 0.23 CHANGELOG entry.
 //!
 //! Shape: `{ "active": [...], "seen": [...], "pinned": [...] }`.
 //! - `active` — workspaces rendered in the normal sidebar band; everything
@@ -61,11 +65,24 @@ pub fn config_path() -> PathBuf {
     PathBuf::from(shellexpand::tilde("~/.config/seance/subscriptions.json").as_ref())
 }
 
-/// `None` = no persisted list yet → migrate (Attach with `subscriptions: None`
+/// `None` = no cached list yet → migrate (Attach with `subscriptions: None`
 /// so the daemon seeds everything, then adopt what it sends).
 pub fn load() -> Option<SubscriptionsPref> {
     let bytes = std::fs::read_to_string(config_path()).ok()?;
     serde_json::from_str(&bytes).ok()
+}
+
+/// Decode a blob handed over by the daemon (`SubsLoad`, `RailPrefs`).
+/// `None` when it isn't readable as an arrangement — the caller keeps what it
+/// has rather than blanking a rail over one bad byte.
+pub fn parse(json: &str) -> Option<SubscriptionsPref> {
+    serde_json::from_str(json).ok()
+}
+
+/// Encode for the daemon. `None` only on a serializer failure, which cannot
+/// happen for this shape — the caller simply skips the push.
+pub fn encode(pref: &SubscriptionsPref) -> Option<String> {
+    serde_json::to_string_pretty(pref).ok()
 }
 
 pub fn save(pref: &SubscriptionsPref) {
@@ -248,6 +265,42 @@ mod tests {
         assert!(json.contains(r#""active":["cadence","lab"]"#), "{json}");
         let back: SubscriptionsPref = serde_json::from_str(&json).unwrap();
         assert_eq!(back, pref);
+    }
+
+    /// The wire codec the daemon hands back over `SubsLoad` / `RailPrefs`.
+    /// Every band has to survive the trip — a pin that arrives as an ordinary
+    /// active circle is the bug this guards.
+    #[test]
+    fn daemon_blob_roundtrips_every_band() {
+        let mut pref = SubscriptionsPref::default();
+        pref.pin("growth");
+        pref.activate("lab");
+        pref.park("old");
+        pref.toggle_collapsed("active/mtg");
+        let back = parse(&encode(&pref).unwrap()).unwrap();
+        assert_eq!(back, pref);
+        assert!(back.is_pinned("growth"));
+        assert!(back.is_collapsed("active/mtg"));
+    }
+
+    /// A blob we can't read means "keep the rail you have". Returning a
+    /// default here would blank every circle out of the sidebar on one bad
+    /// byte, which is worse than ignoring the push.
+    #[test]
+    fn unreadable_daemon_blob_is_none_not_default() {
+        assert!(parse("").is_none());
+        assert!(parse("not json").is_none());
+        assert!(parse("[1,2,3]").is_none());
+    }
+
+    /// A daemon that predates the move sends nothing; the arrangement a
+    /// window already cached locally has to remain usable as the seed.
+    #[test]
+    fn pre_move_local_cache_still_parses_as_a_daemon_blob() {
+        let blob = r#"{"active":["lab"],"seen":["lab"],"pinned":["lab"]}"#;
+        let back = parse(blob).unwrap();
+        assert_eq!(back.active, set(&["lab"]));
+        assert!(back.is_pinned("lab"));
     }
 
     #[test]

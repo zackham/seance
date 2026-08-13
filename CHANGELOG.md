@@ -17,14 +17,47 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
-Seance is an app on macOS, not just a command.
+## [0.23.0] — 2026-08-13
 
-Deliberately **not** a version bump: the version doubles as the wire-compat
-token (the daemon refuses any ctl/GUI/web client that isn't an exact match),
-and nothing here touches the wire. Bumping it to ship a packaging script would
-have forced a web-dist rebuild, a daemon upgrade and a GUI restart on every
-box — and broken the mac thin client against a `desk` daemon still on 0.22.0
-until each one was redone.
+Your rail follows you to the other machine. And seance is an app on macOS.
+
+### Changed
+
+- **The daemon owns the rail arrangement.** Active/parked, pins, `seen`, and
+  fold state moved from each client's `~/.config/seance/subscriptions.json`
+  into the daemon's state dir beside `layout.json`, reached by two new
+  `FsOp`s (`SubsLoad` / `SubsSave`). Open a window anywhere — desk, mac thin
+  client — and the same circles are there, in the same bands, with the same
+  ones pinned. Pin at the desk and the laptop's rail updates while you watch:
+  a save broadcasts `GuiEvent::RailPrefs` to every attached window.
+
+  This reverses a deliberate 0.12 decision, so it's worth saying why it was
+  wrong. The old reasoning was that the active band is *this window's chrome*
+  — true of tiling, which is why layout went daemon-side, and false of the
+  rail. Which circles you keep in front of you is a fact about what you're
+  working on, not about which machine you opened. Eleven pinned circles at
+  the desk and a blank rail on the laptop wasn't a second view of the work,
+  it was the arrangement failing to exist anywhere but one box.
+
+  The local file survives as a **seed cache**, demoted from source of truth.
+  It's read before connecting because `Attach` needs a seed, and opening on
+  the arrangement you last saw beats attaching to all 47 circles and
+  unsubscribing 35 of them a beat later. The daemon's copy is read straight
+  after connecting and wins.
+
+  Two edges worth knowing. A window that adopts the daemon's arrangement is
+  still *attached* on whatever it seeded with, so the next `State` pushes the
+  arrangement onto the connection rather than folding the connection's
+  subscriptions into it — otherwise a fresh window, which attaches to
+  everything, would bloom its rail back to every circle the instant it
+  opened. And the broadcast goes to every window including the sender, so
+  receiving one adopts without saving; saving in response would put one pin
+  into an endless round trip.
+
+  A daemon with no copy yet is seeded by the first window that connects,
+  which donates its arrangement instead of everyone starting from a blank
+  rail. Pushes run off the UI thread — pinning a circle shouldn't wait on a
+  socket, least of all over ssh from the mac.
 
 ### Added
 

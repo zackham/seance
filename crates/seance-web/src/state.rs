@@ -881,6 +881,10 @@ impl ClientState {
             GuiEvent::Error { message } => Applied::Error { message },
             GuiEvent::Kicked { by } => Applied::Kicked { by },
             GuiEvent::Ack { .. } | GuiEvent::FsResult { .. } => Applied::Nothing,
+            // The browser client has no active/parked rail of its own to
+            // rearrange — it renders what it is subscribed to. Knowing the
+            // native windows' arrangement changed tells it nothing to draw.
+            GuiEvent::RailPrefs { .. } => Applied::Nothing,
             GuiEvent::HostWidgets { widgets } => {
                 if let Ok(parsed) = serde_json::from_value::<Vec<HostWidget>>(widgets) {
                     self.host_widgets = parsed;

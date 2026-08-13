@@ -173,9 +173,14 @@ pub struct SeanceApp {
     /// Persisted per-GUI presentation state: which workspaces sit in the
     /// active band, and which this window has ever looked at (`seen`).
     subs_pref: crate::subscriptions_pref::SubscriptionsPref,
-    /// A persisted list was found (or the first State already seeded one).
+    /// A cached list was found (or the first State already seeded one).
     /// Until then, the first State's subscription set becomes the active list.
     subs_seeded: bool,
+    /// We adopted the daemon's arrangement and this connection is still
+    /// attached on a different set. Inverts the next `State`: bring the
+    /// connection to the arrangement instead of folding the connection's
+    /// subscriptions into it. Cleared once that reconcile has run.
+    rail_from_daemon: bool,
     /// Workspaces parked locally whose `Unsubscribe` may still be in flight —
     /// a State composed before it landed must not re-activate them.
     park_pending: std::collections::BTreeSet<String>,
@@ -405,6 +410,7 @@ impl SeanceApp {
             subscriptions: Vec::new(),
             subs_pref: pref.unwrap_or_default(),
             subs_seeded,
+            rail_from_daemon: false,
             park_pending: std::collections::BTreeSet::new(),
             workspace_touch: std::collections::HashMap::new(),
             workspace_activity: std::collections::HashMap::new(),
@@ -464,6 +470,33 @@ impl SeanceApp {
         app.split_ratio = split;
         app.pane_weights = weights;
         app.row_weights = row_weights;
+
+        // The rail arrangement is daemon-owned too (0.23). The local file read
+        // before connecting was only the `Attach` seed; whatever the daemon
+        // holds is the arrangement, and a window that disagrees is the one
+        // that's wrong. Same blocking-call-at-boot shape as the layout above.
+        if !app.empty_window {
+            match app.client.subs_load() {
+                Ok(Some(json)) => {
+                    if let Some(pref) = crate::subscriptions_pref::parse(&json) {
+                        app.subs_pref = pref;
+                        // Don't let the first `State` seed or fold anything in:
+                        // this connection attached on a different set, so the
+                        // connection follows the arrangement, not vice versa.
+                        app.subs_seeded = true;
+                        app.rail_from_daemon = true;
+                        crate::subscriptions_pref::save(&app.subs_pref);
+                        app.client
+                            .set_subscription_seed(app.subs_pref.active.iter().cloned().collect());
+                    }
+                }
+                // A daemon with no copy yet — first window up after the
+                // upgrade donates its arrangement instead of everyone
+                // starting from a blank rail.
+                Ok(None) => app.push_rail_to_daemon(),
+                Err(e) => eprintln!("[seance gui] rail prefs load failed: {e}"),
+            }
+        }
 
         // Host widgets are polled daemon-side and arrive as HostWidgets
         // pushes (thin clients see the daemon machine's chips) — no GUI poll.
@@ -1026,6 +1059,24 @@ impl SeanceApp {
             }
             GuiEvent::Error { message } => {
                 eprintln!("[seance gui] daemon error: {message}");
+            }
+            GuiEvent::RailPrefs { json } => {
+                // Another window (or this one) changed the shared arrangement.
+                // Adopt wholesale and DO NOT save: the daemon broadcasts to
+                // every window including the sender, so saving here would put
+                // one pin into an endless round trip.
+                if let Some(pref) = crate::subscriptions_pref::parse(&json) {
+                    if pref != self.subs_pref {
+                        self.subs_pref = pref;
+                        crate::subscriptions_pref::save(&self.subs_pref);
+                        self.client
+                            .set_subscription_seed(self.subs_pref.active.iter().cloned().collect());
+                        // Bring this connection to the new arrangement on the
+                        // next State, the same way boot adoption does.
+                        self.rail_from_daemon = true;
+                        cx.notify();
+                    }
+                }
             }
             GuiEvent::HostWidgets { widgets } => {
                 // Daemon-side poller push: replace chip state wholesale.

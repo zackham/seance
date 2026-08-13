@@ -149,7 +149,18 @@ impl SeanceApp {
     pub(super) fn reconcile_subscriptions(&mut self, known: &std::collections::BTreeSet<String>) {
         let subs = self.subscriptions.clone();
         let mut changed = false;
-        if !self.subs_seeded {
+        if self.rail_from_daemon {
+            // We took the arrangement from the daemon after attaching on a
+            // different seed. Folding this connection's subscriptions in would
+            // undo it — a fresh window attaches to *everything*, so the rail
+            // would bloom back to every circle the moment it opened. Push the
+            // arrangement onto the connection instead.
+            self.rail_from_daemon = false;
+            for ws in subs.iter().filter(|w| !self.subs_pref.active.contains(*w)) {
+                let _ = self.client.unsubscribe(ws);
+                self.park_pending.insert(ws.clone());
+            }
+        } else if !self.subs_seeded {
             self.subs_pref.seed_from_daemon(&subs, known);
             self.subs_seeded = true;
             changed = true;
@@ -199,15 +210,42 @@ impl SeanceApp {
         }
     }
 
-    /// Persist the active/seen sets and refresh the reconnect `Attach` seed.
-    /// Blank windows own no arrangement — they must not clobber the file.
+    /// Persist the arrangement and refresh the reconnect `Attach` seed.
+    /// Blank windows own no arrangement — they must not clobber it.
     pub(super) fn save_subscriptions(&self) {
         if self.empty_window {
             return;
         }
         crate::subscriptions_pref::save(&self.subs_pref);
+        self.push_rail_to_daemon();
         self.client
             .set_subscription_seed(self.subs_pref.active.iter().cloned().collect());
+    }
+
+    /// Hand the arrangement to the daemon, which persists it and pushes it to
+    /// every other window.
+    ///
+    /// Off the UI thread on purpose: this is a blocking bridge round trip and
+    /// every caller is a click — pinning a circle must not wait on a socket,
+    /// least of all over ssh from the mac. Fire-and-forget is safe because the
+    /// local cache is already written and the daemon's copy is what any later
+    /// window reads.
+    pub(super) fn push_rail_to_daemon(&self) {
+        if self.empty_window {
+            return;
+        }
+        let Some(json) = crate::subscriptions_pref::encode(&self.subs_pref) else {
+            return;
+        };
+        let client = std::sync::Arc::clone(&self.client);
+        std::thread::Builder::new()
+            .name("seance-rail-push".into())
+            .spawn(move || {
+                if let Err(e) = client.subs_save(&json) {
+                    eprintln!("[seance gui] rail prefs save failed: {e}");
+                }
+            })
+            .ok();
     }
 
     /// Add a workspace to the active band (context menu "add to active", and

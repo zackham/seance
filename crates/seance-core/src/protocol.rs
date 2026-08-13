@@ -256,6 +256,16 @@ pub enum FsOp {
     LayoutSave {
         json: String,
     },
+    /// Shared rail arrangement — active/parked, pins, seen, folds — persisted
+    /// beside the layout in the daemon state dir, for the same reason: the
+    /// circles you keep in front of you belong to *you*, not to whichever
+    /// window you happened to open. → `{json: string|null}`, null before the
+    /// first save.
+    SubsLoad,
+    /// Persist the arrangement and push it to every other attached window.
+    SubsSave {
+        json: String,
+    },
     /// Run a host widget's select command daemon-side. → `{output}` and a
     /// refreshed [`GuiEvent::HostWidgets`] broadcast.
     HostSelect {
@@ -319,6 +329,17 @@ pub enum GuiEvent {
     Activity {
         workspace: String,
         last_output_ms: u64,
+    },
+    /// Another window changed the shared rail arrangement. Carries the whole
+    /// `subscriptions.json` body — a wholesale replace, not a delta, because
+    /// the sender already resolved every implication (pinning activates,
+    /// parking unpins) and re-deriving that here could disagree.
+    ///
+    /// The daemon broadcasts to *all* windows including the sender, so the
+    /// receiving side must adopt without saving; saving in response is what
+    /// would turn one park into an endless round trip.
+    RailPrefs {
+        json: String,
     },
     /// Legacy JSON grid (debug / fallback). Live path prefers [`Self::GridBin`].
     Grid(GridSnapshot),

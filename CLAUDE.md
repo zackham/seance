@@ -98,7 +98,10 @@ src/mdfold.rs          markdown section folding — a PURE model over the source
                        (path-keyed folds, `seance-h` fences the pane renders
                        itself). Deliberately not a fork of gpui-component's
                        markdown stack; see docs/FILE-PANES.md
-src/subscriptions_pref.rs  per-GUI active-set persistence (~/.config/seance/subscriptions.json)
+src/subscriptions_pref.rs  rail arrangement (active/parked/pinned/folds) — DAEMON-owned
+                       since 0.23 via FsOp::SubsLoad/SubsSave; the local
+                       ~/.config/seance/subscriptions.json is only the Attach
+                       seed cache. Changes broadcast as GuiEvent::RailPrefs
 src/launch.rs          launch preference (local vs remote host, persisted)
 src/picker.rs          startup picker window (choose daemon location)
 src/sysopen.rs         portability helpers + THE link-open seam (open_detached

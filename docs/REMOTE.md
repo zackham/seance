@@ -76,8 +76,17 @@ way as Linux (`scripts/bootstrap-deps.sh` symlinks `deps/zed`, then
 ## Workspaces on a second machine
 
 A thin-client window follows the normal multi-window model: nothing is owned,
-each window subscribes to the circles it wants (0.12). A fresh mac window
-starts with everything subscribed; park what you don't want and the set is
-remembered per client (`~/.config/seance/subscriptions.json`). The same
-circle can be live here and at the desk simultaneously — sessions never move
-or restart, only which windows render them.
+each window subscribes to the circles it wants (0.12). **The arrangement
+itself — active/parked, pins, folds — is daemon-owned as of 0.23**, so a mac
+window opens on the same rail as the desk, in the same order, with the same
+circles pinned. Park something here and it parks there; the daemon pushes the
+change to every attached window (`~/.local/share/seance/subscriptions.json`
+on the daemon host, beside `layout.json`).
+
+The same circle can be live here and at the desk simultaneously — sessions
+never move or restart, only which windows render them.
+
+`~/.config/seance/subscriptions.json` still exists on each client, demoted to
+a seed cache: it's what `Attach` opens on before the daemon answers, so a
+window doesn't attach to all 47 circles and unsubscribe 35 of them a beat
+later. The daemon's copy wins any disagreement.

@@ -476,6 +476,23 @@ impl GuiClient {
         .map(|_| ())
     }
 
+    /// Load the shared rail arrangement from the daemon (None = never saved,
+    /// i.e. this daemon predates the move or has not been seeded yet).
+    pub fn subs_load(&self) -> Result<Option<String>> {
+        let v = self.fs_call(crate::runtime::protocol::FsOp::SubsLoad, FS_TIMEOUT)?;
+        Ok(v.get("json").and_then(|j| j.as_str()).map(str::to_string))
+    }
+
+    pub fn subs_save(&self, json: &str) -> Result<()> {
+        self.fs_call(
+            crate::runtime::protocol::FsOp::SubsSave {
+                json: json.to_string(),
+            },
+            FS_TIMEOUT,
+        )
+        .map(|_| ())
+    }
+
     /// Run a shell command daemon-side (`sh -lc`).
     /// 30s budget — background threads only, never the UI thread.
     pub fn shell(&self, cmd: &str) -> Result<ShellOut> {
