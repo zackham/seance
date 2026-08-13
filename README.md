@@ -81,6 +81,13 @@ ln -sf "$(pwd)/target/release/seance" ~/.local/bin/seance   # optional
 Requirements: recent Rust, Vulkan-capable drivers, a monospace font
 (default *JetBrainsMono Nerd Font* — change in `src/term_font.rs`).
 
+On **macOS** (thin client against a remote daemon — see
+[docs/REMOTE.md](docs/REMOTE.md)), `./scripts/bundle-macos.sh` is the build
+command: it wraps the binary in `/Applications/Seance.app` so it launches from
+Finder, Spotlight and the Dock. `--user` installs to `~/Applications`,
+`--no-build` bundles what's already built. The bundle holds a *copy* of the
+binary, so re-run the script rather than a bare `cargo build --release`.
+
 ```bash
 seance ctl skill                 # agent-facing protocol (⚡ arm / paste)
 seance ctl doctor

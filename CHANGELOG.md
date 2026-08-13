@@ -17,6 +17,45 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+Seance is an app on macOS, not just a command.
+
+Deliberately **not** a version bump: the version doubles as the wire-compat
+token (the daemon refuses any ctl/GUI/web client that isn't an exact match),
+and nothing here touches the wire. Bumping it to ship a packaging script would
+have forced a web-dist rebuild, a daemon upgrade and a GUI restart on every
+box — and broken the mac thin client against a `desk` daemon still on 0.22.0
+until each one was redone.
+
+### Added
+
+- **`./scripts/bundle-macos.sh` builds `/Applications/Seance.app`.** Finder,
+  Spotlight, the Dock, ⌘-tab — the mac ways of starting a program all reach
+  seance now, instead of only a terminal that has the repo's `target/release`
+  on its PATH. `--user` installs to `~/Applications` for a box where
+  `/Applications` isn't writable, `--no-build` bundles what's already built,
+  `--dest` puts it anywhere.
+
+  The bundle holds a **copy** of the binary, which makes this the mac build
+  command rather than a step after one — a bare `cargo build --release`
+  leaves the app stale. A symlink into `target/` would have kept them in
+  sync, but the main executable of a signed bundle has to live inside it, and
+  the ad-hoc signature is what lets the app hold onto its identity — and its
+  TCC grants — across reinstalls. With a warm target dir the whole script is
+  a few seconds, so re-running it is cheaper than remembering which of two
+  commands you last ran.
+
+  Panes needed nothing special to survive the move. They spawn `/bin/bash
+  -lc`, so a login shell rebuilds `PATH` from the user's dotfiles and `claude`
+  resolves the same from Finder as from a terminal — the usual GUI-app
+  environment problem doesn't arise, and no `LSEnvironment` hardcoding was
+  added to fake it.
+
+- **`assets/icons/seance-macos-1024.png`** — the candle at macOS icon
+  proportions (824pt of art centered in 1024, matching Apple's grid), so
+  `sips` + `iconutil` can build the `.icns` on a mac with no SVG rasterizer
+  installed. Committed rather than rendered at bundle time for exactly that
+  reason.
+
 ## [0.22.0] — 2026-08-10
 
 Links to pages we publish open in scry.

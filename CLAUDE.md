@@ -154,6 +154,7 @@ protocol and the same invariant: it has no filesystem at all.
 ./scripts/bootstrap-deps.sh   # once, if deps/zed missing
 ./scripts/check.sh            # THE gate: fmt + deny-warnings + workspace tests
 ./scripts/build-web.sh release             # rebuild crates/seance-web/dist
+./scripts/bundle-macos.sh     # macOS: build + install /Applications/Seance.app
 cargo build --release && seance upgrade    # deploy runtime, sessions live
 seance restart-gui                         # deploy UI only
 seance ctl skill              # agent-facing engagement protocol
