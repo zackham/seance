@@ -17,6 +17,19 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+### Fixed
+
+- **⌘Q quits the macOS app.** Shipping the `.app` in 0.23.0 removed the only
+  way to stop seance without adding one: there's no terminal to ctrl-C, and
+  closing the window doesn't quit on macOS. The app had no menu bar at all, so
+  ⌘Q hit nothing and force quit was the only exit. There is now a Seance menu
+  with a Quit item; `cx.on_app_quit` already tore the ssh tunnel down, so the
+  action only has to ask.
+
+  Quit only. Hide / Hide Others / Show All are zed's own actions rather than
+  gpui's and would each need a real implementation — a menu item that looks
+  standard and does nothing is worse than no item.
+
 ## [0.23.0] — 2026-08-13
 
 Your rail follows you to the other machine. And seance is an app on macOS.

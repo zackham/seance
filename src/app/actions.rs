@@ -4,6 +4,15 @@
 use gpui::Action;
 use serde::Deserialize;
 
+/// Quit the app. Exists for the macOS menu bar: a bundled `.app` has no
+/// terminal to ctrl-C and no window-close-quits convention, so without a
+/// Quit item bound to ⌘Q there is *no* way to stop seance short of force
+/// quit. Dispatched from the menu; `cx.on_app_quit` still tears the tunnel
+/// down, so this only has to ask.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = seance, no_json)]
+pub struct ActQuit;
+
 // Sidebar context-menu actions (menu items dispatch gpui actions).
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]

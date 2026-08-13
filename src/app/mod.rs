@@ -28,7 +28,7 @@ use crate::{
 };
 use std::sync::Arc;
 
-mod actions;
+pub(crate) mod actions;
 mod chrome;
 mod layout;
 mod menus;

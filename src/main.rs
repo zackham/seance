@@ -271,6 +271,8 @@ fn main() {
         })
         .detach();
 
+        install_app_menu(cx);
+
         match boot {
             Boot::Local => open_main_window(cx),
             Boot::Remote(t) => {
@@ -281,6 +283,27 @@ fn main() {
         }
         cx.activate(true);
     });
+}
+
+/// The application menu, and the handler for the one action it dispatches.
+///
+/// Only macOS grows a menu bar from this; gpui's linux backend just stores
+/// the menus and never renders them, so the call is harmless there and isn't
+/// `cfg`-gated. It exists because a bundled `.app` is a trap without it: no
+/// terminal to ctrl-C, and closing the window doesn't quit on macOS, so ⌘Q
+/// hitting an app with no Quit item leaves force-quit as the only way out.
+///
+/// Quit only. Hide / Hide Others / Show All are *zed's* actions, not gpui's —
+/// each would need a real implementation here, and a menu item that looks
+/// standard but does nothing is worse than no item. ⌘Q is the one that was
+/// actually missing.
+fn install_app_menu(cx: &mut gpui::App) {
+    use gpui::{Menu, MenuItem};
+
+    cx.on_action(|_: &app::actions::ActQuit, cx| cx.quit());
+    cx.set_menus([
+        Menu::new("Seance").items([MenuItem::action("Quit Seance", app::actions::ActQuit)])
+    ]);
 }
 
 /// The live ssh tunnel for this GUI process, if any. Static so the quit hook
