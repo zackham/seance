@@ -1017,15 +1017,10 @@ fn selection_key(
     Some((lo.row, lo.col, hi.row, hi.col))
 }
 
+/// ctrl+click / middle-click on a link in a terminal. Routes through the one
+/// seam, so a `localhost:33801/reports/…` in agent output lands in scry.
 fn open_uri(uri: &str) {
-    let uri = uri.to_string();
-    std::thread::spawn(move || {
-        let _ = std::process::Command::new(crate::sysopen::opener())
-            .arg(&uri)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    });
+    crate::sysopen::open_detached(uri);
 }
 
 fn first_http_url_in_cells(snap: &crate::runtime::snapshot::GridSnapshot) -> Option<String> {

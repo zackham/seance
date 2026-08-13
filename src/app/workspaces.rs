@@ -1,6 +1,7 @@
 //! Workspace state operations: sidebar auto-sort (live-working agents first,
 //! then last human touch), attention/unread bookkeeping, pane drag-reorder,
-//! and workspace lifecycle (create / select / cycle / move / fork / kill).
+//! workspace lifecycle (create / select / cycle / move / fork / kill), and the
+//! back/forward visit history the mouse's side buttons walk.
 //! Pure state — no rendering lives here (the sidebar/overview views call
 //! these to compute their layout).
 
@@ -21,6 +22,76 @@ pub(super) fn rel_label(delta_ms: u64) -> String {
     }
 }
 use super::{RenameTarget, SeanceApp};
+
+/// How many circles back the mouse can walk. A long day of cycling shouldn't
+/// grow a list forever, and nobody navigates back past a few dozen hops.
+const NAV_HISTORY_MAX: usize = 64;
+
+/// Browser-style visit history over circles — where you've *been*, in order,
+/// with a cursor at where you are now.
+///
+/// Deliberately not the same thing as the jump palette's recency ranking:
+/// recency is a set sorted by a clock, this is a path with a position in it,
+/// so back-then-forward returns you to exactly the circle you left. Per
+/// window, never persisted — a fresh window starts with no history, like a
+/// fresh browser tab.
+///
+/// The invariant that makes this work with a passive observer:
+/// `entries[cursor]` is always the circle currently on screen. So a selection
+/// that *isn't* `entries[cursor]` is by definition a fresh navigation, and
+/// walking back/forward moves the cursor first — which is what keeps the
+/// observer from mistaking our own step for a new visit and eating the
+/// forward half of the history.
+#[derive(Default)]
+pub(super) struct NavHistory {
+    entries: Vec<String>,
+    cursor: usize,
+}
+
+impl NavHistory {
+    /// Fold the currently-selected circle in. A no-op when it's already where
+    /// the cursor sits; otherwise it's a fresh navigation, which drops
+    /// whatever was ahead (same as clicking a link mid-history in a browser).
+    pub(super) fn visit(&mut self, ws: &str) {
+        if self.entries.get(self.cursor).map(String::as_str) == Some(ws) {
+            return;
+        }
+        self.entries.truncate(self.cursor + 1);
+        self.entries.push(ws.to_string());
+        if self.entries.len() > NAV_HISTORY_MAX {
+            self.entries.drain(..self.entries.len() - NAV_HISTORY_MAX);
+        }
+        self.cursor = self.entries.len() - 1;
+    }
+
+    /// Step the cursor back to the nearest circle that still exists, and
+    /// report it. Banished circles are stepped over rather than pruned —
+    /// keeping the indices stable is what lets forward retrace the same path.
+    pub(super) fn back(&mut self, exists: impl Fn(&str) -> bool) -> Option<String> {
+        let mut i = self.cursor;
+        while i > 0 {
+            i -= 1;
+            if exists(&self.entries[i]) {
+                self.cursor = i;
+                return Some(self.entries[i].clone());
+            }
+        }
+        None
+    }
+
+    /// The inverse, toward the newest end.
+    pub(super) fn forward(&mut self, exists: impl Fn(&str) -> bool) -> Option<String> {
+        let mut i = self.cursor;
+        while i + 1 < self.entries.len() {
+            i += 1;
+            if exists(&self.entries[i]) {
+                self.cursor = i;
+                return Some(self.entries[i].clone());
+            }
+        }
+        None
+    }
+}
 
 /// Badge on an *inactive* workspace header in the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -728,6 +799,53 @@ impl SeanceApp {
         cx.notify();
     }
 
+    /// Fold the current selection into the back/forward history. Called once
+    /// per render.
+    ///
+    /// The selection moves from a dozen places — a rail click, ctrl+page, the
+    /// jump palette, clicking a pane that lives in another circle
+    /// (`set_active` sets it directly), parking the circle you're in, a `ctl`
+    /// spawn pulling this window across — and the daemon can move it without
+    /// this window asking. Watching the value catches all of them; asking
+    /// every caller to remember would catch the ones I thought of today.
+    pub(super) fn sync_nav_history(&mut self) {
+        if let Some(sel) = self.selected_workspace.clone() {
+            self.nav.visit(&sel);
+        }
+    }
+
+    /// Mouse back button: the circle you were in before this one.
+    pub(super) fn nav_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let known = self.known_workspace_names();
+        let Some(ws) = self.nav.back(|w| known.contains(w)) else {
+            return;
+        };
+        self.nav_to(&ws, "back", window, cx);
+    }
+
+    /// Mouse forward button: undo a back.
+    pub(super) fn nav_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let known = self.known_workspace_names();
+        let Some(ws) = self.nav.forward(|w| known.contains(w)) else {
+            return;
+        };
+        self.nav_to(&ws, "forward", window, cx);
+    }
+
+    fn nav_to(&mut self, ws: &str, dir: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.client.log_event(
+            "human",
+            Some(ws),
+            None,
+            "workspace_selected",
+            format!("navigated {dir} to workspace '{ws}'"),
+        );
+        // The cursor already points at `ws`, so the render-time observer reads
+        // this as "still where the history says we are" and leaves the forward
+        // half alone.
+        self.select_workspace(ws, window, cx);
+    }
+
     /// Cycle the selected workspace in sidebar order. `delta` is +1 (next /
     /// PageDown) or -1 (prev / PageUp). Wraps. Focuses a pane in the target
     /// workspace when one exists so keyboard goes there.
@@ -838,5 +956,118 @@ impl SeanceApp {
         }
         let _ = self.client.kill_workspace(workspace);
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NavHistory, NAV_HISTORY_MAX};
+
+    /// Drive the history the way the app does: every selection change is
+    /// folded in by the render-time observer, including the ones our own
+    /// back/forward caused.
+    fn observe(nav: &mut NavHistory, ws: &str) {
+        nav.visit(ws);
+    }
+
+    fn all(_: &str) -> bool {
+        true
+    }
+
+    #[test]
+    fn back_then_forward_returns_to_where_you_left() {
+        let mut nav = NavHistory::default();
+        for ws in ["a", "b", "c"] {
+            observe(&mut nav, ws);
+        }
+        assert_eq!(nav.back(all).as_deref(), Some("b"));
+        observe(&mut nav, "b");
+        assert_eq!(nav.back(all).as_deref(), Some("a"));
+        observe(&mut nav, "a");
+        assert_eq!(nav.back(all), None, "nothing before the first circle");
+        assert_eq!(nav.forward(all).as_deref(), Some("b"));
+        observe(&mut nav, "b");
+        assert_eq!(nav.forward(all).as_deref(), Some("c"));
+        observe(&mut nav, "c");
+        assert_eq!(nav.forward(all), None);
+    }
+
+    #[test]
+    fn a_fresh_visit_drops_the_forward_half() {
+        let mut nav = NavHistory::default();
+        for ws in ["a", "b", "c"] {
+            observe(&mut nav, ws);
+        }
+        nav.back(all);
+        observe(&mut nav, "b");
+        // Now go somewhere new instead of forward — "c" is gone.
+        observe(&mut nav, "d");
+        assert_eq!(nav.forward(all), None);
+        assert_eq!(nav.back(all).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn walking_back_is_not_itself_a_new_visit() {
+        // The regression the cursor-first invariant exists to prevent: if the
+        // observer treated our own step as a fresh navigation it would
+        // truncate, and forward would be dead after one back.
+        let mut nav = NavHistory::default();
+        for ws in ["a", "b"] {
+            observe(&mut nav, ws);
+        }
+        let target = nav.back(all).unwrap();
+        observe(&mut nav, &target);
+        assert_eq!(nav.forward(all).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn reselecting_the_same_circle_records_nothing() {
+        let mut nav = NavHistory::default();
+        observe(&mut nav, "a");
+        observe(&mut nav, "a");
+        observe(&mut nav, "a");
+        assert_eq!(nav.back(all), None);
+    }
+
+    #[test]
+    fn revisiting_a_circle_is_a_new_entry_not_a_jump() {
+        let mut nav = NavHistory::default();
+        for ws in ["a", "b", "a"] {
+            observe(&mut nav, ws);
+        }
+        assert_eq!(nav.back(all).as_deref(), Some("b"));
+        observe(&mut nav, "b");
+        assert_eq!(nav.back(all).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn banished_circles_are_stepped_over_both_ways() {
+        let mut nav = NavHistory::default();
+        for ws in ["a", "gone", "c"] {
+            observe(&mut nav, ws);
+        }
+        let alive = |w: &str| w != "gone";
+        assert_eq!(nav.back(alive).as_deref(), Some("a"));
+        observe(&mut nav, "a");
+        assert_eq!(nav.forward(alive).as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn history_is_bounded_and_keeps_the_newest() {
+        let mut nav = NavHistory::default();
+        for i in 0..NAV_HISTORY_MAX + 10 {
+            observe(&mut nav, &format!("c{i}"));
+        }
+        assert_eq!(nav.entries.len(), NAV_HISTORY_MAX);
+        assert_eq!(
+            nav.entries.last().map(String::as_str),
+            Some(format!("c{}", NAV_HISTORY_MAX + 9).as_str())
+        );
+        // The cursor survives the trim — back still walks, forward doesn't
+        // wander off the end.
+        assert_eq!(
+            nav.back(all).as_deref(),
+            Some(format!("c{}", NAV_HISTORY_MAX + 8).as_str())
+        );
     }
 }

@@ -920,7 +920,8 @@ fn cmd_edit(args: &[String]) -> Result<()> {
     let token = crate::webbridge::read_token()?;
     let url = format!("http://127.0.0.1:9666/#replay-edit?workspace={workspace}&token={token}");
     println!("{url}");
-    crate::sysopen::open_detached(&url);
+    // Blocking: this is a CLI path that returns straight into process exit.
+    crate::sysopen::open_blocking(&url);
     Ok(())
 }
 

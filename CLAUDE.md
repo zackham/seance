@@ -70,7 +70,9 @@ src/app/               the GPUI app, split by surface:
                        that runs `list_cmd` on click, drops a picker, runs
                        `select_cmd` on choice. On-demand twin of the polled
                        host widgets — see docs/HOST.md
-  workspaces.rs        workspace state ops + WorkspaceAttention + active/parked partition
+  workspaces.rs        workspace state ops + WorkspaceAttention + active/parked
+                       partition + NavHistory (mouse back/forward visit path,
+                       kept by watching the selection each render)
   prlinks.rs           PR header chip + all-links popover + pr_attention helper
   prboard.rs           `PRs (N)` sweep overlay: pure board model (grouping,
                        ordering, staleness, dup annotation) + render half
@@ -99,7 +101,11 @@ src/mdfold.rs          markdown section folding — a PURE model over the source
 src/subscriptions_pref.rs  per-GUI active-set persistence (~/.config/seance/subscriptions.json)
 src/launch.rs          launch preference (local vs remote host, persisted)
 src/picker.rs          startup picker window (choose daemon location)
-src/sysopen.rs         portability helpers (open/xdg-open, ps//proc, getuid)
+src/sysopen.rs         portability helpers + THE link-open seam (open_detached
+                       / open_blocking; every click that opens a url)
+src/scrylink.rs        route our own hosts (localhost, ham.xyz) to scry's
+                       control socket, workspace `general`; fails to the
+                       default browser on anything unexpected
 src/daemon/fsbridge.rs daemon side of the fs bridge + host widget poller
 src/daemon/prwatch.rs  external PR-poller ingest (`pr_watch.json`, mtime-polled)
 src/remote_term*.rs    daemon-backed terminal model + GPUI view

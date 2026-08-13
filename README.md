@@ -13,7 +13,7 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.20.1
+**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.22.0
 
 Release notes: [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -113,7 +113,8 @@ Upgrade load test: `./scripts/upgrade-load-test.sh` (upgrades live daemon)
 | ctrl+pageup / pagedown | cycle workspaces |
 | ctrl+shift+pageup / pagedown | cycle panes in this workspace |
 | ctrl+shift+v | paste |
-| ctrl+click / middle-click | open OSC-8 / URL |
+| ctrl+click / middle-click | open OSC-8 / URL (ours → scry, rest → default browser) |
+| mouse back / forward | walk the circles you've been in |
 | stage chip click | focus + pad drawer |
 | stage chip double-click | zoom |
 | ⚡ | arm agent (`ctl skill` orientation) |

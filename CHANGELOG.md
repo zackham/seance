@@ -17,6 +17,65 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-08-10
+
+Links to pages we publish open in scry.
+
+### Added
+
+- **`localhost` and `ham.xyz` links open in scry, in the `general`
+  workspace.** Ctrl/middle-click in a terminal, a PR chip, a pad link, a row
+  in the PR board — every link in the app goes through one seam now, and the
+  hosts we publish to route to [scry](https://github.com/zackham/scry), the
+  browser for pages we control. Everything else keeps the default browser
+  exactly as before.
+
+  It talks to scry's **control socket** (`~/.local/share/scry/control.sock`,
+  JSON lines) rather than shelling `scry ctl`, which needs its repo's
+  `run.sh` to find `libcef.so` — that would have meant hardcoding a clone path
+  from someone's home directory into this app. The socket is a stable location
+  and needs no binary.
+
+  **Every failure path lands in the default browser**: no socket, scry not
+  running, a wedged scry, a reply we can't read, an external url scry refuses.
+  A link that goes nowhere would be worse than a link in the wrong browser.
+  Host matching respects the label boundary, so `ham.xyz.evil.com` is not our
+  host, and userinfo can't name one (`https://ham.xyz@evil.com` is evil.com) —
+  the same traps scry's own `policy.rs` documents, ported with its tests.
+
+  Loopback *addresses* deliberately aren't routed even though scry blesses
+  them, so nothing that only ever spoke to `127.0.0.1` moves without being
+  asked. Opening now runs off the calling thread, since the routing decision
+  costs a socket round trip and every caller in the GUI is a click handler.
+
+## [0.21.0] — 2026-08-10
+
+The mouse's back and forward buttons walk the circles you've been in.
+
+### Added
+
+- **Mouse back / forward navigate between circles.** The side buttons on the
+  mouse now step through this window's visit history — back to the circle you
+  were just in, forward to undo it. It works over a terminal, over the rail,
+  anywhere in the window; panes forward no button events to the PTY, so
+  nothing downstream wanted them.
+
+  This is a *path with a position in it*, not the recency ranking the jump
+  palette shows. Recency is a set sorted by a clock, so it reshuffles under
+  you while agents finish; back-then-forward has to land you back exactly
+  where you left, which only a cursor into an ordered path can promise. Going
+  somewhere new after stepping back drops the forward half, same as a browser.
+
+  History is kept by **watching** the selection once per render rather than by
+  each caller remembering to record. The selection moves from a dozen places —
+  the rail, ctrl+page, the jump palette, clicking a pane that lives in another
+  circle, parking the circle you're in, a `ctl` spawn pulling the window
+  across — and the daemon can move it without this window asking. Watching
+  catches all of them; asking every caller catches the ones I thought of
+  today. A circle that's been banished is stepped over, not pruned, so
+  forward still retraces the same path. Per window, never persisted — a new
+  window starts empty, like a new browser tab.
+
 ## [0.20.1] — 2026-08-06
 
 ### Changed

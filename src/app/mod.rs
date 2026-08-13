@@ -119,6 +119,10 @@ pub struct SeanceApp {
     selected_workspace: Option<String>,
     /// Last focused pane slug per workspace — restored on workspace switch.
     workspace_focus: std::collections::HashMap<String, String>,
+    /// Where this window has *been*, for the mouse's back/forward buttons.
+    /// Kept by watching `selected_workspace` once per render — see
+    /// [`Self::sync_nav_history`].
+    nav: workspaces::NavHistory,
     extra_workspaces: Vec<String>,
     workspace_order: Vec<String>,
     renaming: Option<(RenameTarget, Entity<InputState>)>,
@@ -427,6 +431,7 @@ impl SeanceApp {
             pr_board: false,
             remote_cache,
             render_probe: RenderProbe::default(),
+            nav: workspaces::NavHistory::default(),
         };
         // Seed the prompt-library user file on the DAEMON machine (write-if-
         // missing) and pre-warm the cache so the palette has user prompts by
@@ -2277,6 +2282,10 @@ impl Render for SeanceApp {
         self.reload_quicklaunch_if_stale(cx);
         self.reload_host_menus_if_stale(cx);
 
+        // Record where we are for the mouse's back/forward buttons. Watching
+        // the selection is the only way to catch every mover (see the method).
+        self.sync_nav_history();
+
         // Summon arrives without a Window on the event path; open rename here.
         if self.pending_rename.is_some() {
             self.flush_pending_rename(window, cx);
@@ -2407,6 +2416,24 @@ impl Render for SeanceApp {
             .on_action(cx.listener(|this, act: &ActQuickLaunchRemove, _, cx| {
                 this.quicklaunch_remove(&act.0.clone(), cx);
             }))
+            // Mouse side buttons walk the circles you've been in. Bound on the
+            // root so they work over a terminal, the rail, anywhere — the
+            // terminal forwards no button events to the PTY, so nothing
+            // downstream wants them. A modal overlay that `occlude()`s
+            // (menus, the PR board, the overview) swallows them, which is the
+            // right answer: navigate the thing in front of you first.
+            .on_mouse_down(
+                gpui::MouseButton::Navigate(gpui::NavigationDirection::Back),
+                cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
+                    this.nav_back(window, cx);
+                }),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward),
+                cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
+                    this.nav_forward(window, cx);
+                }),
+            )
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
                 let Some(drag) = this.sash_drag.clone() else {
                     return;

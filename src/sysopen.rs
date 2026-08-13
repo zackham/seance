@@ -9,13 +9,43 @@ pub fn opener() -> &'static str {
     }
 }
 
-/// Spawn the default-app opener on `target`, detached and quiet.
+/// Open a link off the calling thread. **This is the seam every click in the
+/// GUI goes through** — a terminal's ctrl/middle-click, a PR chip, a pad link,
+/// the PR board.
+///
+/// Off-thread because the routing in [`crate::scrylink`] talks to a socket,
+/// and every caller here is a click listener on the render thread.
 pub fn open_detached(target: &str) {
-    let _ = std::process::Command::new(opener())
+    let target = target.to_string();
+    std::thread::spawn(move || {
+        if crate::scrylink::open(&target) {
+            return;
+        }
+        // Reaped: nothing is waiting on this thread, and a window that runs
+        // for days shouldn't collect a zombie per link click.
+        if let Ok(mut child) = spawn_opener(&target) {
+            let _ = child.wait();
+        }
+    });
+}
+
+/// Same routing, on this thread — for CLI paths that return straight into
+/// process exit and would otherwise outlive the thread doing the work.
+pub fn open_blocking(target: &str) {
+    if crate::scrylink::open(target) {
+        return;
+    }
+    // Deliberately not waited on here: a handler that doesn't fork would hang
+    // the command. Exit reaps it.
+    let _ = spawn_opener(target);
+}
+
+fn spawn_opener(target: &str) -> std::io::Result<std::process::Child> {
+    std::process::Command::new(opener())
         .arg(target)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .spawn()
 }
 
 /// Full command line of a live process, best-effort ("" when unknown).
