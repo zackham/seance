@@ -52,6 +52,49 @@ pub fn key_to_bytes(input: &KeyInput, modes: TermModes) -> Option<Vec<u8>> {
     let mods = input.mods;
     let app_cursor = modes.app_cursor;
 
+    // Ctrl+page* is seance workspace cycling — never PTY-bound.
+    if mods.control && matches!(input.key.as_str(), "pageup" | "pagedown") {
+        return None;
+    }
+
+    // xterm modifier parameter: 1 + shift(1) + alt(2) + ctrl(4). Any modifier
+    // switches cursor/nav/function keys to the modified CSI forms — e.g.
+    // ctrl+right = `ESC[1;5C`, which readline binds to forward-word. Without
+    // these, modified arrows collapse to plain ones (no word jumping).
+    // app-cursor mode only ever applies to the UNmodified encodings.
+    let m = 1 + u8::from(mods.shift) + 2 * u8::from(mods.alt) + 4 * u8::from(mods.control);
+    if m > 1 {
+        let cursor = |ch: char| format!("\x1b[1;{m}{ch}").into_bytes();
+        let tilde = |n: u8| format!("\x1b[{n};{m}~").into_bytes();
+        // enter/backspace/tab keep their bespoke arms below (their classic
+        // encodings predate the CSI-modifier scheme).
+        match input.key.as_str() {
+            "up" => return Some(cursor('A')),
+            "down" => return Some(cursor('B')),
+            "right" => return Some(cursor('C')),
+            "left" => return Some(cursor('D')),
+            "home" => return Some(cursor('H')),
+            "end" => return Some(cursor('F')),
+            "delete" => return Some(tilde(3)),
+            "insert" => return Some(tilde(2)),
+            "pageup" => return Some(tilde(5)),
+            "pagedown" => return Some(tilde(6)),
+            "f1" => return Some(cursor('P')),
+            "f2" => return Some(cursor('Q')),
+            "f3" => return Some(cursor('R')),
+            "f4" => return Some(cursor('S')),
+            "f5" => return Some(tilde(15)),
+            "f6" => return Some(tilde(17)),
+            "f7" => return Some(tilde(18)),
+            "f8" => return Some(tilde(19)),
+            "f9" => return Some(tilde(20)),
+            "f10" => return Some(tilde(21)),
+            "f11" => return Some(tilde(23)),
+            "f12" => return Some(tilde(24)),
+            _ => {}
+        }
+    }
+
     // Named/control keys first.
     let named: Option<&[u8]> = match input.key.as_str() {
         "enter" => {
@@ -71,9 +114,8 @@ pub fn key_to_bytes(input: &KeyInput, modes: TermModes) -> Option<Vec<u8>> {
         "left" => Some(if app_cursor { b"\x1bOD" } else { b"\x1b[D" }),
         "home" => Some(if app_cursor { b"\x1bOH" } else { b"\x1b[H" }),
         "end" => Some(if app_cursor { b"\x1bOF" } else { b"\x1b[F" }),
-        // Bare / shift page keys only — ctrl+page* is seance workspace cycle.
-        "pageup" if !mods.control => Some(b"\x1b[5~"),
-        "pagedown" if !mods.control => Some(b"\x1b[6~"),
+        "pageup" => Some(b"\x1b[5~"),
+        "pagedown" => Some(b"\x1b[6~"),
         "delete" => Some(b"\x1b[3~"),
         "insert" => Some(b"\x1b[2~"),
         "f1" => Some(b"\x1bOP"),
@@ -252,6 +294,50 @@ mod tests {
             },
         };
         assert_eq!(key_to_bytes(&k, TermModes::default()), None);
+    }
+
+    #[test]
+    fn modified_arrows_use_csi_modifier_form() {
+        let mut k = key("right");
+        k.mods.control = true;
+        assert_eq!(
+            key_to_bytes(&k, TermModes::default()).unwrap(),
+            b"\x1b[1;5C"
+        );
+        // Modified encoding wins even in app-cursor mode.
+        assert_eq!(
+            key_to_bytes(&k, TermModes { app_cursor: true }).unwrap(),
+            b"\x1b[1;5C"
+        );
+        let mut k = key("left");
+        k.mods.alt = true;
+        assert_eq!(
+            key_to_bytes(&k, TermModes::default()).unwrap(),
+            b"\x1b[1;3D"
+        );
+        let mut k = key("up");
+        k.mods.shift = true;
+        k.mods.control = true;
+        assert_eq!(
+            key_to_bytes(&k, TermModes::default()).unwrap(),
+            b"\x1b[1;6A"
+        );
+    }
+
+    #[test]
+    fn modified_tilde_keys() {
+        let mut k = key("delete");
+        k.mods.control = true;
+        assert_eq!(
+            key_to_bytes(&k, TermModes::default()).unwrap(),
+            b"\x1b[3;5~"
+        );
+        let mut k = key("pageup");
+        k.mods.shift = true;
+        assert_eq!(
+            key_to_bytes(&k, TermModes::default()).unwrap(),
+            b"\x1b[5;2~"
+        );
     }
 
     #[test]
