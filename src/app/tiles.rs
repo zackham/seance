@@ -2,7 +2,7 @@
 //! resizable sashes (2-pane split, multi-pane horizontal pairs, inter-row
 //! vertical sashes), plus focus-zoom (single pane fills the region).
 
-use gpui::{div, prelude::*, px, relative, Context, SharedString};
+use gpui::{div, prelude::*, px, relative, Context, SharedString, Window};
 
 use crate::pane::Pane;
 use crate::theme::SeancePalette;
@@ -20,6 +20,67 @@ impl SeanceApp {
             self.active_slug = Some(slug.to_string());
         }
         cx.notify();
+    }
+
+    /// ctrl+shift+arrow: spatial pane navigation over the tile grid. Mirrors
+    /// the render_tiles packing exactly (row-major, cols = ceil(sqrt(n)); the
+    /// 2-pane split is the same shape: one row of two) so movement matches
+    /// what's on screen. No wrapping — an edge is an edge. While zoomed, the
+    /// zoom follows the navigation instead of unzooming.
+    pub(super) fn navigate_pane_directional(
+        &mut self,
+        dir: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tiled: Vec<String> = self
+            .panes
+            .iter()
+            .filter(|s| {
+                s.tiled
+                    && s.popped.is_none()
+                    && self
+                        .selected_workspace
+                        .as_deref()
+                        .is_none_or(|ws| s.workspace == ws)
+            })
+            .map(|p| p.slug.clone())
+            .collect();
+        let n = tiled.len();
+        if n == 0 {
+            return;
+        }
+        let Some(cur) = self
+            .active_slug
+            .as_ref()
+            .and_then(|s| tiled.iter().position(|p| p == s))
+        else {
+            // Active pane isn't tiled in this circle — land somewhere visible.
+            let first = tiled[0].clone();
+            self.set_active(&first, window, cx);
+            return;
+        };
+        let cols = (n as f32).sqrt().ceil() as usize;
+        let rows = n.div_ceil(cols);
+        let (row, col) = (cur / cols, cur % cols);
+        let target = match dir {
+            "left" if col > 0 => Some(cur - 1),
+            // Same-row guard covers a short last row.
+            "right" if cur + 1 < n && (cur + 1) / cols == row => Some(cur + 1),
+            "up" if row > 0 => Some((row - 1) * cols + col),
+            // A short last row clamps to its final pane; the clamp can only
+            // bite on the last row, so this never skips a row.
+            "down" if row + 1 < rows => Some(((row + 1) * cols + col).min(n - 1)),
+            _ => None,
+        };
+        let Some(t) = target else {
+            return;
+        };
+        let slug = tiled[t].clone();
+        if self.zoomed_slug.is_some() {
+            self.zoomed_slug = Some(slug.clone());
+        }
+        self.set_active(&slug, window, cx);
     }
 
     /// Full-bleed single pane with a persistent zoom bar so the mode is obvious.

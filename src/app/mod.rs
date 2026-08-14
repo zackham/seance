@@ -1562,6 +1562,10 @@ impl SeanceApp {
                     self.set_overview(!self.overview, cx);
                     cx.stop_propagation();
                 }
+                "up" | "down" | "left" | "right" => {
+                    self.navigate_pane_directional(key, window, cx);
+                    cx.stop_propagation();
+                }
                 "k" => {
                     self.palette = PaletteMode::Prompts {
                         query: String::new(),
