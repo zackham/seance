@@ -111,6 +111,9 @@ pub struct SeanceApp {
     owners: std::collections::HashMap<String, OwnerChrome>,
     /// (pane slug -> (verb, actor, when)) — transient "driven by X" flashes.
     touches: std::collections::HashMap<String, (String, String, std::time::Instant)>,
+    /// Sidebar banish ×, armed by a first click: (workspace slug, when). Only a
+    /// second click inside `BANISH_ARM`, on the same circle, actually kills.
+    banish_armed: Option<(String, std::time::Instant)>,
     /// Active whisper compose bar: (pane slug, input state).
     whisper: Option<(String, Entity<InputState>)>,
     /// Pane currently flipped to its notes face: (slug, scratchpad entity).
@@ -379,6 +382,7 @@ impl SeanceApp {
             statuses: std::collections::HashMap::new(),
             owners: std::collections::HashMap::new(),
             touches: std::collections::HashMap::new(),
+            banish_armed: None,
             whisper: None,
             flipped: None,
             active_slug: None,

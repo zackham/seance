@@ -780,7 +780,7 @@ impl Chrome {
                 open_rename(&rn, &row2, &main2, &ws, RenameKind::Workspace(ws.clone()));
             })?;
         }
-        // WEB DIVERGENCE #5: two-click arm on the banish ×.
+        // Two-click arm on the banish ×; native matches (`BANISH_ARM`).
         {
             let actions = self.actions.clone();
             let armed = self.kill_armed.clone();
