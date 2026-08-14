@@ -261,6 +261,13 @@ fn main() {
 
     gpui_platform::application().run(move |cx| {
         gpui_component::init(cx);
+        // gpui-component's Root context binds plain tab/shift-tab to widget
+        // focus traversal, which steals Tab from every terminal pane (no shell
+        // tab completion). Unbind them — Tab belongs to the PTY here.
+        cx.bind_keys([
+            gpui::KeyBinding::new("tab", gpui::NoAction {}, Some("Root")),
+            gpui::KeyBinding::new("shift-tab", gpui::NoAction {}, Some("Root")),
+        ]);
         theme::init(cx);
 
         // Kill the ssh forward on quit — the tunnel lives and dies with the GUI.

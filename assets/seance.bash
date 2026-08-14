@@ -15,9 +15,17 @@
 # install nothing and behave like a plain interactive bash.
 
 # --- 1. Be a normal shell first. ------------------------------------------
-# --init-file suppresses the usual ~/.bashrc; source it back so the user's
-# aliases, prompt, completions, etc. all still apply. (No special guarding of
-# the readline `bind` warning is needed — a normal interactive source is fine.)
+# --init-file suppresses the ENTIRE normal interactive startup — including the
+# system rc. On distros whose bash is compiled with SYS_BASHRC (Arch, Debian,
+# SUSE), interactive shells source /etc/bash.bashrc BEFORE ~/.bashrc, and
+# that's typically where bash-completion is loaded — without it, panes have no
+# tab completion unless the user's own bashrc happens to load it. Recreate the
+# normal order: system rc first, then the user's. (No special guarding of the
+# readline `bind` warning is needed — a normal interactive source is fine.)
+if [ -f /etc/bash.bashrc ]; then
+    # shellcheck source=/dev/null
+    . /etc/bash.bashrc
+fi
 if [ -f "$HOME/.bashrc" ]; then
     # shellcheck source=/dev/null
     . "$HOME/.bashrc"
