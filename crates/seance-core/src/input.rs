@@ -69,6 +69,11 @@ pub fn key_to_bytes(input: &KeyInput, modes: TermModes) -> Option<Vec<u8>> {
         // enter/backspace/tab keep their bespoke arms below (their classic
         // encodings predate the CSI-modifier scheme).
         match input.key.as_str() {
+            // Shift+page keeps the BARE form. Native never gets here (the
+            // terminal view takes shift+page for scrollback first), but the
+            // web client has no scrollback binding, so the modified
+            // `ESC[5;2~` would reach the app — and less/vim don't page on it.
+            "pageup" | "pagedown" if !mods.control && !mods.alt => {}
             "up" => return Some(cursor('A')),
             "down" => return Some(cursor('B')),
             "right" => return Some(cursor('C')),
@@ -332,12 +337,25 @@ mod tests {
             key_to_bytes(&k, TermModes::default()).unwrap(),
             b"\x1b[3;5~"
         );
+        // Alt+page still takes the modified form.
         let mut k = key("pageup");
-        k.mods.shift = true;
+        k.mods.alt = true;
         assert_eq!(
             key_to_bytes(&k, TermModes::default()).unwrap(),
-            b"\x1b[5;2~"
+            b"\x1b[5;3~"
         );
+    }
+
+    #[test]
+    fn shift_page_keys_stay_bare() {
+        // The web client has no scrollback binding, so shift+page reaches the
+        // app — and it wants the plain form, not `ESC[5;2~`.
+        let mut k = key("pageup");
+        k.mods.shift = true;
+        assert_eq!(key_to_bytes(&k, TermModes::default()).unwrap(), b"\x1b[5~");
+        let mut k = key("pagedown");
+        k.mods.shift = true;
+        assert_eq!(key_to_bytes(&k, TermModes::default()).unwrap(), b"\x1b[6~");
     }
 
     #[test]

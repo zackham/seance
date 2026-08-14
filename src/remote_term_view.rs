@@ -96,10 +96,16 @@ fn spawn_wl_copy(text: &str, primary: bool) -> bool {
 /// copy path: on Wayland prefer `wl-paste` (keeps compositor clipboard traffic
 /// out of the GPUI process, same rationale as `copy_text_to_clipboard`), then
 /// fall back to GPUI's primary-selection read.
+///
+/// This runs on the UI thread (mouse-down listener), and `wl-paste` blocks
+/// until the selection OWNER answers — a wedged owner would hang the render
+/// loop outright. The copy path can spawn fire-and-forget; a read can't, so
+/// cap it with `timeout` instead. If `timeout` is missing the spawn fails and
+/// we drop to the GPUI read, same as any other wl-paste failure.
 fn read_primary_text(cx: &App) -> Option<String> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        if let Ok(out) = Command::new("wl-paste")
-            .args(["--primary", "--no-newline"])
+        if let Ok(out) = Command::new("timeout")
+            .args(["0.5", "wl-paste", "--primary", "--no-newline"])
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
