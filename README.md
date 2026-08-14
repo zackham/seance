@@ -103,6 +103,57 @@ Multi-agent live test: `./scripts/agent-collab-test.sh`
 Thorough smoke: `./scripts/e2e-thorough.sh`  
 Upgrade load test: `./scripts/upgrade-load-test.sh` (upgrades live daemon)
 
+## Claude Code hooks (status + toasts without arming)
+
+Status chips, stage-strip urgency, and desktop toasts are **agent-reported** —
+seance never guesses what an agent is doing. An un-armed agent reports
+nothing, so a Claude launched by hand in a pane is invisible to attention
+routing. For Claude Code you can make reporting automatic: every pane exports
+`$SEANCE_SESSION`, and Claude Code hooks inherit it, so a tiny hook script
+covers the whole turn lifecycle — no arming, nothing for the model to
+remember, and a safe no-op outside seance.
+
+```bash
+#!/usr/bin/env bash
+# ~/.local/bin/seance-claude-hook
+[ -n "$SEANCE_SESSION" ] || exit 0
+command -v seance >/dev/null 2>&1 || exit 0
+case "$1" in
+  working) seance ctl status-set working >/dev/null 2>&1 ;;
+  stop)
+    # Turn ended — your move. Toast only for panes you are NOT looking at;
+    # the one on screen just flips its chip.
+    f=$(seance ctl human --json 2>/dev/null | jq -r '.data.focused_pane // empty')
+    if [ "$f" = "$SEANCE_SESSION" ]; then
+      seance ctl status-set idle "turn ended" >/dev/null 2>&1
+    else
+      seance ctl status-set needs-human "turn ended — your move" >/dev/null 2>&1
+    fi ;;
+  needs-human)
+    # Notification event (permission prompt / waiting on input); JSON on stdin.
+    m=$(jq -r '.message // empty' 2>/dev/null)
+    seance ctl status-set needs-human "${m:-claude needs attention}" >/dev/null 2>&1 ;;
+esac
+exit 0
+```
+
+```jsonc
+// ~/.claude/settings.json
+{ "hooks": {
+  "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "seance-claude-hook working" }] }],
+  "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "seance-claude-hook working" }] }],
+  "Stop":             [{ "hooks": [{ "type": "command", "command": "seance-claude-hook stop" }] }],
+  "Notification":     [{ "matcher": "", "hooks": [{ "type": "command", "command": "seance-claude-hook needs-human" }] }]
+} }
+```
+
+`working` on prompt submit and tool use (the latter clears a `needs-human`
+left by an approved permission prompt), `needs-human` — a desktop toast —
+when a turn ends off-screen or Claude blocks on a permission, `idle` when the
+turn ends in the pane you are watching. Arming (`⚡` / `ctl skill`) is still
+worth it for pads, `finish`, `ask`, and `propose` — hooks just make the
+attention routing free.
+
 ## Keybinds
 
 | key | action |
