@@ -12,11 +12,31 @@ bound path via `FileView::path()`.
 
 ## Behavior
 
-**Header strip.** Filename (basename) with the full path as a dimmed suffix; a
-live/history indicator (`● live` in sage / `◐ history` in violet); and history
-controls: `◀` (older), an `N/M` counter, `▶` (newer), and `⦿ live` (jump back to
-the live tail). Controls are plain styled `div`s in the house style — not
-`gpui-component` `Button` — so the pane pulls in no icon/asset dependencies.
+**Header strip.** Filename (basename) with the full path as a dimmed suffix;
+two copy buttons (below); a live/history indicator (`● live` in sage /
+`◐ history` in violet); and history controls: `◀` (older), an `N/M` counter,
+`▶` (newer), and `⦿ live` (jump back to the live tail). Controls are plain
+styled `div`s in the house style — not `gpui-component` `Button` — so the pane
+pulls in no icon/asset dependencies.
+
+**Copy.** `⧉ path` copies the file's full path (the *daemon-machine* path, the
+one the header shows — that's the path a sibling agent can act on). `⧉ md`
+(`⧉ text` for a non-markdown file) copies the body. Two buttons rather than one
+menu because they're the two things a file pane knows, and both are one click
+from the pane you're already reading.
+
+What lands on the clipboard is the **source**, not the render: folds, the
+frontmatter box and the heading chrome are display, so a folded outline still
+copies the whole document. In history mode it's the **pinned snapshot's** text,
+which the tooltip says out loud — a silent copy of not-the-live-file is exactly
+the paste you'd trust wrongly. The button is inert while the pane is still
+loading or the file is empty. A toast reports `copied · N chars · M lines`.
+
+Both go through `src/clipboard.rs`, the shared write seam (terminal selections
+use it too): on Wayland it hands ownership to a `wl-copy` child rather than
+GPUI's in-process write, which has taken the whole GUI down with no Rust panic
+to show for it. Payloads are capped at 2MB with a visible `… [truncated]`
+marker.
 
 **Body.** The file content, scrollable (`overflow_y_scroll` on an `id`'d div).
 

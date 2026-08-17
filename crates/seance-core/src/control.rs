@@ -225,20 +225,6 @@ pub enum ControlRequest {
         from: Option<String>,
     },
 
-    /// Fork a workspace: respawn its panes (same name/cwd/command) into a new
-    /// workspace, copying scratchpads. PTY state does not fork; layout,
-    /// commands, and notes do.
-    WorkspaceFork {
-        #[serde(default)]
-        workspace: Option<String>,
-        #[serde(default)]
-        name: Option<String>,
-        #[serde(default)]
-        scope: Option<String>,
-        #[serde(default)]
-        from: Option<String>,
-    },
-
     /// Shell integration: a hooked shell reports a command starting.
     /// Attributed to the calling pane via `from`.
     CmdBegin {
@@ -596,7 +582,6 @@ impl ControlRequest {
             | Self::Propose { from, .. }
             | Self::ProposeResult { from, .. }
             | Self::Human { from, .. }
-            | Self::WorkspaceFork { from, .. }
             | Self::CmdBegin { from, .. }
             | Self::CmdEnd { from, .. }
             | Self::Commands { from, .. }
@@ -629,9 +614,6 @@ impl ControlRequest {
     pub fn workspace_hint(&self) -> Option<&str> {
         match self {
             Self::New {
-                workspace, scope, ..
-            }
-            | Self::WorkspaceFork {
                 workspace, scope, ..
             }
             | Self::PolicyGet {

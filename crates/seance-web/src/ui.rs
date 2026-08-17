@@ -818,9 +818,11 @@ impl Chrome {
                 {
                     let a = actions.clone();
                     let w = ws.clone();
-                    entries.push(MenuEntry::item("touch (bump recency)", move || {
-                        a.touch_workspace(&w)
-                    }));
+                    entries.push(if pinned {
+                        MenuEntry::item("unpin", move || a.unpin_workspace(&w))
+                    } else {
+                        MenuEntry::item("pin", move || a.pin_workspace(&w))
+                    });
                 }
                 {
                     let rn = rn.clone();
@@ -828,16 +830,6 @@ impl Chrome {
                     let w = ws.clone();
                     entries.push(MenuEntry::item("rename workspace", move || {
                         open_rename(&rn, &r, &m, &w, RenameKind::Workspace(w.clone()))
-                    }));
-                }
-                {
-                    let a = actions.clone();
-                    let w = ws.clone();
-                    entries.push(MenuEntry::item("fork workspace ⑂", move || {
-                        a.send(GuiRequest::ForkWorkspace {
-                            workspace: w,
-                            name: None,
-                        })
                     }));
                 }
                 {
@@ -854,15 +846,6 @@ impl Chrome {
                     }));
                 }
                 entries.push(MenuEntry::Separator);
-                {
-                    let a = actions.clone();
-                    let w = ws.clone();
-                    entries.push(if pinned {
-                        MenuEntry::item("unpin", move || a.unpin_workspace(&w))
-                    } else {
-                        MenuEntry::item("pin", move || a.pin_workspace(&w))
-                    });
-                }
                 {
                     let a = actions.clone();
                     let w = ws.clone();

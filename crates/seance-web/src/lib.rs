@@ -980,18 +980,6 @@ impl Actions for AppActions {
         self.0.need_rebuild.set(true);
     }
 
-    fn touch_workspace(&self, ws: &str) {
-        self.0.state.borrow_mut().touch_workspace(ws, now_ms());
-        self.0.send(&GuiRequest::Event {
-            actor: "human".into(),
-            workspace: Some(ws.to_string()),
-            pane: None,
-            kind: "workspace.touch".into(),
-            detail: "sidebar menu".into(),
-        });
-        self.0.need_rebuild.set(true);
-    }
-
     fn toggle_collapsed(&self, key: &str) {
         if self.0.state.borrow_mut().subs.toggle_collapsed(key) {
             self.0.persist_subs();

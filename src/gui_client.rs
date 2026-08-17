@@ -319,13 +319,6 @@ impl GuiClient {
         })
     }
 
-    pub fn fork_workspace(&self, workspace: &str, name: Option<String>) -> Result<()> {
-        self.send(GuiRequest::ForkWorkspace {
-            workspace: workspace.to_string(),
-            name,
-        })
-    }
-
     pub fn answer_ask(&self, id: &str, answer: &str) -> Result<()> {
         self.send(GuiRequest::AnswerAsk {
             id: id.to_string(),

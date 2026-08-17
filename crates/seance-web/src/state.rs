@@ -407,7 +407,7 @@ impl ClientState {
         self.visible_workspaces()
     }
 
-    /// Bump recency (human typing here / context-menu touch / fresh spawn).
+    /// Bump recency (human typing here / fresh spawn).
     /// The rail's four bands in display order, each carrying the same sort.
     pub fn workspace_sections(&self) -> Vec<(Section, Vec<String>)> {
         let ordered = self.workspaces();

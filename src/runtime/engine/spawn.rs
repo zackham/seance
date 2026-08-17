@@ -386,56 +386,6 @@ impl Engine {
         }
     }
 
-    pub(super) fn fork_workspace(&mut self, src: &str, name: Option<String>) -> Result<String> {
-        let sources: Vec<_> = self
-            .panes
-            .iter()
-            .filter(|p| p.workspace == src)
-            .map(|p| {
-                (
-                    p.name.clone(),
-                    p.cwd.clone(),
-                    p.command.clone(),
-                    p.kind.clone(),
-                    p.file.clone(),
-                    p.tiled,
-                    p.scratch_path.clone(),
-                )
-            })
-            .collect();
-        if sources.is_empty() {
-            anyhow::bail!("workspace '{src}' has no panes");
-        }
-        let base = name.unwrap_or_else(|| format!("{src}-fork"));
-        let mut new_ws = slugify(&base);
-        let mut n = 2;
-        while self.panes.iter().any(|p| p.workspace == new_ws)
-            || self.extra_workspaces.contains(&new_ws)
-        {
-            new_ws = format!("{}-{n}", slugify(&base));
-            n += 1;
-        }
-        self.extra_workspaces.push(new_ws.clone());
-        if !self.workspace_order.iter().any(|w| w == &new_ws) {
-            self.workspace_order.push(new_ws.clone());
-        }
-        for (name, cwd, command, kind, file, tiled, old_scratch) in sources {
-            let slug = self.spawn(SpawnSpec {
-                name,
-                cwd: Some(cwd),
-                command: Some(command),
-                workspace: Some(new_ws.clone()),
-                tiled,
-                resume: false,
-                file: if kind == "file" { file } else { None },
-            })?;
-            let new_path = self.store.path_for(&slug);
-            let _ = std::fs::copy(&old_scratch, &new_path);
-        }
-        self.selected_workspace = Some(new_ws.clone());
-        Ok(new_ws)
-    }
-
     /// Move `slug` into `workspace`, inserting immediately before `before`
     /// (another slug) or appending when `before` is None / missing. Pane-list
     /// order is the persistence key for sidebar + tile layout.

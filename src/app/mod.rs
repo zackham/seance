@@ -2512,9 +2512,6 @@ impl Render for SeanceApp {
                     .unwrap_or_default();
                 this.start_rename(RenameTarget::Pane(act.0.clone()), &current, window, cx);
             }))
-            .on_action(cx.listener(|this, act: &ActForkWorkspace, _, cx| {
-                this.fork_workspace(&act.0.clone(), None, "human", cx);
-            }))
             .on_action(cx.listener(|this, act: &ActRenameWorkspace, window, cx| {
                 let label = this.workspace_label(&act.0);
                 this.start_rename(RenameTarget::Workspace(act.0.clone()), &label, window, cx);
@@ -2551,10 +2548,6 @@ impl Render for SeanceApp {
             }))
             .on_action(cx.listener(|this, act: &ActUnpinWorkspace, _, cx| {
                 this.unpin_workspace(&act.0.clone());
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, act: &ActTouchWorkspace, _, cx| {
-                this.touch_workspace(&act.0);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, act: &ActQuickLaunchEdit, window, cx| {

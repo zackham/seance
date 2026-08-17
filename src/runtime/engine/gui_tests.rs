@@ -1,5 +1,5 @@
 //! Hermetic `handle_gui` tests for the SUBSCRIPTION model (0.12): Attach
-//! seeding, Subscribe/Unsubscribe, auto-subscribe on select/spawn/create/fork,
+//! seeding, Subscribe/Unsubscribe, auto-subscribe on select/spawn/create,
 //! the grid-rate matrix, and the recorder invariant. Driven through a fake
 //! `GuiConn` (an in-memory `OutQueue` registered via `register_gui`). No real
 //! sockets, no PTYs (stub panes only), `SEANCE_STATE_DIR` guarded by
@@ -334,7 +334,7 @@ fn selecting_a_parked_workspace_auto_subscribes() {
 }
 
 #[test]
-fn gui_spawn_create_and_fork_auto_subscribe_the_requester() {
+fn gui_spawn_and_create_auto_subscribe_the_requester() {
     with_test_state_dir("gui-spawn-sub", || {
         let scratch = temp_scratch("gui-spawn-sub");
         let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
@@ -350,20 +350,6 @@ fn gui_spawn_create_and_fork_auto_subscribe_the_requester() {
             &g.id,
         );
         assert!(eng.subscriptions_of(&g.id).contains(&"notes".to_string()));
-
-        let _ = eng.handle_gui(
-            GuiRequest::ForkWorkspace {
-                workspace: "lab".into(),
-                name: Some("lab-fork".into()),
-            },
-            &g.id,
-        );
-        assert!(
-            eng.subscriptions_of(&g.id)
-                .contains(&"lab-fork".to_string()),
-            "fork target must land in the requester's set: {:?}",
-            eng.subscriptions_of(&g.id)
-        );
 
         // A ctl-side spawn subscribes NOBODY (parked everywhere; GUIs badge it).
         let _ = eng.spawn(SpawnSpec {

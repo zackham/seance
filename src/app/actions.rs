@@ -43,10 +43,6 @@ pub struct ActTogglePopout(pub String);
 
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]
-pub struct ActForkWorkspace(pub String);
-
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
 pub struct ActKillWorkspace(pub String);
 
 /// Move a circle out of this GUI's active band into the parked group
@@ -129,11 +125,6 @@ pub struct ActRenameWorkspace(pub String);
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]
 pub struct ActShareReplay(pub String);
-
-/// Bump workspace recency without selecting it (sidebar context menu).
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActTouchWorkspace(pub String);
 
 /// Open the quicklaunch editor pre-filled for the named entry (context menu).
 #[derive(Action, Clone, PartialEq, Deserialize)]

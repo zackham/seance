@@ -1455,25 +1455,6 @@ impl Engine {
                 self.push_state_to_all();
                 None
             }
-            GuiRequest::ForkWorkspace { workspace, name } => {
-                match self.fork_workspace(&workspace, name) {
-                    Ok(new_ws) => {
-                        self.subscribe_conn(window_id, &new_ws);
-                        self.persist();
-                        self.push_state_to_all();
-                        Some(GuiEvent::Ack {
-                            ok: true,
-                            data: Some(json!({"workspace": new_ws})),
-                            error: None,
-                        })
-                    }
-                    Err(e) => Some(GuiEvent::Ack {
-                        ok: false,
-                        data: None,
-                        error: Some(e.to_string()),
-                    }),
-                }
-            }
             GuiRequest::SetFocus { pane, workspace } => {
                 let mut workspace_changed = false;
                 let mut flush_ws: Option<String> = None;

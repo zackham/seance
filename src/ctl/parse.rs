@@ -105,26 +105,6 @@ pub(crate) fn parse_propose(args: Vec<String>) -> Result<ControlRequest, String>
     })
 }
 
-/// `fork [--workspace W] [--name N]`
-pub(crate) fn parse_fork(args: Vec<String>) -> Result<ControlRequest, String> {
-    let mut workspace = None;
-    let mut name = None;
-    let mut it = args.into_iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--workspace" => workspace = Some(it.next().ok_or("fork: --workspace needs a value")?),
-            "--name" => name = Some(it.next().ok_or("fork: --name needs a value")?),
-            other => return Err(format!("fork: unknown arg '{other}'")),
-        }
-    }
-    Ok(ControlRequest::WorkspaceFork {
-        workspace,
-        name,
-        scope: None,
-        from: None,
-    })
-}
-
 /// `ask QUESTION... [--choices a,b,c]`
 pub(crate) fn parse_ask(args: Vec<String>) -> Result<ControlRequest, String> {
     let mut choices = None;
@@ -257,14 +237,6 @@ pub(crate) fn with_identity(
         } => LastCommand {
             pane,
             failed_only,
-            scope,
-            from,
-        },
-        WorkspaceFork {
-            workspace, name, ..
-        } => WorkspaceFork {
-            workspace,
-            name,
             scope,
             from,
         },

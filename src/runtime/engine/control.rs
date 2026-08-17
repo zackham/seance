@@ -598,27 +598,6 @@ impl Engine {
                     "panes": panes,
                 }))
             }
-            WorkspaceFork {
-                workspace,
-                name,
-                scope,
-                from,
-            } => {
-                let src = workspace
-                    .or_else(|| scope.clone())
-                    .or_else(|| self.selected_workspace.clone());
-                let Some(src) = src else {
-                    return err("fork: no source workspace".into());
-                };
-                match self.fork_workspace(&src, name) {
-                    Ok(n) => {
-                        events::log(&actor(&from), Some(&n), None, "workspace_forked", n.clone());
-                        self.persist();
-                        ok(json!({"workspace": n}))
-                    }
-                    Err(e) => err(e.to_string()),
-                }
-            }
             CmdBegin {
                 command, cwd, from, ..
             } => {

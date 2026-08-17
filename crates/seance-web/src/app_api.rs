@@ -48,8 +48,6 @@ pub trait Actions {
     /// (uniquified against all known workspaces), single pane,
     /// no rename prompt.
     fn quicklaunch(&self, name: &str, cwd: Option<String>, command: Option<String>);
-    /// Bump a workspace's recency (context-menu "touch") + flight-recorder log.
-    fn touch_workspace(&self, ws: &str);
     /// Sidebar row menu "park": drop a circle out of the active list (and out
     /// of the daemon subscription) into the parked group.
     fn park_workspace(&self, ws: &str);

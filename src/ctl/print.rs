@@ -353,7 +353,6 @@ COMMANDS:
     ask \"Q\" [--choices a,b]       blocking human question
     propose PANE CMD --reason R   ghost command (Enter/Esc)
     human / brief / roster|stage  focus + dense workspace snapshot
-    fork [--workspace W] [--name N]
     commands PANE / last-command PANE [--failed]
     watch [opts]                  stream events
          --kinds a,b  --pane P  --actor A  --since-seq N  --no-catch-up

@@ -68,8 +68,9 @@ use gpui::{
 };
 use gpui_component::{
     highlighter::HighlightTheme,
+    notification::Notification,
     text::{markdown, markdown_ast, MarkdownNode, TextViewStyle},
-    ActiveTheme as _, StyledExt as _,
+    ActiveTheme as _, StyledExt as _, WindowExt as _,
 };
 
 use crate::theme::SeancePalette;
@@ -103,6 +104,35 @@ fn heading_px(level: u8) -> gpui::Pixels {
         3 => px(16.),
         _ => px(15.),
     }
+}
+
+/// Label for the copy-contents button. It names the payload rather than the
+/// pane: what lands on the clipboard is the markdown *source*, not the render
+/// you're looking at, and "md" is the shortest honest way to say so.
+fn copy_body_label(is_markdown: bool) -> &'static str {
+    if is_markdown {
+        "⧉ md"
+    } else {
+        "⧉ text"
+    }
+}
+
+/// Tooltip for the copy-contents button. In history mode it says *which*
+/// version you're about to copy — the pane is pinned to a snapshot, and a
+/// silent copy of not-the-live-file is exactly the paste you'd trust wrongly.
+fn copy_body_tip(is_markdown: bool, is_live: bool) -> &'static str {
+    match (is_markdown, is_live) {
+        (true, true) => "copy the markdown source (as on disk)",
+        (true, false) => "copy this snapshot's markdown source",
+        (false, true) => "copy the file's text (as on disk)",
+        (false, false) => "copy this snapshot's text",
+    }
+}
+
+/// Tooltip helper — `tip()` in `app::util` is private to that module, and a
+/// file pane pops out into its own window anyway.
+fn tip(text: &'static str) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    move |window, cx| gpui_component::tooltip::Tooltip::new(text).build(window, cx)
 }
 
 /// A foldable heading: caret, the heading text at its normal size, and — when
@@ -928,10 +958,46 @@ impl FileView {
         Some(line_count_delta(prev, &self.content))
     }
 
+    /// Put `text` on the system clipboard and toast what happened.
+    ///
+    /// Goes through [`crate::clipboard`] — same seam the terminal's copy uses,
+    /// so the Wayland detour (ownership in a `wl-copy` child) is one thing that
+    /// exists once. Empty payloads are a no-op rather than a "copied · 0 chars"
+    /// lie.
+    fn copy_to_clipboard(
+        &self,
+        mut text: String,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        crate::clipboard::cap_copy_len(&mut text);
+        match crate::clipboard::copy_text_to_clipboard(&text, cx) {
+            Ok(via) => {
+                let msg = crate::clipboard::copied_toast(&text);
+                eprintln!("[seance gui] file pane {msg} via {via}");
+                // The notification itself must not be able to take us down.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    window.push_notification(Notification::success(msg), cx);
+                }));
+            }
+            Err(e) => {
+                eprintln!("[seance gui] file pane copy failed: {e}");
+                let msg = format!("copy failed: {e}");
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    window.push_notification(Notification::error(msg), cx);
+                }));
+            }
+        }
+    }
+
     // ---- rendering helpers ----
 
-    /// The header strip: filename + dimmed path, live/history indicator, and the
-    /// ◀ N/M ▶ ⦿live controls. Buttons are plain styled divs (house style).
+    /// The header strip: filename + dimmed path, the two copy buttons, the
+    /// live/history indicator, and the ◀ N/M ▶ ⦿live controls. Buttons are
+    /// plain styled divs (house style).
     fn render_header(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let basename = self
             .path
@@ -940,6 +1006,9 @@ impl FileView {
             .unwrap_or("(file)")
             .to_string();
         let full = self.path.to_string_lossy().to_string();
+        // The header paints the path (and moves the string doing it); the copy
+        // button needs its own.
+        let full_for_copy = full.clone();
 
         let total = self.snapshots.len();
         // 1-based counter for humans. Live tail reads as "M/M" (newest).
@@ -1017,6 +1086,28 @@ impl FileView {
                             .child(full),
                     ),
             )
+            // ⧉ path / ⧉ md — copy the two things a file pane knows. Next to
+            // the path they name, before the history controls, so the strip
+            // still reads left-to-right as "what this is" then "which version".
+            .child({
+                let full_path = full_for_copy.clone();
+                btn("copypath", "⧉ path", true)
+                    .tooltip(tip("copy the full path to the clipboard"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.copy_to_clipboard(full_path.clone(), window, cx)
+                    }))
+            })
+            .child({
+                let is_md = self.is_markdown();
+                // Nothing loaded (or nothing in the file) → inert, so the
+                // button can't promise a copy it has no content for.
+                let has_body = self.loaded && !self.content.is_empty();
+                btn("copybody", copy_body_label(is_md), has_body)
+                    .tooltip(tip(copy_body_tip(is_md, is_live)))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.copy_to_clipboard(this.content.clone(), window, cx)
+                    }))
+            })
             // live / history indicator dot + word
             .child(
                 div()
@@ -1920,4 +2011,30 @@ fn greedy_line_diff(a: &[&str], b: &[&str]) -> Vec<DiffLine> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_copy_button_names_what_it_copies() {
+        assert_eq!(copy_body_label(true), "⧉ md");
+        assert_eq!(copy_body_label(false), "⧉ text");
+    }
+
+    #[test]
+    fn history_mode_says_it_is_copying_a_snapshot() {
+        // The whole point: a copy taken while pinned to history is NOT the
+        // live file, and the tooltip is the only place that can say so.
+        assert!(copy_body_tip(true, false).contains("snapshot"));
+        assert!(copy_body_tip(false, false).contains("snapshot"));
+        assert!(!copy_body_tip(true, true).contains("snapshot"));
+        assert!(!copy_body_tip(false, true).contains("snapshot"));
+    }
+
+    #[test]
+    fn live_markdown_promises_the_source_not_the_render() {
+        assert!(copy_body_tip(true, true).contains("source"));
+    }
 }

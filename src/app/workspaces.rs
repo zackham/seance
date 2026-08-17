@@ -947,38 +947,6 @@ impl SeanceApp {
         self.reorder_pane(slug, workspace, None, cx);
     }
 
-    /// Fork a workspace via the daemon (sole owner of PTYs + scratch copy).
-    /// GUI never spawns local PTYs post-daemon-split.
-    pub(super) fn fork_workspace(
-        &mut self,
-        src: &str,
-        name: Option<String>,
-        actor: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<String> {
-        if !self.panes.iter().any(|p| p.workspace == src) {
-            return None;
-        }
-        if let Err(e) = self.client.fork_workspace(src, name.clone()) {
-            eprintln!("[seance] fork_workspace via daemon failed: {e:#}");
-            return None;
-        }
-        let new_ws = name
-            .as_ref()
-            .map(|n| crate::state::slugify(n))
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| format!("{src}-fork"));
-        self.client.log_event(
-            actor,
-            Some(&new_ws),
-            None,
-            "workspace_forked",
-            format!("fork requested '{src}' -> '{new_ws}' (daemon)"),
-        );
-        cx.notify();
-        Some(new_ws)
-    }
-
     /// Kill every pane in a workspace, then drop the workspace itself.
     /// Sidebar banish × click. Banishing kills every pane's PTY and nothing
     /// brings them back, so a bare click only *arms* the ×; the kill needs a

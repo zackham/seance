@@ -2,6 +2,7 @@ mod agency;
 mod agents;
 mod app;
 mod caps;
+mod clipboard;
 mod cmdlog;
 mod control;
 mod ctl;

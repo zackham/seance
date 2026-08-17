@@ -164,11 +164,6 @@ pub enum GuiRequest {
     KillWorkspace {
         workspace: String,
     },
-    ForkWorkspace {
-        workspace: String,
-        #[serde(default)]
-        name: Option<String>,
-    },
     SetFocus {
         #[serde(default)]
         pane: Option<String>,

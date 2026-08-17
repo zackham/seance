@@ -1084,7 +1084,6 @@ pub(super) fn render_help() -> gpui::AnyElement {
         .child(row("ctl status-set STATE", "planning|working|blocked|needs-human|done|idle"))
         .child(row("ctl scratchpad P", "path of that pane's shared notes file"))
         .child(row("ctl timeline --since 10m", "attributed event log (human + agent)"))
-        .child(row("ctl fork [--name N]", "fork a workspace: panes respawn, notes copy"))
         .child(row("ctl skill", "print the agent-facing driving guide (paste target)"))
         .child(row("ctl commands P", "structured shell history from shell integration"))
         .child(row("ctl last-command P", "most recent {command,cwd,exit,duration_ms}"))

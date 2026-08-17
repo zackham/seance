@@ -15,6 +15,46 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [0.25.0] — 2026-08-17
+
+### Added
+
+- **File panes copy.** Two buttons in the pane header: `⧉ path` puts the file's
+  full path on the clipboard, `⧉ md` (`⧉ text` for a non-markdown file) puts
+  the body there. Reading a doc in a pane and then wanting to hand it to
+  someone — a path into a prompt, a section into a message — was a trip back to
+  a shell for a file you were already looking at.
+
+  What copies is the **source**, not the render: a folded outline still yields
+  the whole document, and while pinned to history it's that snapshot's text —
+  which the tooltip says out loud, because a silent copy of not-the-live-file
+  is the paste you'd trust wrongly.
+
+### Changed
+
+- The Wayland copy detour (ownership in a `wl-copy` child, because GPUI's
+  in-process write has killed the GUI with no panic to show for it) moves out
+  of the terminal view into `src/clipboard.rs`. One copy seam, so the next
+  surface that copies inherits the hard-won part instead of re-deriving it.
+
+- **Pin leads the circle's right-click menu** (both clients). It's the item
+  aimed at the rail the row lives in, and the one reached for often enough to
+  want under the cursor.
+
+### Removed
+
+- **`touch (bump recency)`** — the manual bump. Recency already moves on its
+  own (typing in a pane, a circle finishing work, a circle being created), so
+  the menu item was a hand crank on a motor that runs. The automatic clock is
+  untouched.
+
+- **`fork workspace ⑂`, end to end** — never used, in a year of daily driving.
+  Gone with it: `seance ctl fork`, `ControlRequest::WorkspaceFork`,
+  `GuiRequest::ForkWorkspace`, the engine's respawn-and-copy-scratchpads
+  implementation, the `workspace_fork` capability, and the web client's menu
+  entry. **This is a wire break** — hence the minor bump, and both clients plus
+  the daemon have to land together (see the version-lockstep rule).
+
 ## [0.24.0] — 2026-08-16
 
 **Remote seance stops shipping whole screens.** Measured end to end by

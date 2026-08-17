@@ -226,7 +226,6 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
             scope: None,
             from: None,
         }),
-        "fork" => parse_fork(sub_args),
         "cmd-begin" => {
             let mut cwd = None;
             let mut words: Vec<String> = Vec::new();
@@ -919,27 +918,6 @@ mod tests {
             _ => panic!("expected ask"),
         }
         assert!(parse_ask(vec![]).is_err());
-    }
-
-    #[test]
-    fn parse_fork_flags() {
-        let req = parse_fork(vec![
-            "--workspace".into(),
-            "lab".into(),
-            "--name".into(),
-            "lab-2".into(),
-        ])
-        .unwrap();
-        match req {
-            ControlRequest::WorkspaceFork {
-                workspace, name, ..
-            } => {
-                assert_eq!(workspace.as_deref(), Some("lab"));
-                assert_eq!(name.as_deref(), Some("lab-2"));
-            }
-            _ => panic!("expected fork"),
-        }
-        assert!(parse_fork(vec!["stray".into()]).is_err());
     }
 
     #[test]

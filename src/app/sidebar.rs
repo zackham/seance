@@ -793,23 +793,21 @@ impl SeanceApp {
                 .context_menu({
                     let ws_m = ws_for_menu.clone();
                     move |menu, _, _| {
-                        let m = menu
-                            .menu(
-                                "touch (bump recency)",
-                                Box::new(ActTouchWorkspace(ws_m.clone())),
-                            )
+                        // Pin leads: it's the one item aimed at the rail
+                        // itself (where this row sits), and the one you reach
+                        // for often enough to want it under the cursor.
+                        let m = if pinned {
+                            menu.menu("unpin", Box::new(ActUnpinWorkspace(ws_m.clone())))
+                        } else {
+                            // Pinning a parked circle activates it too.
+                            menu.menu("pin to top", Box::new(ActPinWorkspace(ws_m.clone())))
+                        };
+                        let m = m
                             .menu(
                                 "rename workspace",
                                 Box::new(ActRenameWorkspace(ws_m.clone())),
                             )
-                            .menu("fork workspace ⑂", Box::new(ActForkWorkspace(ws_m.clone())))
                             .menu("share replay…", Box::new(ActShareReplay(ws_m.clone())));
-                        let m = if pinned {
-                            m.menu("unpin", Box::new(ActUnpinWorkspace(ws_m.clone())))
-                        } else {
-                            // Pinning a parked circle activates it too.
-                            m.menu("pin to top", Box::new(ActPinWorkspace(ws_m.clone())))
-                        };
                         let m = if parked {
                             m.menu(
                                 "add to active",
