@@ -725,7 +725,7 @@ impl ClientState {
                 }
                 Applied::Grid { pane }
             }
-            GuiEvent::GridBin { pane, data_b64 } => {
+            GuiEvent::GridBin { pane, data_b64, .. } => {
                 let data = match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
                     Ok(d) => d,
                     Err(_) => return Applied::NeedRefresh { pane },
@@ -925,6 +925,7 @@ mod tests {
         let ev = GuiEvent::GridBin {
             pane: "w-1".into(),
             data_b64: base64::engine::general_purpose::STANDARD.encode(bin),
+            seq: 0,
         };
         assert_eq!(
             st.apply_event(ev, 0.0),
@@ -947,6 +948,7 @@ mod tests {
         let ev = GuiEvent::GridBin {
             pane: "w-1".into(),
             data_b64: base64::engine::general_purpose::STANDARD.encode(bin),
+            seq: 0,
         };
         // No base grid stored → decoder fails → refresh requested.
         assert_eq!(

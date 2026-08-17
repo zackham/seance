@@ -15,7 +15,82 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
-## [Unreleased]
+## [0.24.0] — 2026-08-16
+
+**Remote seance stops shipping whole screens.** Measured end to end by
+replaying a real two-hour session's recorded frames through the new path:
+**196 MB → 5.9 MB on the wire, 33x**, and the framing the daemon picks went
+from 2,500 full grids to 2.
+
+The starting point was a report that a remote window felt slow while a local
+one did not. The daemon was healthy (`input→gridpush` p50 3.0ms) and the link
+was not saturated (94 KB/s on a 20Mbps, 36ms path), so neither end was the
+problem. What the recorder showed was the shape of the traffic: on a busy pane,
+**full grid frames were 16% of frames but 92% of bytes**, averaging 55KB raw —
+74KB after the base64 the wire uses — arriving up to four times a second. A
+74KB frame is ~60 packets that a keystroke's echo has to queue behind on the
+same TCP connection, which is what "slow" felt like.
+
+Four causes, all fixed:
+
+### Added
+
+- **`SCZ3`, a deflate container for grid frames.** Terminal grids are extremely
+  compressible: measured over 200 real full frames, 55,551 B → 4,558 B
+  (**12.3x**), and row damage 3.8x, at 0.5ms per frame. It is a pure container
+  — an ordinary SCG3 frame lives inside — so the recorder, the replay player
+  and the frozen-pane store keep reading and writing raw frames, and
+  `decode_grid_bin_onto` unwraps it for both clients at once. Level 6 chosen on
+  measurement: level 1 gave only 7.9x for a quarter of the time saved.
+
+- **`FRAME_SCROLL`: the screen scrolled, here are the rows that appeared.**
+  Output arriving at the bottom of a terminal changes every row, which read as
+  "more than half the screen changed" and sent a whole grid. It is now a shift
+  the receiver applies before the damage rows. **A scroll frame is exact
+  whatever delta the sender guesses**, because every row that does not match
+  after the shift is carried in the body — detection quality only ever costs
+  bytes, never correctness, which is what makes guessing safe.
+
+- **Header-only frames.** A spinner tick in the OSC title changes no cells and
+  used to cost a full grid; it now costs a few dozen bytes. That path alone was
+  9.7 MB of one 30-minute segment.
+
+- **A send window (`GuiRequest::GridAck`).** The 0.23 coalescer bounds the
+  daemon's own queue, but ~2.4MB sits downstream of it that the daemon cannot
+  see or merge: the unix send buffer, ssh's 2MB per-channel window, the TCP
+  send buffer. That is where the 1053ms in the coalescer's own measurement was
+  hiding. Clients now ack the frames they receive and the daemon keeps at most
+  8 in flight, merging the rest — so staleness is capped at frames rather than
+  megabytes. A client that never acks degrades to the old behavior after a 2s
+  stall rather than freezing, and this closes the same hole in the web bridge
+  (whose ws pump has its own unbounded queue) without touching it.
+
+- **Instrumentation for the stage that was dark.** The daemon measured up to
+  `gridpush` and the GUI measured from `bridge age`; nothing measured the queue
+  and socket in between. Now `daemon grid queue wait` and `daemon socket write`
+  do, plus a `[seance vol]` line carrying wire bytes and rate — the number that
+  had to be reconstructed from `ss` counters to find this in the first place.
+
+- **`-C` on the ssh forward.** Frames arrive deflated now, but they ride base64
+  inside JSON lines and the control chatter around them is plain text.
+
+### Changed
+
+- **Framing is decided per connection, not globally.** Damage is only
+  meaningful to a receiver holding the base it names — a per-connection fact
+  that was being answered for everyone at once. Three amplifiers came out of
+  that: a frame was promoted to a full grid for *every* window whenever any
+  recipient lacked a base (an overview thumb watcher was enough); `Attach`
+  cleared the daemon's shared last-frame cache, so **one window reconnecting
+  cost every other window a full grid for every pane it was watching**; and the
+  post-attach `ForceFullGrid` fired at everyone. Each is now scoped to the
+  window that actually needs it. If the per-connection base is ever wrong the
+  receiver's decode fails and it asks for a refresh — the error path is a
+  resync, not a corrupt screen.
+
+- **Wire version is a break.** Old clients cannot decode `SCZ3` or
+  `FRAME_SCROLL`; the daemon's exact-build hello check already refuses them.
+  Rebuild the web bundle (`./scripts/build-web.sh release`) with the daemon.
 
 ### Fixed
 

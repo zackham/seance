@@ -30,9 +30,15 @@ browser (wasm)                      native
 ```
 
 - **Wire**: identical to the native GUI — `Hello` (strict version match), then
-  `GuiRequest`/`GuiEvent` JSON lines; grids arrive as SCG3 binary (base64) and
-  are decoded by the same `seance-core` codec the daemon encodes with. One ws
-  text message = one line; the bridge is a dumb pump.
+  `GuiRequest`/`GuiEvent` JSON lines; grids arrive as SCG3 binary inside an
+  `SCZ3` deflate container (base64) and are decoded by the same `seance-core`
+  codec the daemon encodes with. One ws text message = one line; the bridge is
+  a dumb pump.
+- **Flow control** (0.24): every grid frame carries a `seq`; the client echoes
+  the highest one back as `GridAck` and the daemon keeps at most 8 in flight,
+  merging the rest. This is what bounds the bridge's ws pump — it hands frames
+  to an unbounded channel, so before the window existed the daemon never felt
+  a slow browser's backpressure at all.
 - **Auth**: daemon-minted bearer token (`<state-dir>/web-token`, 0600, 64-hex).
   The bridge accepts the ws upgrade, then closes `4401` on a bad token
   (constant-time compare, `seance_core::auth`). Transport policy is

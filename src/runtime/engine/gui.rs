@@ -12,11 +12,12 @@ use serde_json::json;
 use super::helpers::{base64_decode, now_ms};
 use super::{Engine, EnginePane, SpawnSpec};
 use crate::events;
-use crate::runtime::outqueue::OutQueue;
+use crate::runtime::outqueue::{OutQueue, Push};
 use crate::runtime::protocol::*;
 use crate::runtime::pty_session::SessionEvent;
 use crate::runtime::snapshot::{
-    dirty_rows, encode_grid_bin, encode_grid_bin_ex, CellSnap, GridSnapshot,
+    compress_frame, dirty_rows, encode_grid_bin, encode_grid_bin_ex, row_hashes, scroll_shift,
+    CellSnap, GridSnapshot,
 };
 
 /// One GUI window connection.
@@ -31,6 +32,21 @@ pub(super) struct GuiConn {
     focused_pane: Option<String>,
     overview: bool,
     subscriptions: HashSet<String>,
+    /// Panes this connection has been sent a full frame for, and can therefore
+    /// have damage applied against.
+    ///
+    /// Damage is only meaningful to a receiver holding the base it names. That
+    /// is a per-connection fact, and it used to be answered globally: if *any*
+    /// interested window lacked the base, *everyone* got a full grid. On a
+    /// local window that costs nothing; on a remote one it was 74KB to move a
+    /// cursor. Tracking it here means each connection gets the framing it
+    /// actually needs.
+    ///
+    /// Self-maintaining: a pane enters the set when its first full frame is
+    /// queued and leaves on reflow or death. If it were ever wrong, the
+    /// receiver's decode fails and it asks for a refresh — the error path is a
+    /// resync, not a corrupted screen.
+    based: HashSet<String>,
 }
 
 /// Cached last broadcast for damage detection (Arc so we don't clone every push).
@@ -56,6 +72,7 @@ impl Engine {
             focused_pane: None,
             overview: false,
             subscriptions: HashSet::new(),
+            based: HashSet::new(),
         });
         id
     }
@@ -136,19 +153,65 @@ impl Engine {
     /// gets it; there is no broadcast fallback, an unsubscribed workspace is
     /// deliberately silent on the wire (the recorder tap still runs — see
     /// `handle_session_event`).
-    fn send_grid_to_subscribers(
-        &mut self,
-        pane: &str,
-        snap: Arc<GridSnapshot>,
-        dirty: Option<Vec<u16>>,
-    ) {
+    fn send_grid_to_subscribers(&mut self, pane: &str, snap: Arc<GridSnapshot>, push: Push) {
         // Queued unencoded: each connection coalesces independently (a slow
         // link merges, a fast one doesn't) and the winning frame is encoded
         // once, at drain time, by that connection's writer.
         let ids = self.conns_streaming(pane);
-        self.gui_conns.retain(|c| {
-            !ids.iter().any(|id| id == &c.id) || c.out.push_grid(Arc::clone(&snap), dirty.clone())
+        // The engine already decided nobody can take a partial frame (first
+        // frame for the pane, or a reflow that renamed every row).
+        let global_full = matches!(push, Push::Full);
+        self.gui_conns.retain_mut(|c| {
+            if !ids.contains(&c.id) {
+                // Missing this frame is exactly what makes a base stale, so a
+                // connection that is not streaming this pane right now loses
+                // its claim to one. Without this, a window that stopped
+                // watching a circle (deselected it, closed the overview) and
+                // came back would be sent damage against a screen that had
+                // moved on underneath it.
+                c.based.remove(pane);
+                return true;
+            }
+            // A connection without the base can only be sent a whole grid,
+            // whatever the others are getting.
+            let mine = if c.based.contains(pane) && !global_full {
+                push.clone()
+            } else {
+                c.based.insert(pane.to_string());
+                Push::Full
+            };
+            c.out.push_grid(Arc::clone(&snap), mine)
         });
+    }
+
+    /// Send one connection the whole grid for `pane`, out of band.
+    ///
+    /// For the moments when a *single* window needs a base — it just attached,
+    /// subscribed, selected the circle, or asked for a refresh. It used to be
+    /// done by dropping the daemon's shared last-frame cache, which forced a
+    /// full grid to every other window too.
+    fn send_full_to(&mut self, window_id: &str, slug: &str) {
+        let Some(snap) = self.snapshot_pane(slug) else {
+            return;
+        };
+        let snap = Arc::new(snap);
+        let slug = slug.to_string();
+        self.gui_conns.retain_mut(|c| {
+            if c.id != window_id {
+                return true;
+            }
+            c.based.insert(slug.clone());
+            c.out.push_grid(Arc::clone(&snap), Push::Full)
+        });
+    }
+
+    /// Drop every connection's base for `pane` — the next frame each one gets
+    /// will be a full grid. For death and respawn, where a reused slug must
+    /// not inherit the old pane's base.
+    pub(super) fn invalidate_bases(&mut self, pane: &str) {
+        for c in &mut self.gui_conns {
+            c.based.remove(pane);
+        }
     }
 
     /// Window ids whose subscription/selection makes them want `pane`'s frames.
@@ -359,6 +422,11 @@ impl Engine {
     }
 
     /// Pack a grid as compact `grid_bin` (SCG3 full or row-damage).
+    ///
+    /// This is the one-off path (refresh, attach), pushed as a semantic event
+    /// rather than through the coalescing grid queue — so it carries `seq: 0`,
+    /// which clients read as "outside the flow-controlled stream, nothing to
+    /// ack".
     fn grid_event(snap: GridSnapshot, dirty: Option<&[u16]>) -> GuiEvent {
         let enc = match dirty {
             Some(d) => encode_grid_bin_ex(&snap, Some(d)),
@@ -367,10 +435,12 @@ impl Engine {
         match enc {
             Ok(bytes) => {
                 use base64::Engine as _;
-                let data_b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                let data_b64 =
+                    base64::engine::general_purpose::STANDARD.encode(compress_frame(bytes));
                 GuiEvent::GridBin {
                     pane: snap.pane.clone(),
                     data_b64,
+                    seq: 0,
                 }
             }
             Err(e) => {
@@ -384,7 +454,7 @@ impl Engine {
         let cols = snap.cols as usize;
         let rows = snap.rows as usize;
 
-        let mut damage: Option<Vec<u16>> = None;
+        let mut push = Push::Full;
         let mut skip = false;
         if let Some(prev) = self.last_grid_cells.get(&snap.pane) {
             if prev.cols == snap.cols
@@ -399,14 +469,32 @@ impl Engine {
                         // depend on title; dropping these left stale chrome.
                         if prev.title == snap.title {
                             skip = true;
+                        } else {
+                            // Title-only. This used to send a FULL grid: 55KB
+                            // to move one spinner glyph, measured at 7% of all
+                            // full-frame bytes on a busy pane.
+                            push = Push::HeaderOnly;
                         }
-                        // title-only: send FULL (damage empty would look like
-                        // no-op on the paint path; FULL refreshes title field).
                     } else {
-                        damage = Some(vec![snap.cursor_row]);
+                        push = Push::Damage(vec![snap.cursor_row]);
                     }
                 } else if d.len() * 2 < rows.max(1) {
-                    damage = Some(d);
+                    push = Push::Damage(d);
+                } else {
+                    // Too much changed for row damage — but "everything moved
+                    // up N rows" is what scrolling output looks like, and it
+                    // is the dominant case on an agent pane. Try to describe it
+                    // as a shift before falling back to a whole grid.
+                    let prev_h = row_hashes(prev.cells.as_ref(), cols, rows);
+                    let next_h = row_hashes(&snap.cells, cols, rows);
+                    if let Some((delta, rows_after)) = scroll_shift(&prev_h, &next_h) {
+                        if rows_after.len() < d.len() {
+                            push = Push::Scroll {
+                                delta,
+                                rows: rows_after,
+                            };
+                        }
+                    }
                 }
             }
         }
@@ -428,7 +516,7 @@ impl Engine {
         }
         crate::latency_probe::complete("d_input", &snap.pane, "daemon input→gridpush");
         let pane = snap.pane.clone();
-        self.send_grid_to_subscribers(&pane, Arc::new(snap), damage);
+        self.send_grid_to_subscribers(&pane, Arc::new(snap), push);
     }
 
     /// The pane's push rate = the FASTEST any interested connection wants
@@ -467,26 +555,13 @@ impl Engine {
                 return;
             }
         }
-        // Overview thumbs: FULL whenever ANY recipient has this workspace
-        // non-selected (it's watching a thumb and never received the damage
-        // base — sending damage there desyncs into permanent black). Damage is
-        // only safe when every recipient has the workspace selected.
-        let use_full = self
-            .panes
-            .iter()
-            .find(|p| p.slug == slug)
-            .map(|p| {
-                self.gui_conns
-                    .iter()
-                    .filter(|c| Self::conn_rate_for(c, &p.workspace).is_some())
-                    .any(|c| c.selected_workspace.as_deref() != Some(p.workspace.as_str()))
-            })
-            .unwrap_or(false);
-        if use_full {
-            self.push_grid_full(slug);
-        } else {
-            self.push_grid_now(slug);
-        }
+        // Which recipients can take damage is now a per-connection question,
+        // answered in `send_grid_to_subscribers` from what each one has
+        // actually been sent. This used to promote the frame to FULL for
+        // *everyone* whenever any recipient (an overview thumb watcher) lacked
+        // the base — which is how a remote window ended up receiving whole
+        // 74KB grids to move a cursor.
+        self.push_grid_now(slug);
     }
 
     fn push_grid_now(&mut self, slug: &str) {
@@ -516,10 +591,15 @@ impl Engine {
         }
     }
 
-    fn flush_workspace_grids(&mut self, workspace: &str) {
-        // Sleeping panes are included: they have no session, but they do have
-        // a frozen frame, and selecting the circle is exactly when you want to
-        // read it.
+    /// Give one window whole grids for a circle it just brought on screen.
+    ///
+    /// Sleeping panes are included: they have no session, but they do have a
+    /// frozen frame, and selecting the circle is exactly when you want to read
+    /// it. Full frames only — a pane may have redrawn heavily while the circle
+    /// was off-screen, and damage against a stale base leaves a corrupt grid
+    /// until the next resize. Only *this* window pays for that; the others
+    /// have been following the pane all along.
+    fn flush_workspace_grids(&mut self, window_id: &str, workspace: &str) {
         let slugs: Vec<String> = self
             .panes
             .iter()
@@ -527,10 +607,7 @@ impl Engine {
             .map(|p| p.slug.clone())
             .collect();
         for slug in slugs {
-            // FULL only — panes may have redrawn heavily while this workspace
-            // was off-screen (Claude TUIs especially). Damage against the
-            // last-pushed base leaves blank or corrupt grids until resize.
-            self.push_grid_full(&slug);
+            self.send_full_to(window_id, &slug);
         }
     }
 
@@ -601,9 +678,10 @@ impl Engine {
                 self.push_grid_now(slug);
                 self.record_grid_tap(&slug_r, false);
             }
-            SessionEvent::ForceFullGrid { slug } => {
-                self.push_grid_full(slug);
-            }
+            SessionEvent::ForceFullGrid { slug, window } => match window.clone() {
+                Some(w) => self.send_full_to(&w, slug),
+                None => self.push_grid_full(slug),
+            },
             SessionEvent::ActivityNote { slug, t_ms } => {
                 // Recorder observed real output for this pane — the daemon
                 // owns the clock, clients only mirror it.
@@ -873,6 +951,11 @@ impl Engine {
         // label the daemon then treats as an unknown circle.
         let req = self.normalize_workspace_keys(req);
         match req {
+            // Handled at the connection layer (`daemon::serve_gui`), which has
+            // the send window right there and can do it without taking the
+            // engine lock — acks arrive at frame rate and must not queue
+            // behind pane work.
+            GuiRequest::GridAck { .. } => None,
             GuiRequest::Attach {
                 selected_workspace,
                 focused_pane,
@@ -926,9 +1009,11 @@ impl Engine {
                         self.focused_pane = focus;
                     }
                 }
-                // GUI reconnect has no prior base — force FULL frames so we
-                // never send DAMAGE against a stale/missing GUI snapshot.
-                self.last_grid_cells.clear();
+                // A reconnecting GUI has no prior base — but that is true of
+                // *this* connection only, and `GuiConn::based` already says so.
+                // This used to clear the daemon's shared last-frame cache,
+                // which made one window attaching cost every other window a
+                // full grid for every pane it was watching.
                 // Kick PTYs this window subscribes to so empty post-handoff
                 // Terms repaint.
                 let slugs: Vec<String> = self
@@ -947,14 +1032,18 @@ impl Engine {
                 // Also refresh peers' rosters (window list / labels).
                 self.push_state_to_all();
                 for slug in &slugs {
-                    self.push_grid_full(slug);
+                    self.send_full_to(window_id, slug);
                 }
                 let tx = self.event_tx.clone();
                 let delayed = slugs.clone();
+                let window = window_id.to_string();
                 thread::spawn(move || {
                     thread::sleep(Duration::from_millis(150));
                     for slug in delayed {
-                        let _ = tx.send(SessionEvent::ForceFullGrid { slug });
+                        let _ = tx.send(SessionEvent::ForceFullGrid {
+                            slug,
+                            window: Some(window.clone()),
+                        });
                     }
                 });
                 Some(state)
@@ -972,7 +1061,7 @@ impl Engine {
                     .and_then(|c| Self::conn_rate_for(c, &workspace))
                     .is_some();
                 if streams {
-                    self.flush_workspace_grids(&workspace);
+                    self.flush_workspace_grids(window_id, &workspace);
                 }
                 None
             }
@@ -998,7 +1087,7 @@ impl Engine {
                 self.persist();
                 self.push_state_to_all();
                 if res.is_ok() {
-                    self.flush_workspace_grids(&workspace);
+                    self.flush_workspace_grids(window_id, &workspace);
                 }
                 return Some(match res {
                     Ok(n) => GuiEvent::Ack {
@@ -1411,7 +1500,7 @@ impl Engine {
                 self.persist();
                 if workspace_changed {
                     if let Some(w) = flush_ws {
-                        self.flush_workspace_grids(&w);
+                        self.flush_workspace_grids(window_id, &w);
                     }
                 } else if let Some(fp) = flush_pane {
                     self.push_grid_now(&fp);
@@ -1432,13 +1521,15 @@ impl Engine {
                         .map(|p| p.slug.clone())
                         .collect();
                     for slug in slugs {
-                        self.push_grid_full(&slug);
+                        self.send_full_to(window_id, &slug);
                     }
                 }
                 None
             }
             GuiRequest::RefreshGrid { pane } => {
-                self.push_grid_full(&pane);
+                // A refresh is one window saying "I lost my base" — the others
+                // still have theirs.
+                self.send_full_to(window_id, &pane);
                 None
             }
             GuiRequest::Bye => {

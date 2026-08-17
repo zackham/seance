@@ -173,6 +173,11 @@ fn spawn_forward(host: &str, local: &std::path::Path, remote: &str) -> Result<Ch
     let mut cmd = Command::new("ssh");
     cmd.args([
         "-N",
+        // Grid frames arrive deflated (SCZ3), but they ride base64'd inside
+        // JSON lines and the control chatter around them is plain text, so
+        // there is still ~25% here — and it costs nothing at the volumes the
+        // wire now carries. Config can still turn it off per host.
+        "-C",
         "-o",
         "BatchMode=yes",
         "-o",

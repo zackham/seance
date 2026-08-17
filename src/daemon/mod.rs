@@ -404,17 +404,29 @@ fn serve_gui(
                     break; // queue closed
                 }
                 for item in batch {
+                    let is_grid = matches!(item, crate::runtime::outqueue::Outgoing::Grid { .. });
                     // Encoding here rather than at push time is the point: a
                     // backed-up connection encodes once per frame it actually
                     // sends, not once per frame it never sends.
                     let Ok(json) = serde_json::to_string(&item.into_event()) else {
                         continue;
                     };
+                    if is_grid {
+                        crate::latency_probe::count("daemon grid wire", json.len() as u64 + 1);
+                    }
+                    let write_t0 = std::time::Instant::now();
                     let mut w = writer.lock().unwrap();
                     if writeln!(w, "{json}").is_err() {
                         out.close();
                         return;
                     }
+                    // Time spent inside the socket write is time the transport
+                    // could not take the bytes — the other half of the stage
+                    // that used to be invisible between daemon and GUI.
+                    crate::latency_probe::record(
+                        "daemon socket write",
+                        write_t0.elapsed().as_micros() as u64,
+                    );
                 }
             }
         });
@@ -442,6 +454,13 @@ fn serve_gui(
                 continue;
             }
         };
+        // Flow-control acks arrive at frame rate and touch nothing but this
+        // connection's send window — handling them here keeps them off the
+        // engine lock entirely.
+        if let GuiRequest::GridAck { seq } = req {
+            out.ack(seq);
+            continue;
+        }
         // Fs bridge ops run on their own thread: disk / host-select latency
         // must never stall the input pipeline. Correlated by id.
         if let GuiRequest::Fs { id, fs } = req {

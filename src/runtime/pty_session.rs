@@ -45,8 +45,14 @@ pub enum SessionEvent {
         slug: String,
     },
     /// Guaranteed FULL frame (post-kick repaint, damage desync recovery).
+    ///
+    /// `window` scopes it to the connection that asked: an attach only leaves
+    /// *that* window without a base, and promoting the frame for everyone is
+    /// how a remote window ended up receiving whole grids it already had.
+    /// `None` means every connection (a reflow, where no base survives).
     ForceFullGrid {
         slug: String,
+        window: Option<String>,
     },
     Title {
         slug: String,

@@ -35,7 +35,8 @@ fn is_true(v: &bool) -> bool {
 }
 
 /// One visible cell.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+// `Copy` so the scroll path can `copy_within` a grid in one memmove.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CellSnap {
     /// Glyph. Omitted when space (the common case).
     #[serde(default = "default_space", skip_serializing_if = "is_space")]
@@ -202,25 +203,205 @@ impl GridSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// SCG3 binary wire format (full frame or row-damage)
+// SCG3 binary wire format (full frame, row-damage, or scroll)
 // ---------------------------------------------------------------------------
 //
 // Magic `SCG3`. Frame kinds:
 //   FULL (0)    — RLE of all cols*rows cells (same RLE ops as SCG2)
 //   DAMAGE (1)  — u16 n, then n × (u16 row + RLE of exactly `cols` cells)
+//   SCROLL (2)  — i16 delta, then a DAMAGE body. The base is shifted by
+//                 `delta` rows first (positive = content moved UP, the normal
+//                 direction for output arriving at the bottom), then the rows
+//                 are applied on top.
 //
-// GUI applies DAMAGE onto the previous snapshot for that pane. Daemon always
-// sends FULL on resize / first frame / when >50% of rows change.
+// GUI applies DAMAGE / SCROLL onto the previous snapshot for that pane. Daemon
+// sends FULL on resize / first frame / when no cheaper framing applies.
+//
+// A SCROLL frame is exact whatever `delta` the sender picks, because every row
+// that does not match after the shift is carried in the damage body. Detection
+// quality (`scroll_shift`) therefore only ever affects size, never
+// correctness — which is what makes it safe to guess.
 
 const MAGIC: &[u8; 4] = b"SCG3";
+/// Deflate container: `SCZ3` + u32 raw length + raw deflate of an SCG3 frame.
+///
+/// Terminal grids are extremely compressible — a full screen of dense text
+/// measures ~12x, row damage ~4x — and the wire base64s this blob inside a
+/// JSON envelope, so every raw byte costs 1.33 on the link. Compression is a
+/// pure container: the frame inside is an ordinary SCG3 frame, so the recorder
+/// and the frozen-pane store keep writing (and reading) raw SCG3.
+const MAGIC_Z: &[u8; 4] = b"SCZ3";
 const VERSION: u8 = 1;
 const FRAME_FULL: u8 = 0;
 const FRAME_DAMAGE: u8 = 1;
+const FRAME_SCROLL: u8 = 2;
+
+/// Below this, deflate costs more in header than it saves.
+const COMPRESS_MIN: usize = 96;
+/// zlib level: 6 measured 12.3x on real full frames at 0.5ms; level 1 gave
+/// only 7.9x. The encode happens once per frame actually sent (drain time),
+/// so this is a few ms per second on a busy pane.
+const COMPRESS_LEVEL: u32 = 6;
 
 // RLE ops
 const OP_BLANKS: u8 = 0x00; // + u16 n default blanks
 const OP_CELL: u8 = 0x01; // + char u32 + fg u32 + bg u32 + style u8
 const OP_REPEAT: u8 = 0x02; // + u16 n + cell payload
+
+/// Wrap an encoded SCG3 frame in the `SCZ3` deflate container.
+///
+/// Returns the input unchanged when it is too small to be worth it or when
+/// deflate fails to shrink it, so callers can compress unconditionally.
+pub fn compress_frame(raw: Vec<u8>) -> Vec<u8> {
+    if raw.len() < COMPRESS_MIN {
+        return raw;
+    }
+    let mut z = flate2::write::DeflateEncoder::new(
+        Vec::with_capacity(raw.len() / 4),
+        flate2::Compression::new(COMPRESS_LEVEL),
+    );
+    use std::io::Write as _;
+    if z.write_all(&raw).is_err() {
+        return raw;
+    }
+    let Ok(body) = z.finish() else { return raw };
+    // 8 = magic + raw length.
+    if body.len() + 8 >= raw.len() {
+        return raw;
+    }
+    let mut out = Vec::with_capacity(body.len() + 8);
+    out.extend_from_slice(MAGIC_Z);
+    out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Unwrap an `SCZ3` container. Plain SCG3/SCG2 frames pass through untouched.
+pub fn decompress_frame(data: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, String> {
+    if data.len() < 8 || &data[..4] != MAGIC_Z {
+        return Ok(std::borrow::Cow::Borrowed(data));
+    }
+    let raw_len = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+    // A corrupt length must not let a peer ask us to allocate the world.
+    if raw_len > MAX_INFLATED {
+        return Err(format!("SCZ3 raw length {raw_len} over cap"));
+    }
+    use std::io::Read as _;
+    let mut out = Vec::with_capacity(raw_len);
+    flate2::read::DeflateDecoder::new(&data[8..])
+        .take(raw_len as u64)
+        .read_to_end(&mut out)
+        .map_err(|e| format!("SCZ3 inflate: {e}"))?;
+    if out.len() != raw_len {
+        return Err(format!("SCZ3 short inflate: {} != {raw_len}", out.len()));
+    }
+    Ok(std::borrow::Cow::Owned(out))
+}
+
+/// Inflation cap: a 500x200 grid of all-distinct cells is ~1.4MB, so 16MB is
+/// far above anything real and still bounds a hostile or corrupt frame.
+const MAX_INFLATED: usize = 16 << 20;
+
+/// FNV-1a over a row's cells. Used to find a scroll shift cheaply.
+fn row_hash(cells: &[CellSnap]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for c in cells {
+        for v in [
+            c.c as u64,
+            c.fg as u64,
+            c.bg as u64,
+            (c.bold as u64)
+                | (c.dim as u64) << 1
+                | (c.italic as u64) << 2
+                | (c.underline as u64) << 3
+                | (c.inverse as u64) << 4,
+        ] {
+            h ^= v;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
+}
+
+/// Per-row hashes of a grid, for [`scroll_shift`].
+pub fn row_hashes(cells: &[CellSnap], cols: usize, rows: usize) -> Vec<u64> {
+    if cols == 0 || cells.len() != cols * rows {
+        return Vec::new();
+    }
+    (0..rows)
+        .map(|r| row_hash(&cells[r * cols..][..cols]))
+        .collect()
+}
+
+/// Find the vertical shift that best explains `next` as `prev` scrolled, and
+/// the rows that still differ after it.
+///
+/// `delta > 0` means content moved **up** (`next[i] == prev[i + delta]`) —
+/// what happens when output arrives at the bottom of a terminal. Returns
+/// `None` when no shift beats sending plain row damage.
+///
+/// The returned damage always names every row that does not match after the
+/// shift, so the frame this produces is exact regardless of which delta wins.
+pub fn scroll_shift(prev_h: &[u64], next_h: &[u64]) -> Option<(i16, Vec<u16>)> {
+    let rows = next_h.len();
+    if rows < 4 || prev_h.len() != rows {
+        return None;
+    }
+    // A screen with many identical (usually blank) rows matches at lots of
+    // deltas. The tie-break below prefers the smallest shift, which keeps
+    // those cases sane; the damage list is computed over *all* rows either
+    // way, so a bad guess costs bytes and never correctness.
+    // Does row `i` of `next` match where a shift of `delta` says it came from?
+    let matches_at = |i: usize, delta: i16| {
+        let src = i as i32 + delta as i32;
+        src >= 0 && (src as usize) < rows && next_h[i] == prev_h[src as usize]
+    };
+    let mut best: Option<(usize, i16)> = None;
+    let max = (rows - 1) as i16;
+    for delta in -max..=max {
+        if delta == 0 {
+            continue;
+        }
+        let hits = (0..rows).filter(|&i| matches_at(i, delta)).count();
+        let better = match best {
+            None => true,
+            // Prefer more matched rows; on a tie prefer the smaller shift, so
+            // a screen full of identical rows doesn't pick an absurd delta.
+            Some((b, bd)) => hits > b || (hits == b && delta.abs() < bd.abs()),
+        };
+        if better {
+            best = Some((hits, delta));
+        }
+    }
+    let (hits, delta) = best?;
+    // Must explain more than "everything changed" is worth.
+    if hits * 2 <= rows {
+        return None;
+    }
+    let dmg: Vec<u16> = (0..rows)
+        .filter(|&i| !matches_at(i, delta))
+        .map(|i| i as u16)
+        .collect();
+    Some((delta, dmg))
+}
+
+/// Shift `cells` in place by `delta` rows (positive = content moves up).
+/// Vacated rows keep whatever was there; the caller overwrites them from the
+/// frame's damage body.
+fn shift_rows(cells: &mut [CellSnap], cols: usize, rows: usize, delta: i16) {
+    if delta == 0 || cols == 0 || cells.len() != cols * rows {
+        return;
+    }
+    let d = delta.unsigned_abs() as usize;
+    if d >= rows {
+        return;
+    }
+    if delta > 0 {
+        cells.copy_within(d * cols.., 0);
+    } else {
+        cells.copy_within(..(rows - d) * cols, d * cols);
+    }
+}
 
 /// Which rows differ between two equal-sized grids.
 pub fn dirty_rows(prev: &[CellSnap], next: &[CellSnap], cols: usize, rows: usize) -> Vec<u16> {
@@ -246,10 +427,46 @@ pub fn encode_grid_bin(snap: &GridSnapshot) -> Result<Vec<u8>, String> {
     encode_grid_bin_ex(snap, None)
 }
 
+/// How a frame should be framed against the receiver's previous snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameSpec<'a> {
+    /// Standalone: the whole grid.
+    Full,
+    /// These rows, taken from the current snapshot.
+    Damage(&'a [u16]),
+    /// Shift the base by `delta` rows (positive = content moved up), then
+    /// apply `rows`. See [`scroll_shift`].
+    Scroll { delta: i16, rows: &'a [u16] },
+    /// Nothing on screen changed — only the header did (title, cursor). Rides
+    /// as a zero-row damage frame: a few dozen bytes instead of a full grid.
+    HeaderOnly,
+}
+
+impl<'a> FrameSpec<'a> {
+    fn rows(&self) -> Option<&'a [u16]> {
+        match self {
+            FrameSpec::Full => None,
+            FrameSpec::HeaderOnly => Some(&[]),
+            FrameSpec::Damage(r) | FrameSpec::Scroll { rows: r, .. } => Some(r),
+        }
+    }
+}
+
 /// Encode full frame, or row-damage when `dirty` is `Some` non-empty subset.
 /// Pass `None` for full. Pass `Some(&[])` only when nothing changed (caller
 /// should skip the send entirely).
 pub fn encode_grid_bin_ex(snap: &GridSnapshot, dirty: Option<&[u16]>) -> Result<Vec<u8>, String> {
+    encode_grid_bin_spec(
+        snap,
+        match dirty {
+            None => FrameSpec::Full,
+            Some(d) => FrameSpec::Damage(d),
+        },
+    )
+}
+
+/// Encode a frame under an explicit [`FrameSpec`].
+pub fn encode_grid_bin_spec(snap: &GridSnapshot, spec: FrameSpec<'_>) -> Result<Vec<u8>, String> {
     let expect = (snap.cols as usize).saturating_mul(snap.rows as usize);
     if !snap.cells.is_empty() && snap.cells.len() != expect {
         return Err(format!(
@@ -326,22 +543,46 @@ pub fn encode_grid_bin_ex(snap: &GridSnapshot, dirty: Option<&[u16]>) -> Result<
     let cols = snap.cols as usize;
     let rows = snap.rows as usize;
 
-    // Decide full vs damage
-    let use_damage = match dirty {
-        Some(d)
-            if !d.is_empty()
-                && !snap.cells.is_empty()
-                && d.len() * 2 < rows.max(1)
-                && d.iter().all(|&r| (r as usize) < rows) =>
-        {
-            true
-        }
-        _ => false,
-    };
+    // Decide full vs damage/scroll. A scroll frame carries a shift the
+    // receiver applies before the rows, so it is allowed to name *more* rows
+    // than plain damage would be worth — it has already saved the rows the
+    // shift moved. An empty row set is legal only for a scroll (pure shift) or
+    // for a title-only refresh, which the caller signals with `Damage(&[])`.
+    let partial_ok = !snap.cells.is_empty()
+        && spec
+            .rows()
+            .is_some_and(|d| d.iter().all(|&r| (r as usize) < rows));
+    let use_partial = partial_ok
+        && match spec {
+            FrameSpec::Full => false,
+            FrameSpec::HeaderOnly => true,
+            // Row damage only pays while it stays under half the screen; past
+            // that a full frame is both smaller and simpler. An empty set from
+            // this arm means "nothing changed" — the caller should have
+            // skipped, and a full frame is the safe reading.
+            FrameSpec::Damage(d) => !d.is_empty() && d.len() * 2 < rows.max(1),
+            FrameSpec::Scroll { delta, rows: d } => {
+                delta != 0 && (delta.unsigned_abs() as usize) < rows && d.len() < rows
+            }
+        };
 
-    if use_damage {
-        let d = dirty.unwrap();
-        out.push(FRAME_DAMAGE);
+    if use_partial {
+        let d = match spec {
+            FrameSpec::Scroll { delta, rows: d } => {
+                out.push(FRAME_SCROLL);
+                out.extend_from_slice(&delta.to_le_bytes());
+                d
+            }
+            FrameSpec::Damage(d) => {
+                out.push(FRAME_DAMAGE);
+                d
+            }
+            FrameSpec::HeaderOnly => {
+                out.push(FRAME_DAMAGE);
+                &[]
+            }
+            FrameSpec::Full => unreachable!("use_partial excludes Full"),
+        };
         out.extend_from_slice(&(d.len() as u16).to_le_bytes());
         for &row in d {
             out.extend_from_slice(&row.to_le_bytes());
@@ -389,7 +630,9 @@ pub fn decode_grid_bin_onto(
     data: &[u8],
     base: Option<&GridSnapshot>,
 ) -> Result<GridSnapshot, String> {
-    let mut r = Reader::new(data);
+    // `SCZ3` is a pure container — inflate and decode the SCG3 frame inside.
+    let data = decompress_frame(data)?;
+    let mut r = Reader::new(&data);
     let magic = r.read_bytes(4)?;
     let legacy = magic == b"SCG2";
     if magic != MAGIC && !legacy {
@@ -448,12 +691,19 @@ pub fn decode_grid_bin_onto(
                 full_authoritative_links = true;
                 read_rle_n(&mut r, expect)?
             }
-            FRAME_DAMAGE => {
+            FRAME_DAMAGE | FRAME_SCROLL => {
                 let base = base.ok_or_else(|| "damage frame without base".to_string())?;
                 if base.cols != cols || base.rows != rows || base.cells.len() != expect {
                     return Err("damage size mismatch".into());
                 }
                 let mut cells = base.cells.clone();
+                if kind == FRAME_SCROLL {
+                    let delta = r.read_i16()?;
+                    if delta == 0 || delta.unsigned_abs() as usize >= rows as usize {
+                        return Err(format!("scroll delta {delta} out of range"));
+                    }
+                    shift_rows(&mut cells, cols as usize, rows as usize, delta);
+                }
                 let n = r.read_u16()? as usize;
                 for _ in 0..n {
                     let row = r.read_u16()? as usize;
@@ -593,9 +843,7 @@ fn read_rle_n(r: &mut Reader<'_>, n: usize) -> Result<Vec<CellSnap>, String> {
             OP_REPEAT => {
                 let k = r.read_u16()? as usize;
                 let cell = read_cell(r)?;
-                for _ in 0..k {
-                    cells.push(cell.clone());
-                }
+                cells.resize(cells.len() + k, cell);
             }
             other => return Err(format!("bad RLE op {other:#x}")),
         }
@@ -659,6 +907,10 @@ impl<'a> Reader<'a> {
     fn read_u16(&mut self) -> Result<u16, String> {
         let b = self.read_bytes(2)?;
         Ok(u16::from_le_bytes([b[0], b[1]]))
+    }
+    fn read_i16(&mut self) -> Result<i16, String> {
+        let b = self.read_bytes(2)?;
+        Ok(i16::from_le_bytes([b[0], b[1]]))
     }
     fn read_u32(&mut self) -> Result<u32, String> {
         let b = self.read_bytes(4)?;
@@ -825,5 +1077,175 @@ mod bin_tests {
         let bin = encode_grid_bin(&s).unwrap();
         let json = serde_json::to_vec(&s).unwrap();
         assert!(bin.len() < json.len() / 2);
+    }
+
+    // -- scroll + compression -------------------------------------------------
+
+    /// A grid whose every row is distinct text, so a shift is unambiguous.
+    fn text_grid(cols: usize, rows: usize, first_line: usize) -> GridSnapshot {
+        let mut cells = vec![CellSnap::blank(); cols * rows];
+        for r in 0..rows {
+            let line = format!("line {:04} {}", first_line + r, "x".repeat(20));
+            for (i, ch) in line.chars().take(cols).enumerate() {
+                cells[r * cols + i] = CellSnap {
+                    c: ch,
+                    fg: 0x00AA_BBCC,
+                    bg: 0xFFFF_FFFF,
+                    bold: false,
+                    dim: false,
+                    italic: false,
+                    underline: false,
+                    inverse: false,
+                };
+            }
+        }
+        GridSnapshot {
+            pane: "term-1".into(),
+            rev: first_line as u64,
+            cols: cols as u16,
+            rows: rows as u16,
+            cursor_col: 0,
+            cursor_row: (rows - 1) as u16,
+            cursor_shape_block: true,
+            title: Some("t".into()),
+            running: true,
+            cells,
+            ghost: None,
+            text: String::new(),
+            alt_screen: false,
+            alternate_scroll: false,
+            app_cursor: false,
+            mouse_mode: false,
+            sgr_mouse: false,
+            last_input_origin: None,
+            hyperlinks: vec![],
+        }
+    }
+
+    fn hashes(s: &GridSnapshot) -> Vec<u64> {
+        row_hashes(&s.cells, s.cols as usize, s.rows as usize)
+    }
+
+    /// Rows of `next` that differ from `prev` shifted by `delta`.
+    fn rows_after_shift(prev: &GridSnapshot, next: &GridSnapshot, delta: i16) -> Vec<u16> {
+        let (cols, rows) = (prev.cols as usize, prev.rows as usize);
+        let mut shifted = prev.cells.clone();
+        shift_rows(&mut shifted, cols, rows, delta);
+        dirty_rows(&shifted, &next.cells, cols, rows)
+    }
+
+    #[test]
+    fn scroll_shift_finds_the_shift() {
+        let a = text_grid(80, 40, 0);
+        let b = text_grid(80, 40, 7); // scrolled up 7 lines
+        let (delta, dmg) = scroll_shift(&hashes(&a), &hashes(&b)).expect("shift found");
+        assert_eq!(delta, 7);
+        // Only the 7 newly exposed rows at the bottom need carrying.
+        assert_eq!(dmg, (33..40).collect::<Vec<u16>>());
+    }
+
+    #[test]
+    fn scroll_frame_roundtrips_exactly() {
+        let a = text_grid(80, 40, 0);
+        let b = text_grid(80, 40, 7);
+        let (delta, dmg) = scroll_shift(&hashes(&a), &hashes(&b)).unwrap();
+        let bin = encode_grid_bin_spec(&b, FrameSpec::Scroll { delta, rows: &dmg }).unwrap();
+        let got = decode_grid_bin_onto(&bin, Some(&a)).unwrap();
+        assert_eq!(got.cells, b.cells);
+        assert_eq!(got.rev, b.rev);
+    }
+
+    #[test]
+    fn scroll_frame_is_far_smaller_than_full() {
+        let a = text_grid(200, 70, 0);
+        let b = text_grid(200, 70, 3);
+        let (delta, dmg) = scroll_shift(&hashes(&a), &hashes(&b)).unwrap();
+        let scroll = encode_grid_bin_spec(&b, FrameSpec::Scroll { delta, rows: &dmg })
+            .unwrap()
+            .len();
+        let full = encode_grid_bin(&b).unwrap().len();
+        assert!(scroll * 10 < full, "scroll {scroll} vs full {full}");
+    }
+
+    /// The safety property that makes guessing a delta acceptable: whatever
+    /// delta is chosen, the damage computed for it reconstructs `next` exactly.
+    #[test]
+    fn any_delta_still_reconstructs_exactly() {
+        let a = text_grid(60, 20, 0);
+        let b = text_grid(60, 20, 5);
+        for delta in [-19i16, -7, -1, 1, 2, 5, 11, 19] {
+            let dmg = rows_after_shift(&a, &b, delta);
+            let bin = encode_grid_bin_spec(&b, FrameSpec::Scroll { delta, rows: &dmg }).unwrap();
+            let got = decode_grid_bin_onto(&bin, Some(&a)).unwrap();
+            assert_eq!(got.cells, b.cells, "delta {delta} lost content");
+        }
+    }
+
+    #[test]
+    fn scroll_down_roundtrips() {
+        let a = text_grid(60, 20, 9);
+        let b = text_grid(60, 20, 4); // content moved DOWN 5 rows
+        let (delta, dmg) = scroll_shift(&hashes(&a), &hashes(&b)).unwrap();
+        assert_eq!(delta, -5);
+        let bin = encode_grid_bin_spec(&b, FrameSpec::Scroll { delta, rows: &dmg }).unwrap();
+        assert_eq!(decode_grid_bin_onto(&bin, Some(&a)).unwrap().cells, b.cells);
+    }
+
+    #[test]
+    fn unrelated_screens_report_no_shift() {
+        let a = text_grid(60, 20, 0);
+        let mut b = text_grid(60, 20, 0);
+        for (i, c) in b.cells.iter_mut().enumerate() {
+            c.c = char::from_u32(65 + (i % 26) as u32).unwrap();
+        }
+        assert!(scroll_shift(&hashes(&a), &hashes(&b)).is_none());
+    }
+
+    #[test]
+    fn header_only_frame_keeps_cells_and_takes_the_title() {
+        let a = text_grid(80, 40, 0);
+        let mut b = a.clone();
+        b.rev = 99;
+        b.title = Some("✳ working".into());
+        let bin = encode_grid_bin_spec(&b, FrameSpec::HeaderOnly).unwrap();
+        assert!(bin.len() < 200, "header-only frame was {} bytes", bin.len());
+        let got = decode_grid_bin_onto(&bin, Some(&a)).unwrap();
+        assert_eq!(got.cells, a.cells);
+        assert_eq!(got.title.as_deref(), Some("✳ working"));
+        assert_eq!(got.rev, 99);
+    }
+
+    #[test]
+    fn compression_is_transparent_to_the_decoder() {
+        let s = text_grid(200, 70, 0);
+        let raw = encode_grid_bin(&s).unwrap();
+        let z = compress_frame(raw.clone());
+        assert!(&z[..4] == b"SCZ3", "expected a compressed container");
+        assert!(
+            z.len() * 4 < raw.len(),
+            "raw {} -> z {}",
+            raw.len(),
+            z.len()
+        );
+        assert_eq!(decode_grid_bin(&z).unwrap().cells, s.cells);
+        // Plain frames still decode.
+        assert_eq!(decode_grid_bin(&raw).unwrap().cells, s.cells);
+    }
+
+    #[test]
+    fn tiny_frames_are_left_uncompressed() {
+        let a = text_grid(80, 40, 0);
+        let mut b = a.clone();
+        b.title = Some("x".into());
+        let raw = encode_grid_bin_spec(&b, FrameSpec::HeaderOnly).unwrap();
+        assert_eq!(compress_frame(raw.clone()), raw);
+    }
+
+    #[test]
+    fn corrupt_container_errors_rather_than_allocating() {
+        let mut bad = Vec::from(*b"SCZ3");
+        bad.extend_from_slice(&u32::MAX.to_le_bytes());
+        bad.extend_from_slice(&[0u8; 8]);
+        assert!(decode_grid_bin(&bad).is_err());
     }
 }

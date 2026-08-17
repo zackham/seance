@@ -83,6 +83,11 @@ pub struct App {
     dirty_grids: RefCell<HashSet<String>>,
     need_rebuild: Cell<bool>,
     badges_dirty: Cell<bool>,
+    /// Highest grid frame seq acked back to the daemon. Flow control: the
+    /// daemon holds frames (and merges them) past a small in-flight window, so
+    /// a slow link can never queue a backlog of stale frames in buffers it
+    /// cannot see. See `runtime::outqueue` on the daemon side.
+    acked_grid_seq: Cell<u64>,
     structure_rev_bound: Cell<u64>,
     /// Selection: (pane, anchor cell idx, point cell idx, dragging).
     selection: RefCell<Option<(String, usize, usize, bool)>>,
@@ -144,6 +149,7 @@ impl App {
             dirty_grids: RefCell::new(HashSet::new()),
             need_rebuild: Cell::new(false),
             badges_dirty: Cell::new(false),
+            acked_grid_seq: Cell::new(0),
             structure_rev_bound: Cell::new(0),
             selection: RefCell::new(None),
             wheel_accum: RefCell::new(HashMap::new()),
@@ -163,6 +169,16 @@ impl App {
     }
 
     fn handle_event(&self, ev: GuiEvent) {
+        // Ack on receipt, before decode/paint: this is transport flow control,
+        // and what it needs to report is that the bytes crossed the link.
+        // `seq == 0` marks a one-off refresh outside the windowed stream.
+        if let GuiEvent::GridBin { seq, .. } = &ev {
+            let seq = *seq;
+            if seq > self.acked_grid_seq.get() {
+                self.acked_grid_seq.set(seq);
+                self.send(&GuiRequest::GridAck { seq });
+            }
+        }
         let (applied, subs_dirty) = {
             let mut st = self.state.borrow_mut();
             let applied = st.apply_event(ev, now_ms());

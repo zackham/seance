@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "cocoa"
-version = "0.25.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6140449f97a6e97f9511815c5632d84c8aacf8ac271ad77c559218161a1373c"
 dependencies = [
@@ -5759,7 +5759,7 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
 name = "seance"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -5781,16 +5781,17 @@ dependencies = [
 
 [[package]]
 name = "seance-core"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "base64",
+ "flate2",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "seance-web"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "base64",
  "flate2",

@@ -152,6 +152,14 @@ impl GuiClient {
             .map_err(|_| anyhow::anyhow!("gui client disconnected"))
     }
 
+    /// Acknowledge grid frames up to `seq`.
+    ///
+    /// Best-effort on purpose: the daemon stops waiting for acks after a short
+    /// stall, so a dropped one costs a beat of extra buffering, never a stall.
+    pub fn ack_grid(&self, seq: u64) {
+        let _ = self.send(GuiRequest::GridAck { seq });
+    }
+
     pub fn input(&self, pane: &str, bytes: &[u8]) -> Result<()> {
         self.send(GuiRequest::Input {
             pane: pane.to_string(),

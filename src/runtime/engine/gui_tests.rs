@@ -1060,3 +1060,256 @@ fn fake_claude_pane(eng: &mut Engine, slug: &str, tag: &str) -> PathBuf {
     p.claude_session = Some(session);
     transcript
 }
+
+// -- per-connection framing ---------------------------------------------------
+
+/// Frame kind as it lands on the wire, read back out of the encoded blob.
+#[derive(Debug, PartialEq, Eq)]
+enum Framing {
+    Full,
+    Damage,
+    Scroll,
+    HeaderOnly,
+}
+
+fn framing_of(ev: &GuiEvent) -> Framing {
+    use base64::Engine as _;
+    let GuiEvent::GridBin { data_b64, .. } = ev else {
+        panic!("expected a grid frame, got {ev:?}")
+    };
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .unwrap();
+    let bytes = crate::runtime::snapshot::decompress_frame(&raw).unwrap();
+    let mut i = 4 + 1 + 8 + 8;
+    let flags = bytes[i];
+    i += 1;
+    if flags & 128 != 0 {
+        i += 2 + u16::from_le_bytes(bytes[i..i + 2].try_into().unwrap()) as usize;
+    }
+    i += 2 + u16::from_le_bytes(bytes[i..i + 2].try_into().unwrap()) as usize;
+    i += 1; // ghost flag
+    match bytes[i] {
+        0 => Framing::Full,
+        1 => {
+            if u16::from_le_bytes(bytes[i + 1..i + 3].try_into().unwrap()) == 0 {
+                Framing::HeaderOnly
+            } else {
+                Framing::Damage
+            }
+        }
+        2 => Framing::Scroll,
+        k => panic!("unknown frame kind {k}"),
+    }
+}
+
+fn grid_frames(g: &FakeGui) -> Vec<Framing> {
+    g.drain()
+        .iter()
+        .filter(|ev| matches!(ev, GuiEvent::GridBin { .. }))
+        .map(framing_of)
+        .collect()
+}
+
+fn synthetic_grid(
+    pane: &str,
+    rows: u16,
+    first_line: usize,
+) -> crate::runtime::snapshot::GridSnapshot {
+    use crate::runtime::snapshot::{CellSnap, GridSnapshot};
+    let cols = 40usize;
+    let mut snap = GridSnapshot::empty(pane);
+    snap.cols = cols as u16;
+    snap.rows = rows;
+    snap.rev = first_line as u64;
+    snap.cells = vec![CellSnap::blank(); cols * rows as usize];
+    for r in 0..rows as usize {
+        for (i, ch) in format!("line {:04}", first_line + r).chars().enumerate() {
+            snap.cells[r * cols + i].c = ch;
+        }
+    }
+    snap
+}
+
+/// The framing a window gets depends on what *that window* has been sent — not
+/// on what the least-caught-up window in the building needs.
+///
+/// This is the fix for the amplifier that made a remote window receive whole
+/// grids: the old code promoted a frame to FULL for everyone whenever any
+/// recipient lacked a damage base.
+#[test]
+fn a_window_that_just_attached_does_not_cost_the_others_a_full_grid() {
+    with_test_state_dir("gui-framing", || {
+        let scratch = temp_scratch("gui-framing");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let slug = eng.push_stub_pane("worker-a", "lab");
+
+        let g1 = FakeGui::attach_to(&mut eng);
+        let _ = attach_with(&mut eng, &g1.id, &["lab"]);
+        let _ = g1.drain();
+
+        // First frame for a window with no base: a whole grid, necessarily.
+        eng.broadcast_grid(synthetic_grid(&slug, 20, 0));
+        assert_eq!(grid_frames(&g1), vec![Framing::Full]);
+
+        // Second: one row changed, so row damage.
+        let mut next = synthetic_grid(&slug, 20, 0);
+        next.cells[3 * 40].c = 'Z';
+        eng.broadcast_grid(next);
+        assert_eq!(grid_frames(&g1), vec![Framing::Damage]);
+
+        // A second window attaches with no base for this pane.
+        let g2 = FakeGui::attach_to(&mut eng);
+        let _ = attach_with(&mut eng, &g2.id, &["lab"]);
+        let _ = g2.drain();
+
+        // The next frame is one row of change. The newcomer has to be sent a
+        // whole grid — and the established window still gets damage. This is
+        // the whole point: the two windows are framed independently.
+        let mut third = synthetic_grid(&slug, 20, 0);
+        third.cells[3 * 40].c = 'Z';
+        third.cells[5 * 40].c = 'Q';
+        eng.broadcast_grid(third);
+        assert_eq!(
+            grid_frames(&g1),
+            vec![Framing::Damage],
+            "the established window pays nothing for the newcomer"
+        );
+        assert_eq!(
+            grid_frames(&g2),
+            vec![Framing::Full],
+            "the newcomer needs a base"
+        );
+
+        // From here both take damage.
+        let mut fourth = synthetic_grid(&slug, 20, 0);
+        fourth.cells[3 * 40].c = 'Z';
+        fourth.cells[5 * 40].c = 'Q';
+        fourth.cells[7 * 40].c = 'W';
+        eng.broadcast_grid(fourth);
+        assert_eq!(grid_frames(&g1), vec![Framing::Damage]);
+        assert_eq!(grid_frames(&g2), vec![Framing::Damage]);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+/// Scrolling output is the dominant shape on an agent pane, and it must reach
+/// the wire as a shift plus the exposed rows — not a whole grid.
+#[test]
+fn scrolling_output_frames_as_a_scroll() {
+    with_test_state_dir("gui-scroll", || {
+        let scratch = temp_scratch("gui-scroll");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let slug = eng.push_stub_pane("worker-a", "lab");
+
+        let g1 = FakeGui::attach_to(&mut eng);
+        let _ = attach_with(&mut eng, &g1.id, &["lab"]);
+        let _ = g1.drain();
+
+        eng.broadcast_grid(synthetic_grid(&slug, 20, 0));
+        assert_eq!(grid_frames(&g1), vec![Framing::Full]);
+
+        // Every row now differs — the old code's cue to send a whole grid.
+        eng.broadcast_grid(synthetic_grid(&slug, 20, 6));
+        assert_eq!(grid_frames(&g1), vec![Framing::Scroll]);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+/// A spinner tick in the OSC title changes no cells. It used to cost a whole
+/// grid; it should cost a header.
+#[test]
+fn a_title_tick_frames_as_a_header() {
+    with_test_state_dir("gui-title", || {
+        let scratch = temp_scratch("gui-title");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let slug = eng.push_stub_pane("worker-a", "lab");
+
+        let g1 = FakeGui::attach_to(&mut eng);
+        let _ = attach_with(&mut eng, &g1.id, &["lab"]);
+        let _ = g1.drain();
+
+        let mut first = synthetic_grid(&slug, 20, 0);
+        first.title = Some("✳ idle".into());
+        eng.broadcast_grid(first);
+        assert_eq!(grid_frames(&g1), vec![Framing::Full]);
+
+        let mut spun = synthetic_grid(&slug, 20, 0);
+        spun.title = Some("⠋ working".into());
+        eng.broadcast_grid(spun);
+        assert_eq!(grid_frames(&g1), vec![Framing::HeaderOnly]);
+
+        // Nothing at all changed → nothing on the wire.
+        let mut same = synthetic_grid(&slug, 20, 0);
+        same.title = Some("⠋ working".into());
+        eng.broadcast_grid(same);
+        assert!(grid_frames(&g1).is_empty());
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}
+
+/// A window that stops watching a pane loses its damage base — the screen
+/// moves on without it, so the frames it missed are exactly what would make
+/// damage lie. Coming back must cost it one full grid, and nobody else
+/// anything.
+#[test]
+fn a_window_that_looks_away_gets_a_fresh_base_when_it_returns() {
+    with_test_state_dir("gui-rebase", || {
+        let scratch = temp_scratch("gui-rebase");
+        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
+        let slug = eng.push_stub_pane("worker-a", "lab");
+        eng.push_stub_pane("worker-b", "cadence");
+
+        let watcher = FakeGui::attach_to(&mut eng);
+        let _ = attach_with(&mut eng, &watcher.id, &["lab"]);
+        let looker = FakeGui::attach_to(&mut eng);
+        let _ = attach_with(&mut eng, &looker.id, &["lab", "cadence"]);
+        let (_, _) = (watcher.drain(), looker.drain());
+
+        eng.broadcast_grid(synthetic_grid(&slug, 20, 0));
+        assert_eq!(grid_frames(&watcher), vec![Framing::Full]);
+        assert_eq!(grid_frames(&looker), vec![Framing::Full]);
+
+        // The second window looks at another circle. Frames for "lab" keep
+        // flowing to the first one only.
+        let _ = eng.handle_gui(
+            GuiRequest::SetFocus {
+                pane: None,
+                workspace: Some("cadence".into()),
+            },
+            &looker.id,
+        );
+        let _ = looker.drain();
+        let mut moved = synthetic_grid(&slug, 20, 0);
+        moved.cells[2 * 40].c = 'A';
+        eng.broadcast_grid(moved);
+        assert_eq!(grid_frames(&watcher), vec![Framing::Damage]);
+        assert!(grid_frames(&looker).is_empty(), "not streaming it");
+
+        // Back to "lab": the returning window needs a whole grid, and the one
+        // that never looked away still gets damage.
+        let _ = eng.handle_gui(
+            GuiRequest::SetFocus {
+                pane: None,
+                workspace: Some("lab".into()),
+            },
+            &looker.id,
+        );
+        let _ = looker.drain();
+        let mut later = synthetic_grid(&slug, 20, 0);
+        later.cells[2 * 40].c = 'A';
+        later.cells[4 * 40].c = 'B';
+        eng.broadcast_grid(later);
+        assert_eq!(
+            grid_frames(&looker),
+            vec![Framing::Full],
+            "a stale base must not be trusted"
+        );
+        assert_eq!(grid_frames(&watcher), vec![Framing::Damage]);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    });
+}

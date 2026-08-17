@@ -185,6 +185,18 @@ pub enum GuiRequest {
     RefreshGrid {
         pane: String,
     },
+    /// Highest grid `seq` this connection has received. Pure flow control: the
+    /// daemon keeps a small number of grid frames in flight and merges the
+    /// rest, so a slow link can never accumulate a backlog of stale frames in
+    /// buffers the daemon cannot see (the unix send buffer, ssh's 2MB channel
+    /// window, the TCP send buffer — ~2.4MB between the coalescer and the eye).
+    ///
+    /// Clients may ack lazily; the daemon stops waiting after a short stall
+    /// timeout, so a client that never acks degrades to the old behavior
+    /// rather than freezing.
+    GridAck {
+        seq: u64,
+    },
     /// Kick another GUI window off the daemon (✦ popover "kill"). It drops off
     /// the roster exactly as if it had sent Bye.
     CloseWindow {
@@ -343,10 +355,15 @@ pub enum GuiEvent {
     },
     /// Legacy JSON grid (debug / fallback). Live path prefers [`Self::GridBin`].
     Grid(GridSnapshot),
-    /// Compact RLE binary grid (`SCG2` blob, base64). Hot path for paint.
+    /// Compact RLE binary grid (SCG3 blob, or an `SCZ3` deflate container
+    /// holding one; base64). Hot path for paint.
     GridBin {
         pane: String,
         data_b64: String,
+        /// Per-connection frame counter. Echo the highest one seen back as
+        /// [`GuiRequest::GridAck`] — see there for why.
+        #[serde(default)]
+        seq: u64,
     },
     PaneSpawned {
         pane: PaneInfo,

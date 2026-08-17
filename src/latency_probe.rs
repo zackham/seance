@@ -60,6 +60,36 @@ pub fn transfer(from: &'static str, to: &'static str, key: &str) -> Option<Insta
     Some(t)
 }
 
+/// Accumulate a volume (bytes, frames) and print totals + a per-second rate
+/// every ~5s, tagged `[seance vol]`.
+///
+/// Deliberately *not* [`record`]: that formats every sample as milliseconds,
+/// and a byte count printed as "5.7ms" is an instrument that lies. Wire volume
+/// is the number that had to be reconstructed from `ss` counters the last time
+/// this got debugged, so it is worth its own line.
+pub fn count(stat: &'static str, n: u64) {
+    static VOL: OnceLock<Mutex<HashMap<&'static str, (u64, u64, Instant)>>> = OnceLock::new();
+    let mut g = VOL
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    let e = g.entry(stat).or_insert_with(|| (0, 0, Instant::now()));
+    e.0 += n;
+    e.1 += 1;
+    let elapsed = e.2.elapsed();
+    if elapsed >= Duration::from_secs(5) {
+        let secs = elapsed.as_secs_f64();
+        eprintln!(
+            "[seance vol] {stat}: n={} total={:.1}KB rate={:.1}KB/s avg={:.0}B",
+            e.1,
+            e.0 as f64 / 1024.0,
+            e.0 as f64 / 1024.0 / secs,
+            e.0 as f64 / e.1.max(1) as f64,
+        );
+        *e = (0, 0, Instant::now());
+    }
+}
+
 /// Record a raw duration sample into aggregate `stat`.
 pub fn record(stat: &'static str, micros: u64) {
     let mut g = STATS

@@ -134,6 +134,9 @@ pub struct SeanceApp {
     session_counter: usize,
     /// Connection to the session daemon (owns PTYs).
     client: Arc<GuiClient>,
+    /// Highest grid frame seq acked back to the daemon (send-window flow
+    /// control; see `runtime::outqueue`).
+    acked_grid_seq: u64,
     /// After a summon, focus this pane once its remote view exists.
     pending_focus: Option<String>,
     /// Sidebar workspace-list scroll — cycling must reveal the selection.
@@ -378,6 +381,7 @@ impl SeanceApp {
 
         let mut app = SeanceApp {
             panes: Vec::new(),
+            acked_grid_seq: 0,
             asks: Vec::new(),
             statuses: std::collections::HashMap::new(),
             owners: std::collections::HashMap::new(),
@@ -822,8 +826,20 @@ impl SeanceApp {
             GuiEvent::Grid(snap) => {
                 self.apply_grid_snap(snap, cx);
             }
-            GuiEvent::GridBin { pane, data_b64 } => {
+            GuiEvent::GridBin {
+                pane,
+                data_b64,
+                seq,
+            } => {
                 let apply_t0 = std::time::Instant::now();
+                // Ack before decoding: this is transport flow control, and
+                // what the daemon needs to know is that the bytes crossed the
+                // link — not how long we then took to paint them. `seq == 0`
+                // is a one-off refresh outside the windowed stream.
+                if seq > self.acked_grid_seq {
+                    self.acked_grid_seq = seq;
+                    self.client.ack_grid(seq);
+                }
                 // Damage frames need the previous snapshot as base.
                 let base = self
                     .panes
