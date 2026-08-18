@@ -26,8 +26,18 @@ pub enum ChromeCommand {
     /// Jump to the rail's top row — first pinned circle if any, else the top
     /// of active, and so on down the bands.
     SelectTopWorkspace,
+    /// Jump to rail row N (0-based; ctrl+shift+1..9).
+    SelectNthWorkspace(usize),
     /// Escape: close topmost overlay (menu > help > activity > zoom > selection).
     Escape,
+}
+
+/// `Digit1`..`Digit9` → 1..9. `code` is the physical key, so this is the same
+/// row whatever the layout prints on it. `Digit0` is deliberately absent — the
+/// rail is 1-indexed to the human.
+fn key_code_digit(code: &str) -> Option<usize> {
+    let n = code.strip_prefix("Digit")?.parse::<usize>().ok()?;
+    (1..=9).contains(&n).then_some(n)
 }
 
 /// Map a keydown to a chrome command. Pure; PTY routing happens only when
@@ -54,6 +64,16 @@ pub fn command_for(ev: &KeyboardEvent) -> Option<ChromeCommand> {
         } else {
             ChromeCommand::CycleWorkspace(d)
         });
+    }
+
+    // ctrl+shift+1..9 — nth row of the rail. Keyed off `code`, not `key`:
+    // the browser reports the SHIFTED character ("!" on US, something else
+    // elsewhere), and the physical digit is the thing the chord means. No
+    // alt twin here on purpose — alt+<digit> switches browser tabs.
+    if ctrl && shift && !alt {
+        if let Some(n) = key_code_digit(&ev.code()) {
+            return Some(ChromeCommand::SelectNthWorkspace(n - 1));
+        }
     }
 
     // Native ctrl+shift chords + their alt twins.
@@ -120,7 +140,27 @@ pub fn execute(
             actions.toggle_probe();
             true
         }
-        ChromeCommand::SelectTopWorkspace => app.select_top_workspace(),
+        ChromeCommand::SelectTopWorkspace => app.select_nth_workspace(0),
+        ChromeCommand::SelectNthWorkspace(n) => app.select_nth_workspace(n),
         ChromeCommand::Escape => app.escape_topmost(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_code_digit;
+
+    #[test]
+    fn physical_digits_one_through_nine_are_rail_rows() {
+        assert_eq!(key_code_digit("Digit1"), Some(1));
+        assert_eq!(key_code_digit("Digit9"), Some(9));
+    }
+
+    #[test]
+    fn zero_and_non_digits_are_not() {
+        // Row 0 doesn't exist; the rail counts from 1 like the eye does.
+        assert_eq!(key_code_digit("Digit0"), None);
+        assert_eq!(key_code_digit("KeyK"), None);
+        assert_eq!(key_code_digit(""), None);
     }
 }

@@ -216,6 +216,26 @@ pub(super) fn telegram_status_bridge(
     });
 }
 
+/// `ctrl+shift+<N>` → 0-based rail row. Accepts the digit *and* the US-layout
+/// shifted symbol: the compositor reports one or the other depending on how it
+/// resolves the shift, and a chord that works on one machine and silently does
+/// nothing on the next is worse than no chord.
+pub(super) fn rail_index_for_key(key: &str) -> Option<usize> {
+    let digit = match key {
+        "1" | "!" => 1,
+        "2" | "@" => 2,
+        "3" | "#" => 3,
+        "4" | "$" => 4,
+        "5" | "%" => 5,
+        "6" | "^" => 6,
+        "7" | "&" => 7,
+        "8" | "*" => 8,
+        "9" | "(" => 9,
+        _ => return None,
+    };
+    Some(digit - 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +341,41 @@ mod tests {
         let b = now_ms();
         assert!(a > 0);
         assert!(b >= a);
+    }
+
+    #[test]
+    fn rail_digits_map_from_one_to_zero_indexed() {
+        assert_eq!(rail_index_for_key("1"), Some(0));
+        assert_eq!(rail_index_for_key("9"), Some(8));
+    }
+
+    #[test]
+    fn a_shifted_digit_is_the_same_row() {
+        // Compositors differ on whether ctrl+shift+1 arrives as "1" or "!".
+        for (digit, sym) in [
+            ("1", "!"),
+            ("2", "@"),
+            ("3", "#"),
+            ("4", "$"),
+            ("5", "%"),
+            ("6", "^"),
+            ("7", "&"),
+            ("8", "*"),
+            ("9", "("),
+        ] {
+            assert_eq!(
+                rail_index_for_key(digit),
+                rail_index_for_key(sym),
+                "{digit}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_and_letters_are_not_rail_rows() {
+        // 0 would be row -1; the rail is 1-indexed to the human.
+        assert_eq!(rail_index_for_key("0"), None);
+        assert_eq!(rail_index_for_key(")"), None);
+        assert_eq!(rail_index_for_key("k"), None);
     }
 }

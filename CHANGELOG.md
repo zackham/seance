@@ -15,6 +15,22 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [0.25.4] — 2026-08-18
+
+### Added
+
+- **`ctrl+shift+1 … 9` jumps to the nth circle down the rail**, counted the way
+  you read it — `1` is the top row, the same jump `ctrl+shift+home` makes. It
+  walks the same live list `ctrl+page` does, so folded bands aren't counted
+  (they're not on screen), and an out-of-range row is a no-op rather than a
+  clamp: pressing 7 on a five-circle rail means you were counting a rail that
+  isn't there, and landing somewhere arbitrary is worse than nothing.
+
+  Native reads the digit *or* its US-layout shifted symbol, because
+  compositors differ on which one `ctrl+shift+1` arrives as. The web client
+  keys off the physical `code` instead, and takes no `alt+` twin — `alt+<digit>`
+  switches browser tabs.
+
 ## [0.25.3] — 2026-08-18
 
 ### Added

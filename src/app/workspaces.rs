@@ -947,13 +947,27 @@ impl SeanceApp {
         self.select_workspace(&ws, window, cx);
     }
 
-    /// Jump to the rail's TOP row (ctrl+shift+home) — whatever the sort says
-    /// is first: the first pinned circle if anything is pinned, else the top
-    /// of active (a working agent, else most recent), and so on down the
-    /// bands. Same list ctrl+page walks, read live, so it lands where your
-    /// eye already is instead of on a remembered position.
+    /// Jump to the rail's TOP row (ctrl+shift+home / ctrl+shift+1) — whatever
+    /// the sort says is first: the first pinned circle if anything is pinned,
+    /// else the top of active (a working agent, else most recent), and so on
+    /// down the bands.
     pub(super) fn select_top_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(ws) = self.visible_workspaces().into_iter().next() else {
+        self.select_nth_workspace(0, window, cx);
+    }
+
+    /// Jump to rail row `idx` (0-based; ctrl+shift+1..9). Reads the same live
+    /// list ctrl+page walks, so the row you count with your eye is the row you
+    /// get — folded bands aren't on screen and aren't counted. Out of range is
+    /// a no-op rather than a clamp: pressing 7 on a five-circle rail means you
+    /// were counting a rail that isn't there, and landing somewhere arbitrary
+    /// is worse than nothing happening.
+    pub(super) fn select_nth_workspace(
+        &mut self,
+        idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ws) = self.visible_workspaces().into_iter().nth(idx) else {
             return;
         };
         if self.selected_workspace.as_deref() == Some(ws.as_str()) {
@@ -964,7 +978,7 @@ impl SeanceApp {
             Some(&ws),
             None,
             "workspace_selected",
-            format!("jumped to top workspace '{ws}'"),
+            format!("jumped to rail row {} — '{ws}'", idx + 1),
         );
         self.select_workspace(&ws, window, cx);
     }

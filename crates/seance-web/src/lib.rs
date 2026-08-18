@@ -662,19 +662,18 @@ impl App {
         self.select_workspace(&wss[next]);
     }
 
-    /// Ctrl+shift+home: jump to the rail's TOP row — the first pinned circle
-    /// if anything is pinned, else the top of active (a working agent, else
-    /// most recent), and so on down the bands. Same live list ctrl+page walks.
-    /// Returns false when there's nothing to jump to, so the key falls
-    /// through instead of eating itself.
-    pub(crate) fn select_top_workspace(self: &Rc<Self>) -> bool {
-        let top = {
+    /// Ctrl+shift+home / ctrl+shift+1..9: jump to rail row `idx` (0-based).
+    /// Row 0 is the first pinned circle if anything is pinned, else the top of
+    /// active (a working agent, else most recent), and so on down the bands —
+    /// the same live list ctrl+page walks, so the row you count with your eye
+    /// is the row you get. Always reports the key as handled: alt+home is the
+    /// browser's "go to homepage" and an empty rail must not let it through.
+    pub(crate) fn select_nth_workspace(self: &Rc<Self>, idx: usize) -> bool {
+        let target = {
             let st = self.state.borrow();
-            st.displayed_active_ring().into_iter().next()
+            st.displayed_active_ring().into_iter().nth(idx)
         };
-        let Some(ws) = top else {
-            // Still ours: alt+home is the browser's "go to homepage", and an
-            // empty rail must not let that through.
+        let Some(ws) = target else {
             return true;
         };
         if self.selected_workspace().as_deref() == Some(ws.as_str()) {

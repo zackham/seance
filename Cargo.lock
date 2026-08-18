@@ -5759,7 +5759,7 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
 name = "seance"
-version = "0.25.3"
+version = "0.25.4"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -5781,7 +5781,7 @@ dependencies = [
 
 [[package]]
 name = "seance-core"
-version = "0.25.3"
+version = "0.25.4"
 dependencies = [
  "base64",
  "flate2",
@@ -5791,7 +5791,7 @@ dependencies = [
 
 [[package]]
 name = "seance-web"
-version = "0.25.3"
+version = "0.25.4"
 dependencies = [
  "base64",
  "flate2",

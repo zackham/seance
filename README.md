@@ -13,7 +13,7 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.25.3
+**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.25.4
 
 Release notes: [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -163,6 +163,7 @@ attention routing free.
 | ctrl+shift+s | flip notes ↔ face |
 | ctrl+shift+p | pin / unpin selected workspace |
 | ctrl+shift+home | jump to top of the rail (first pinned, else top active) |
+| ctrl+shift+1 … 9 | jump to the nth circle down the rail |
 | ctrl+shift+o | pop pane to its own window |
 | ctrl+shift+k | precanned prompt palette |
 | ctrl+shift+j | fuzzy jump (workspace) |

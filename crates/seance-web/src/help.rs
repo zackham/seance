@@ -240,6 +240,7 @@ prefer the middle column.</p>
 <tr><td class="k">ctrl+shift+r</td><td class="alt">alt+r</td><td class="d">rename the selected workspace <span class="note">— chord may hard-reload the tab, use alt</span></td></tr>
 <tr><td class="k">ctrl+shift+p</td><td class="alt">alt+p</td><td class="d">latency probe overlay <span class="note">— diverges from native, where this key pins the selected circle</span></td></tr>
 <tr><td class="k">ctrl+shift+home</td><td class="alt">alt+home</td><td class="d">jump to the top of the rail — first pinned circle, else the top of active</td></tr>
+<tr><td class="k">ctrl+shift+1 … 9</td><td class="alt">—</td><td class="d">jump to the nth circle down the rail (1 = the top row) <span class="note">— no alt twin: alt+digit switches browser tabs</span></td></tr>
 <tr><td class="k">ctrl+shift+a</td><td class="alt">alt+a</td><td class="d">activity drawer — the attributed event feed</td></tr>
 <tr><td class="k">ctrl+shift+? &nbsp;/&nbsp; ctrl+shift+/</td><td class="alt">alt+? / alt+/</td><td class="d">this grimoire</td></tr>
 <tr><td class="k">ctrl+pgup / pgdn</td><td class="alt">—</td><td class="d">previous / next workspace (sidebar order, wraps)</td></tr>

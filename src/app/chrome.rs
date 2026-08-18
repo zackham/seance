@@ -1045,6 +1045,10 @@ pub(super) fn render_help() -> gpui::AnyElement {
             "ctrl+shift+home",
             "jump to the top of the rail (first pinned, else top of active)",
         ))
+        .child(row(
+            "ctrl+shift+1 … 9",
+            "jump to the nth circle down the rail (1 = the top row)",
+        ))
         .child(row("ctrl+shift+o", "pop active pane out / return to the circle"))
         .child(row("ctrl+shift+k", "precanned prompt palette"))
         .child(row("ctrl+shift+j", "fuzzy jump to workspace"))

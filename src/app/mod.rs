@@ -1638,7 +1638,14 @@ impl SeanceApp {
                         cx.stop_propagation();
                     }
                 }
-                _ => {}
+                // ctrl+shift+1..9 — nth row of the rail, counted the way you
+                // read it (1 is the same jump as home).
+                k => {
+                    if let Some(idx) = rail_index_for_key(k) {
+                        self.select_nth_workspace(idx, window, cx);
+                        cx.stop_propagation();
+                    }
+                }
             }
         }
     }
