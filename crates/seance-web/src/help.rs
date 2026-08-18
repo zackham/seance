@@ -269,7 +269,7 @@ prefer the middle column.</p>
 <tr><td class="k">needs</td><td class="d">that pane wants a human — a pending ask, a block, or an agent-reported <code>needs-human</code></td></tr>
 <tr><td class="k">done</td><td class="d">the agent reported <code>done</code> and is waiting to be read</td></tr>
 <tr><td class="k">× banish</td><td class="d">kill. the first click arms it (turns red), a second within two seconds does it. banishing the last pane banishes the circle — ptys shut down, scratchpad files on disk are kept</td></tr>
-<tr><td class="k">quicklaunch</td><td class="d">saved pane recipes (name + cwd + command) — one click summons a pane already pointed at the right project</td></tr>
+<tr><td class="k">quicklaunch</td><td class="d">saved pane recipes (name + cwd + command) — one click summons a pane already pointed at the right project, in a fresh circle that arrives pinned</td></tr>
 <tr><td class="k">accounts</td><td class="d">the host-bridge strip: which claude account a new agent pane runs as. it fails closed — a quiet bridge shows an empty strip rather than a wrong one</td></tr>
 </table>
 

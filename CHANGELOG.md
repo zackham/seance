@@ -15,6 +15,17 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [0.25.2] — 2026-08-18
+
+### Changed
+
+- **Launch buttons open their circle pinned.** A quicklaunch chip already made
+  a fresh circle named after the entry; now that circle arrives in the pinned
+  band instead of sorting in among circles you last touched days ago. Pressing
+  a launch button says *this is what I'm doing now*, and the host-menu chips
+  sitting next to them already worked this way. Both clients. Unpin from the
+  row menu or ctrl+shift+p when it's done.
+
 ## [0.25.1] — 2026-08-17
 
 ### Changed

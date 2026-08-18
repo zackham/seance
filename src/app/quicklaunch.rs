@@ -11,7 +11,10 @@
 //! ```
 //! `command` omitted/empty = plain shell in `cwd`. Every launch opens a
 //! FRESH workspace named after the entry (uniquified: vita, vita-2, …) with
-//! a single pane — no rename prompt. A legacy `"workspace"` key in the JSON
+//! a single pane — no rename prompt — and it arrives **pinned**: pressing a
+//! launch button is a statement that this is what you're doing now, so the
+//! circle sits at the top of the rail until you unpin it (the host-menu
+//! chips beside these already behave that way). A legacy `"workspace"` key in the JSON
 //! still parses but is ignored. The file is mtime-watched with a 2s throttle
 //! — edits show up without restarting the GUI; a parse error keeps the
 //! previous entries.
@@ -598,11 +601,16 @@ impl SeanceApp {
                         name: entry.name.clone(),
                         cwd,
                         command,
-                        workspace: Some(ws),
+                        workspace: Some(ws.clone()),
                         file: None,
                     },
                     cx,
                 );
+                // Launched circles arrive PINNED. You pressed a button to
+                // start this thing; it belongs at the top of the rail until
+                // you say otherwise, not sorted in among circles you last
+                // touched days ago. (Host-menu chips already work this way.)
+                this.pin_workspace(&ws);
             }))
             .context_menu(move |menu, _, _| {
                 menu.menu("edit…", Box::new(ActQuickLaunchEdit(menu_name.clone())))

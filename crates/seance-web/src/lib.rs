@@ -969,11 +969,13 @@ impl Actions for AppActions {
             file: None,
             tiled: true,
         });
-        // Land in the fresh circle when its pane arrives (and it's ours, so it
-        // belongs in the active list).
+        // Land in the fresh circle when its pane arrives, PINNED: you pressed
+        // a button to start this thing, so it belongs at the top of the rail
+        // until you say otherwise (pin implies active — native twin does the
+        // same in app/quicklaunch.rs).
         {
             let mut st = self.0.state.borrow_mut();
-            st.subs.activate(&ws);
+            st.subs.pin(&ws);
             st.selected_workspace = Some(ws);
         }
         self.0.persist_subs();
