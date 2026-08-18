@@ -15,6 +15,19 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [0.25.3] — 2026-08-18
+
+### Added
+
+- **`ctrl+shift+home` jumps to the top of the rail** — the first pinned circle
+  if anything is pinned, else the top of active (a working agent, else the most
+  recent), and so on down the bands. It reads the same live list `ctrl+page`
+  walks, so it lands where your eye already is rather than on a remembered
+  position, and folded bands stay out of it. `home` because the chord should
+  say *go to the top* without a letter to memorize; both clients (the web twin
+  answers to `alt+home` too, and holds that key even on an empty rail so the
+  browser's homepage shortcut can't fire).
+
 ## [0.25.2] — 2026-08-18
 
 ### Changed

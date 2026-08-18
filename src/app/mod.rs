@@ -1583,6 +1583,10 @@ impl SeanceApp {
                         cx.stop_propagation();
                     }
                 }
+                "home" => {
+                    self.select_top_workspace(window, cx);
+                    cx.stop_propagation();
+                }
                 " " | "space" => {
                     self.set_overview(!self.overview, cx);
                     cx.stop_propagation();

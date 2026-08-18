@@ -210,6 +210,37 @@ mod tests {
         assert_eq!(by(Section::Parked), v(&["e"]));
     }
 
+    /// Band ORDER is a contract, not an implementation detail: "jump to the
+    /// top of the rail" (ctrl+shift+home) is the first name of the first
+    /// non-empty band, so pinned has to come back first and parked last.
+    #[test]
+    fn bands_come_back_in_rail_order() {
+        let bands = partition_sections(
+            &v(&["a", "b", "c", "d"]),
+            &set(&["a", "b", "c"]),
+            &set(&["c"]),
+            &set(&["b"]),
+        );
+        let order: Vec<Section> = bands.iter().map(|(s, _)| *s).collect();
+        assert_eq!(
+            order,
+            vec![
+                Section::Pinned,
+                Section::Active,
+                Section::Sleeping,
+                Section::Parked
+            ]
+        );
+        // Top of the rail with something pinned is that pinned circle, even
+        // though `a` sorts first overall.
+        let top = bands
+            .iter()
+            .find(|(_, ws)| !ws.is_empty())
+            .and_then(|(_, ws)| ws.first())
+            .cloned();
+        assert_eq!(top.as_deref(), Some("c"));
+    }
+
     #[test]
     fn a_prefix_needs_two_circles_to_become_a_group() {
         let rows = group_by_prefix(&v(&["mtg-growth", "solo-thing", "mtg-ai"]), same);

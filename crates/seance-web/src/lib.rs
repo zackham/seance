@@ -662,6 +662,28 @@ impl App {
         self.select_workspace(&wss[next]);
     }
 
+    /// Ctrl+shift+home: jump to the rail's TOP row — the first pinned circle
+    /// if anything is pinned, else the top of active (a working agent, else
+    /// most recent), and so on down the bands. Same live list ctrl+page walks.
+    /// Returns false when there's nothing to jump to, so the key falls
+    /// through instead of eating itself.
+    pub(crate) fn select_top_workspace(self: &Rc<Self>) -> bool {
+        let top = {
+            let st = self.state.borrow();
+            st.displayed_active_ring().into_iter().next()
+        };
+        let Some(ws) = top else {
+            // Still ours: alt+home is the browser's "go to homepage", and an
+            // empty rail must not let that through.
+            return true;
+        };
+        if self.selected_workspace().as_deref() == Some(ws.as_str()) {
+            return true;
+        }
+        self.select_workspace(&ws);
+        true
+    }
+
     /// Cell index under a mouse event on a pane canvas, clamped to the grid.
     fn cell_at(&self, pane: &str, ev: &web_sys::MouseEvent) -> Option<(u16, u16, usize)> {
         let views = self.views.borrow();

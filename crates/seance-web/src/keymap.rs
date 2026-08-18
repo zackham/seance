@@ -23,6 +23,9 @@ pub enum ChromeCommand {
     ToggleHelp,
     ToggleActivity,
     ToggleProbe,
+    /// Jump to the rail's top row — first pinned circle if any, else the top
+    /// of active, and so on down the bands.
+    SelectTopWorkspace,
     /// Escape: close topmost overlay (menu > help > activity > zoom > selection).
     Escape,
 }
@@ -67,6 +70,7 @@ pub fn command_for(ev: &KeyboardEvent) -> Option<ChromeCommand> {
         "p" => Some(ChromeCommand::ToggleProbe),
         "?" | "/" => Some(ChromeCommand::ToggleHelp),
         "a" => Some(ChromeCommand::ToggleActivity),
+        "home" => Some(ChromeCommand::SelectTopWorkspace),
         _ => None,
     }
 }
@@ -116,6 +120,7 @@ pub fn execute(
             actions.toggle_probe();
             true
         }
+        ChromeCommand::SelectTopWorkspace => app.select_top_workspace(),
         ChromeCommand::Escape => app.escape_topmost(),
     }
 }

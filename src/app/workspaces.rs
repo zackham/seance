@@ -947,6 +947,28 @@ impl SeanceApp {
         self.select_workspace(&ws, window, cx);
     }
 
+    /// Jump to the rail's TOP row (ctrl+shift+home) — whatever the sort says
+    /// is first: the first pinned circle if anything is pinned, else the top
+    /// of active (a working agent, else most recent), and so on down the
+    /// bands. Same list ctrl+page walks, read live, so it lands where your
+    /// eye already is instead of on a remembered position.
+    pub(super) fn select_top_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ws) = self.visible_workspaces().into_iter().next() else {
+            return;
+        };
+        if self.selected_workspace.as_deref() == Some(ws.as_str()) {
+            return;
+        }
+        self.client.log_event(
+            "human",
+            Some(&ws),
+            None,
+            "workspace_selected",
+            format!("jumped to top workspace '{ws}'"),
+        );
+        self.select_workspace(&ws, window, cx);
+    }
+
     pub(super) fn move_to_workspace(
         &mut self,
         slug: &str,
