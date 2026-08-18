@@ -15,6 +15,16 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [0.25.1] — 2026-08-17
+
+### Changed
+
+- **`ctrl+shift+p` pins the selected circle** (toggle), and pane **popout moves
+  to `ctrl+shift+o`**. Pin is a rail verb reached constantly; popout is a
+  once-in-a-while move that still has its `⇱` button and its row menu. The web
+  client keeps `ctrl+shift+p` for the latency probe — a divergence the grimoire
+  already documents.
+
 ## [0.25.0] — 2026-08-17
 
 ### Added

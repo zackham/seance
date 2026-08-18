@@ -768,7 +768,7 @@ pub(super) fn render_pane(
                                 cx.stop_propagation();
                             }
                         }))
-                        .tooltip(tip("pop out to its own window (ctrl+shift+p)"))
+                        .tooltip(tip("pop out to its own window (ctrl+shift+o)"))
                         .child("⇱"),
                 )
                 // Notes flip — prominent when flipped (violet "back" affordance).
@@ -974,7 +974,7 @@ pub(super) fn render_help() -> gpui::AnyElement {
         .child(row("stage chip click", "focus pane + open pad drawer (double-click zooms)"))
         .child(row("✎ notes", "flip the pane over onto its notes face"))
         .child(row("↻ face", "flip back from notes to the terminal"))
-        .child(row("⇱", "pop the pane into its own OS window (ctrl+shift+p)"))
+        .child(row("⇱", "pop the pane into its own OS window (ctrl+shift+o)"))
         .child(row("▣", "shelve / tile (sidebar click re-shows a shelved pane)"))
         .child(row("status badge", "agent-reported state via ctl status-set"))
         .child(row("⚡ driven / 👁", "transient flash when another pane touches this one"))
@@ -1040,7 +1040,8 @@ pub(super) fn render_help() -> gpui::AnyElement {
             "rename selected workspace (enter commits, focus returns to pane)",
         ))
         .child(row("ctrl+shift+s", "flip notes on the active pane / flip back"))
-        .child(row("ctrl+shift+p", "pop active pane out / return to the circle"))
+        .child(row("ctrl+shift+p", "pin / unpin the selected workspace"))
+        .child(row("ctrl+shift+o", "pop active pane out / return to the circle"))
         .child(row("ctrl+shift+k", "precanned prompt palette"))
         .child(row("ctrl+shift+j", "fuzzy jump to workspace"))
         .child(row("ctrl+shift+z", "focus-zoom active pane (esc unzoom)"))

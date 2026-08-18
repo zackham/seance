@@ -1569,6 +1569,15 @@ impl SeanceApp {
                     cx.stop_propagation();
                 }
                 "p" => {
+                    // Pin/unpin the selected circle. Pane-level popout moved
+                    // to ctrl+shift+o — this key is about the rail now.
+                    if let Some(ws) = self.selected_workspace.clone() {
+                        self.toggle_pin_workspace(&ws);
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                }
+                "o" => {
                     if let Some(slug) = self.active_slug.clone() {
                         self.toggle_popout(&slug, cx);
                         cx.stop_propagation();

@@ -318,6 +318,17 @@ impl SeanceApp {
         }
     }
 
+    /// Flip the selected circle's pin (ctrl+shift+p). Same two calls the row
+    /// menu makes — the chord is just a faster way to reach them, and the rail
+    /// moving the row between bands is the feedback.
+    pub(super) fn toggle_pin_workspace(&mut self, ws: &str) {
+        if self.subs_pref.is_pinned(ws) {
+            self.unpin_workspace(ws);
+        } else {
+            self.pin_workspace(ws);
+        }
+    }
+
     /// The rail's four bands in display order, each carrying the single sort
     /// from [`Self::workspaces`]: pinned, active, sleeping, parked.
     pub(super) fn workspace_sections(&self) -> Vec<(Section, Vec<String>)> {

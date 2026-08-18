@@ -238,7 +238,7 @@ prefer the middle column.</p>
 <tr><td class="k">ctrl+shift+z</td><td class="alt">alt+z</td><td class="d">focus-zoom the active pane (escape unzooms)</td></tr>
 <tr><td class="k">ctrl+shift+m</td><td class="alt">alt+m</td><td class="d">the same zoom, second spelling — for keyboards where z is taken</td></tr>
 <tr><td class="k">ctrl+shift+r</td><td class="alt">alt+r</td><td class="d">rename the selected workspace <span class="note">— chord may hard-reload the tab, use alt</span></td></tr>
-<tr><td class="k">ctrl+shift+p</td><td class="alt">alt+p</td><td class="d">latency probe overlay <span class="note">— diverges from native, where this key pops a pane out</span></td></tr>
+<tr><td class="k">ctrl+shift+p</td><td class="alt">alt+p</td><td class="d">latency probe overlay <span class="note">— diverges from native, where this key pins the selected circle</span></td></tr>
 <tr><td class="k">ctrl+shift+a</td><td class="alt">alt+a</td><td class="d">activity drawer — the attributed event feed</td></tr>
 <tr><td class="k">ctrl+shift+? &nbsp;/&nbsp; ctrl+shift+/</td><td class="alt">alt+? / alt+/</td><td class="d">this grimoire</td></tr>
 <tr><td class="k">ctrl+pgup / pgdn</td><td class="alt">—</td><td class="d">previous / next workspace (sidebar order, wraps)</td></tr>
@@ -313,7 +313,8 @@ listed so the absence is legible rather than mysterious.</p>
 <tr><td class="k">ctrl+shift+k</td><td class="d">prompt palette — precanned prompts into the active agent</td></tr>
 <tr><td class="k">ctrl+shift+j</td><td class="d">jump palette — fuzzy jump to a pane or circle</td></tr>
 <tr><td class="k">ctrl+shift+s</td><td class="d">notes flip — turn the pane over onto its scratchpad face</td></tr>
-<tr><td class="k">ctrl+shift+p</td><td class="d">popout — a pane in its own OS window (on the web this key is the probe)</td></tr>
+<tr><td class="k">ctrl+shift+p</td><td class="d">pin / unpin the selected circle (on the web this key is the probe)</td></tr>
+<tr><td class="k">ctrl+shift+o</td><td class="d">popout — a pane in its own OS window</td></tr>
 <tr><td class="k">ctrl+shift+f</td><td class="d">jump to the last failed shell command</td></tr>
 </table>
 <p class="note">also native-only today: whisper (💬), one-click arm (⚡), the pad
