@@ -1103,6 +1103,12 @@ pub(super) fn render_help() -> gpui::AnyElement {
             "every chord above, spelled with cmd — except 3 / 4 / 5, which macOS \
              takes for screenshots (ctrl+shift still reaches those rows)",
         ))
+        .child(row(
+            "cmd+up / down (macOS)",
+            "previous / next workspace — the arrows stand in for the page keys a \
+             mac keyboard doesn't have. +shift cycles panes instead, so spatial \
+             nav stays on ctrl+shift+arrows",
+        ))
         .child(row("escape", "dismiss whisper / palette / unzoom"))
         .child(section("terminal focus"))
         .child(row("ctrl+shift+c / v", "copy selection / paste (macOS: cmd+c / cmd+v)"))

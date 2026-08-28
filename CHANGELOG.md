@@ -15,6 +15,23 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [0.25.6] — 2026-08-28
+
+### Added
+
+- **The mac's missing page keys.** A mac keyboard has no PageUp/PageDown, which
+  put both cycles behind `fn`: `ctrl+shift+fn+up` to reach the next pane is not
+  a chord anyone presses twice. With cmd held, the up/down arrows now stand in
+  for the page keys — `cmd+up`/`cmd+down` cycles circles, `cmd+shift+up`/`down`
+  cycles panes inside one. Cmd-only, deliberately: `ctrl+shift+arrows` is
+  spatial pane nav and bare `ctrl+arrows` is a PTY sequence, so neither was
+  available to borrow.
+
+  The cost is that `cmd+shift+up`/`down` no longer navigates the tile grid
+  vertically — spatial nav is `ctrl+shift+arrows` on macOS, and
+  `cmd+shift+left`/`right` still reaches it since only the vertical pair is
+  claimed.
+
 ## [0.25.5] — 2026-08-28
 
 ### Added

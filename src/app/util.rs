@@ -228,6 +228,14 @@ pub(super) fn chord_modifier_held(mods: &gpui::Modifiers, mac: bool) -> bool {
     mods.control || (mac && mods.platform)
 }
 
+/// A mac keyboard has no page keys, so with cmd held the up/down arrows stand
+/// in for them and the circle / pane cycles stay reachable. Cmd-only on
+/// purpose: `ctrl+shift+arrows` is spatial pane nav and bare `ctrl+arrows` is a
+/// PTY sequence, so neither is available to borrow.
+pub(super) fn arrow_stands_in_for_page(key: &str, mods: &gpui::Modifiers, mac: bool) -> bool {
+    mac && mods.platform && !mods.control && matches!(key, "up" | "arrowup" | "down" | "arrowdown")
+}
+
 /// `ctrl+shift+<N>` → 0-based rail row. Accepts the digit *and* the US-layout
 /// shifted symbol: the compositor reports one or the other depending on how it
 /// resolves the shift, and a chord that works on one machine and silently does
@@ -417,5 +425,28 @@ mod tests {
     fn a_bare_key_is_never_a_chord() {
         assert!(!chord_modifier_held(&mods(false, false), true));
         assert!(!chord_modifier_held(&mods(false, false), false));
+    }
+
+    #[test]
+    fn cmd_arrows_are_page_keys_on_a_mac() {
+        for k in ["up", "arrowup", "down", "arrowdown"] {
+            assert!(arrow_stands_in_for_page(k, &mods(false, true), true), "{k}");
+        }
+    }
+
+    #[test]
+    fn ctrl_arrows_are_left_alone() {
+        // ctrl+shift+arrows is spatial pane nav and bare ctrl+arrows is a PTY
+        // sequence — borrowing either would cost a key that already works.
+        assert!(!arrow_stands_in_for_page("up", &mods(true, false), true));
+        assert!(!arrow_stands_in_for_page("up", &mods(true, true), true));
+    }
+
+    #[test]
+    fn the_stand_in_is_macos_only_and_arrows_only() {
+        // Linux has page keys and a window manager that owns super.
+        assert!(!arrow_stands_in_for_page("up", &mods(false, true), false));
+        assert!(!arrow_stands_in_for_page("left", &mods(false, true), true));
+        assert!(!arrow_stands_in_for_page("k", &mods(false, true), true));
     }
 }

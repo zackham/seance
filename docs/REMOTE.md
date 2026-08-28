@@ -95,6 +95,10 @@ way as Linux (`scripts/bootstrap-deps.sh` symlinks `deps/zed`, then
   here (0.25.5), and `cmd+c` / `cmd+v` copy and paste without shift. Ctrl still
   works. Exception: macOS takes `cmd+shift+3/4/5` for screenshots before the app
   sees them — use `ctrl+shift` for those rail rows.
+  A mac keyboard has no page keys, so `cmd+up`/`cmd+down` stand in for
+  `ctrl+pgup`/`pgdn` (cycle circles) and `cmd+shift+up`/`down` for the pane
+  cycle (0.25.6). Spatial pane nav therefore stays on `ctrl+shift+arrows` —
+  cmd+shift+left/right still reach it too.
 - known limitation: `seance ctl new -a <agent>` resolves the agent binary on the machine running ctl, not the daemon; use quicklaunch/GUI spawns (daemon-side) for cross-machine agent panes.
 
 ## Workspaces on a second machine

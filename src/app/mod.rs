@@ -1553,9 +1553,15 @@ impl SeanceApp {
         let chord_mod = chord_modifier_held(&ks.modifiers, cfg!(target_os = "macos"));
 
         // Ctrl+PageUp/Down — cycle workspaces; Ctrl+Shift+Page — cycle panes.
-        // Accept pageup/pagedown (GPUI) and common aliases.
-        let is_page_up = matches!(key, "pageup" | "page_up" | "prior");
-        let is_page_down = matches!(key, "pagedown" | "page_down" | "next");
+        // Accept pageup/pagedown (GPUI) and common aliases, plus the mac's
+        // cmd+arrow stand-in. Both cycles resolve before the chord table below,
+        // so on a mac cmd+shift+up/down cycles panes while spatial nav keeps
+        // ctrl+shift+arrows; left/right still fall through to spatial either way.
+        let paged = arrow_stands_in_for_page(key, &ks.modifiers, cfg!(target_os = "macos"));
+        let is_page_up = matches!(key, "pageup" | "page_up" | "prior")
+            || (paged && matches!(key, "up" | "arrowup"));
+        let is_page_down = matches!(key, "pagedown" | "page_down" | "next")
+            || (paged && matches!(key, "down" | "arrowdown"));
         if chord_mod && !ks.modifiers.alt && (is_page_up || is_page_down) {
             let delta = if is_page_up { -1 } else { 1 };
             if ks.modifiers.shift {
