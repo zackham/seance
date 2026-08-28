@@ -13,7 +13,8 @@
 //!
 //! Was per-GUI local state through 0.22; see the 0.23 CHANGELOG entry.
 //!
-//! Shape: `{ "active": [...], "seen": [...], "pinned": [...] }`.
+//! Shape: `{ "active": [...], "seen": [...], "pinned": [...],
+//! "flipped": "slug" }`.
 //! - `active` — workspaces rendered in the normal sidebar band; everything
 //!   else the daemon knows about lands in the collapsed `parked` group.
 //! - `seen` — every workspace this GUI has ever had in `active`. A workspace
@@ -49,6 +50,12 @@ pub struct SubscriptionsPref {
     /// instead of springing back to the defaults.
     #[serde(default)]
     pub collapsed: Option<BTreeSet<String>>,
+    /// Pane showing its notes face instead of its terminal. Part of the
+    /// arrangement for the same reason the rest of it is: the face you left up
+    /// is what you expect to find when the app comes back, and on the other
+    /// machine too. One at a time, matching the app model.
+    #[serde(default)]
+    pub flipped: Option<String>,
 }
 
 /// Collapse key for a prefix group inside a section.
@@ -309,6 +316,28 @@ mod tests {
         assert!(back.active.is_empty());
         assert!(back.seen.is_empty());
         assert!(back.pinned.is_empty());
+        assert!(back.flipped.is_none());
+    }
+
+    /// The notes face rides the same blob as the bands — a flip that doesn't
+    /// survive the trip is a face that closes itself on restart.
+    #[test]
+    fn the_notes_face_survives_the_daemon_blob() {
+        let mut pref = SubscriptionsPref::default();
+        pref.activate("lab");
+        pref.flipped = Some("claude-7".into());
+        let back = parse(&encode(&pref).unwrap()).unwrap();
+        assert_eq!(back, pref);
+        assert_eq!(back.flipped.as_deref(), Some("claude-7"));
+    }
+
+    /// A blob written before the field existed reads as "no face up", not as
+    /// a parse failure that would blank the whole rail.
+    #[test]
+    fn a_pre_flip_blob_still_parses() {
+        let back = parse(r#"{"active":["lab"],"seen":["lab"],"pinned":[]}"#).unwrap();
+        assert_eq!(back.active, set(&["lab"]));
+        assert!(back.flipped.is_none());
     }
 
     /// Back-compat: a file written before pins existed still parses, with an

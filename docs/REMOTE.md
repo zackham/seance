@@ -78,6 +78,7 @@ The fs bridge (`GuiRequest::Fs` / `daemon::fsbridge`) serves the GUI:
 | file panes | `FsOp::Read/Write/Stat/List/Remove` (daemon paths) |
 | scratchpads | pad path from `PaneInfo.scratchpad` + fs ops |
 | layout (split/weights) | `FsOp::LayoutLoad/LayoutSave` → daemon state dir — all windows share tiling |
+| notes face (which pane is flipped) | part of the rail arrangement (`SubscriptionsPref.flipped`) — restored on boot, pushed to every window |
 | host widgets (claude chips) | polled daemon-side, pushed as `HostWidgets`; select runs daemon-side (`FsOp::HostSelect`) |
 
 Bridge ops execute on their own daemon thread (never the input path) and are

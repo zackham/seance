@@ -1319,7 +1319,13 @@ impl SeanceApp {
                 .iter()
                 .find(|p| p.slug == slug && ws.as_ref().is_none_or(|w| p.workspace == *w))
             {
-                if self.pane_content_rendered(pane) && pane.focus_content(window, cx) {
+                // A notes-up pane parks on the root instead: its terminal isn't
+                // in the frame, and the drawer only takes focus when the human
+                // flips it or clicks it.
+                if !self.is_flipped(&slug)
+                    && self.pane_content_rendered(pane)
+                    && pane.focus_content(window, cx)
+                {
                     return;
                 }
                 // The active pane can't take the keyboard (file pane, or its
@@ -1353,7 +1359,7 @@ impl SeanceApp {
                 if matches!(&self.renaming, Some((RenameTarget::Pane(s), _)) if s == &slug) {
                     return;
                 }
-                if pane.focus_content(window, cx) {
+                if !self.is_flipped(&slug) && pane.focus_content(window, cx) {
                     self.pending_focus = None;
                     return;
                 }
@@ -1390,11 +1396,12 @@ impl SeanceApp {
         //    behind), or an untiled / popped / zoom-hidden pane.
         let focused = window.focused(cx);
         let active_pane_focusable = self.active_slug.as_ref().is_some_and(|slug| {
-            self.panes.iter().any(|p| {
-                p.slug == *slug
-                    && matches!(p.body, PaneBody::Remote { .. })
-                    && self.pane_content_rendered(p)
-            })
+            !self.is_flipped(slug)
+                && self.panes.iter().any(|p| {
+                    p.slug == *slug
+                        && matches!(p.body, PaneBody::Remote { .. })
+                        && self.pane_content_rendered(p)
+                })
         });
         let recover = match &focused {
             None => true,
@@ -2129,6 +2136,10 @@ impl SeanceApp {
         }
         if self.flipped.as_ref().is_some_and(|(s, _)| s == slug) {
             self.flipped = None;
+            // The pane is gone, so clear the shared face too. This is the only
+            // place other than an explicit un-flip that may write it — a window
+            // that simply can't SEE the pane must never clear it for everyone.
+            self.set_shared_flip(None);
         }
         if self.whisper.as_ref().is_some_and(|(s, _)| s == slug) {
             self.whisper = None;
@@ -2248,6 +2259,77 @@ impl SeanceApp {
         }
     }
 
+    /// Write the notes face into the shared arrangement: the daemon persists it
+    /// and pushes it to every other window.
+    fn set_shared_flip(&mut self, slug: Option<String>) {
+        if self.subs_pref.flipped == slug {
+            return;
+        }
+        self.subs_pref.flipped = slug;
+        self.save_subscriptions();
+    }
+
+    /// Materialize `subs_pref.flipped` into a live drawer, or drop the one we
+    /// have. Runs each frame because building a `ScratchpadDrawer` needs a
+    /// `Window`, which the daemon-event path doesn't have — same deferral as
+    /// `pending_rename`. Covers boot, another window's flip, and walking back
+    /// into a circle, all without touching focus.
+    ///
+    /// An unknown slug leaves the pref ALONE. A window renders only the circles
+    /// it subscribes to, so "I can't see that pane" is not evidence the face
+    /// should close — clearing it here would let one narrow window flip every
+    /// other window's notes shut.
+    fn sync_notes_flip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let want = self.subs_pref.flipped.clone();
+        let have = self.flipped.as_ref().map(|(s, _)| s.clone());
+        if want == have {
+            return;
+        }
+        let Some(slug) = want else {
+            self.flipped = None;
+            cx.notify();
+            return;
+        };
+        let Some(pane) = self.panes.iter().find(|p| p.slug == slug) else {
+            return;
+        };
+        let title = pane.name.clone();
+        let pad_path = pane.scratchpad.clone();
+        let drawer =
+            cx.new(|cx| ScratchpadDrawer::new(self.client.clone(), pad_path, title, window, cx));
+        self.flipped = Some((slug, drawer));
+        cx.notify();
+    }
+
+    /// Is the human typing in a notes face this frame actually renders?
+    ///
+    /// The distinction is the whole focus rule for notes. Focus in a *rendered*
+    /// drawer is where the human put it and the focus pass must not touch it.
+    /// Focus in the drawer of a pane the frame does NOT render — you flipped
+    /// notes up and then changed circles — is stranded exactly like a hidden
+    /// terminal's handle: chords die until a click. That case has to recover.
+    fn notes_editor_focused(&self, window: &Window, cx: &Context<Self>) -> bool {
+        let Some((slug, drawer)) = self.flipped.as_ref() else {
+            return false;
+        };
+        if !self
+            .panes
+            .iter()
+            .any(|p| p.slug == *slug && self.pane_content_rendered(p))
+        {
+            return false;
+        }
+        window
+            .focused(cx)
+            .is_some_and(|f| f == drawer.read(cx).focus_handle(cx))
+    }
+
+    /// A pane showing its notes face has no terminal in the frame, so its
+    /// content handle is not a legal focus target.
+    fn is_flipped(&self, slug: &str) -> bool {
+        self.flipped.as_ref().is_some_and(|(s, _)| s == slug)
+    }
+
     /// Toggle the notes face of the active pane (ctrl+shift+s).
     fn toggle_notes_flip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(slug) = self.active_slug.clone() else {
@@ -2266,6 +2348,7 @@ impl SeanceApp {
 
         if self.flipped.as_ref().is_some_and(|(s, _)| s == slug) {
             self.flipped = None;
+            self.set_shared_flip(None);
             // Return focus to the terminal (or leave file pane unfocused).
             if let Some(pane) = self.panes.iter().find(|p| p.slug == slug) {
                 pane.focus_content(window, cx);
@@ -2298,10 +2381,14 @@ impl SeanceApp {
         let pad_path = pane.scratchpad.clone();
         let drawer =
             cx.new(|cx| ScratchpadDrawer::new(self.client.clone(), pad_path, title, window, cx));
-        // Focus the notes editor.
+        // Focus the notes editor. Only this path does — flipping is a
+        // deliberate "I want to type here". A face restored from the shared
+        // arrangement (boot, another window, walking back into the circle)
+        // goes up unfocused; see `sync_notes_flip`.
         let focus = drawer.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         self.flipped = Some((slug.to_string(), drawer));
+        self.set_shared_flip(Some(slug.to_string()));
         self.client.log_event(
             "human",
             Some(&ws),
@@ -2502,10 +2589,13 @@ impl Render for SeanceApp {
         // Launch / spawn: put keyboard on the active terminal once the view exists.
         // Skip while palette / rename / whisper / notes drawer / quicklaunch
         // editor owns input.
+        // The shared arrangement may have put a notes face up (boot, or another
+        // window) — materialize it before the focus pass reads `flipped`.
+        self.sync_notes_flip(window, cx);
         if matches!(self.palette, PaletteMode::Closed)
             && self.renaming.is_none()
             && self.whisper.is_none()
-            && self.flipped.is_none()
+            && !self.notes_editor_focused(window, cx)
             && self.quicklaunch_editor.is_none()
         {
             self.ensure_keyboard_focus(window, cx);

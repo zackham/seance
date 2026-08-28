@@ -15,6 +15,37 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [0.25.7] — 2026-08-28
+
+### Changed
+
+- **The notes face is daemon-owned.** Which pane is flipped to its notes side
+  used to be per-window and per-launch: quit seance with notes up and it came
+  back a terminal, and the mac never knew the desk had it open at all. It now
+  rides the same blob as the rest of the rail arrangement
+  (`SubscriptionsPref.flipped`, `SubsLoad`/`SubsSave` → `RailPrefs`), so a
+  restart opens on the face you left up and flipping anywhere flips everywhere.
+  Old blobs without the field read as "no face up". The browser client has no
+  notes face and never writes the arrangement, so it can't drop the field.
+
+### Fixed
+
+- **A restored notes face doesn't take the keyboard.** Walking into a circle
+  whose pane is notes-up put the cursor in the notes editor, so the next
+  `cmd+down` typed into the pad instead of moving on. Only an explicit flip or
+  a click focuses the editor now; a face that goes up because the arrangement
+  said so goes up unfocused, and the pane parks the keyboard on the app root
+  where the chords still fire.
+
+  Underneath, the focus pass used to switch itself off entirely whenever
+  *anything* was flipped (`flipped.is_none()`), which is why focus stayed in a
+  pad belonging to a circle no longer on screen — and would have stranded the
+  keyboard at launch once a flip could survive a restart. The guard is now the
+  precise thing it was reaching for: leave focus alone while it's in a notes
+  editor **this frame renders**, and recover in every other case. A notes-up
+  pane's terminal is no longer a legal focus target, since it isn't in the
+  frame to focus.
+
 ## [0.25.6] — 2026-08-28
 
 ### Added
