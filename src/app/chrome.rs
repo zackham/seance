@@ -1098,9 +1098,14 @@ pub(super) fn render_help() -> gpui::AnyElement {
         .child(row("ctrl+pgup / pgdn", "previous / next workspace (sidebar order, wraps)"))
         .child(row("ctrl+shift+pgup / pgdn", "previous / next pane in this workspace"))
         .child(row("ctrl+shift+arrows", "navigate panes spatially (grid directions)"))
+        .child(row(
+            "cmd+shift+… (macOS)",
+            "every chord above, spelled with cmd — except 3 / 4 / 5, which macOS \
+             takes for screenshots (ctrl+shift still reaches those rows)",
+        ))
         .child(row("escape", "dismiss whisper / palette / unzoom"))
         .child(section("terminal focus"))
-        .child(row("ctrl+shift+c / v", "copy selection / paste"))
+        .child(row("ctrl+shift+c / v", "copy selection / paste (macOS: cmd+c / cmd+v)"))
         .child(row("shift+pgup/pgdn", "scrollback"))
         .child(row("ctrl+click", "open OSC-8 / URL on screen"))
         .child(row("middle-click", "paste PRIMARY selection (mouse-drag select fills it)"))

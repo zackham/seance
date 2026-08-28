@@ -15,7 +15,23 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
-## [Unreleased]
+## [0.25.5] — 2026-08-28
+
+### Added
+
+- **On a mac, cmd is the chord key too.** Every seance chord that reads
+  `ctrl+shift+<key>` now also answers to `cmd+shift+<key>` on macOS — summon,
+  kill, rename, pin, popout, notes flip, palettes, zoom, overview, spatial
+  arrows, the rail digits, and `cmd+pgup`/`pgdn` for circles. Ctrl keeps
+  working; this is a second spelling, not a move. Cmd was free to take: the
+  terminal view already swallows every cmd combo on macOS (that's where
+  `cmd+c` / `cmd+v` live), so no key was reaching a TUI to lose. Linux is
+  deliberately left out — `platform` is the super key there and the window
+  manager owns it.
+
+  Two chords stay ctrl-only in practice: macOS grabs `cmd+shift+3/4/5` for
+  screenshots before an app ever sees them, so rail rows 3–5 want
+  `ctrl+shift`. The help overlay says so.
 
 ### Fixed
 

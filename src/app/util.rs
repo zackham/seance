@@ -216,6 +216,18 @@ pub(super) fn telegram_status_bridge(
     });
 }
 
+/// True when the chrome-chord modifier is down: ctrl anywhere, plus cmd on
+/// macOS. `mac` is `cfg!(target_os = "macos")` at the call site so both arms
+/// stay testable from one machine.
+///
+/// Cmd is free to claim: `remote_term_view` already swallows every cmd combo
+/// on macOS (it's the copy/paste chord there), so no TUI loses a key. Linux is
+/// excluded on purpose — `platform` is super there, and super+<key> is the
+/// window manager's.
+pub(super) fn chord_modifier_held(mods: &gpui::Modifiers, mac: bool) -> bool {
+    mods.control || (mac && mods.platform)
+}
+
 /// `ctrl+shift+<N>` → 0-based rail row. Accepts the digit *and* the US-layout
 /// shifted symbol: the compositor reports one or the other depending on how it
 /// resolves the shift, and a chord that works on one machine and silently does
@@ -377,5 +389,33 @@ mod tests {
         assert_eq!(rail_index_for_key("0"), None);
         assert_eq!(rail_index_for_key(")"), None);
         assert_eq!(rail_index_for_key("k"), None);
+    }
+
+    fn mods(control: bool, platform: bool) -> gpui::Modifiers {
+        gpui::Modifiers {
+            control,
+            platform,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ctrl_is_the_chord_modifier_on_every_platform() {
+        assert!(chord_modifier_held(&mods(true, false), true));
+        assert!(chord_modifier_held(&mods(true, false), false));
+    }
+
+    #[test]
+    fn cmd_joins_it_only_on_macos() {
+        // Same physical key: cmd on a mac, super on linux. Super belongs to
+        // the window manager, so only the mac arm claims it.
+        assert!(chord_modifier_held(&mods(false, true), true));
+        assert!(!chord_modifier_held(&mods(false, true), false));
+    }
+
+    #[test]
+    fn a_bare_key_is_never_a_chord() {
+        assert!(!chord_modifier_held(&mods(false, false), true));
+        assert!(!chord_modifier_held(&mods(false, false), false));
     }
 }

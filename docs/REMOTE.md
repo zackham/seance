@@ -91,6 +91,10 @@ compile on darwin). Platform notes: `open` instead of `xdg-open`, `ps`
 instead of `/proc`, `libc::getuid()` for the socket suffix. Build the same
 way as Linux (`scripts/bootstrap-deps.sh` symlinks `deps/zed`, then
 `cargo build --release`).
+- **keys:** every `ctrl+shift+<key>` chord also answers to `cmd+shift+<key>`
+  here (0.25.5), and `cmd+c` / `cmd+v` copy and paste without shift. Ctrl still
+  works. Exception: macOS takes `cmd+shift+3/4/5` for screenshots before the app
+  sees them — use `ctrl+shift` for those rail rows.
 - known limitation: `seance ctl new -a <agent>` resolves the agent binary on the machine running ctl, not the daemon; use quicklaunch/GUI spawns (daemon-side) for cross-machine agent panes.
 
 ## Workspaces on a second machine

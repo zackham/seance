@@ -1548,11 +1548,15 @@ impl SeanceApp {
             return;
         }
 
+        // Every chrome chord below spells its modifier as ctrl, and as cmd too
+        // on macOS — see `chord_modifier_held`.
+        let chord_mod = chord_modifier_held(&ks.modifiers, cfg!(target_os = "macos"));
+
         // Ctrl+PageUp/Down — cycle workspaces; Ctrl+Shift+Page — cycle panes.
         // Accept pageup/pagedown (GPUI) and common aliases.
         let is_page_up = matches!(key, "pageup" | "page_up" | "prior");
         let is_page_down = matches!(key, "pagedown" | "page_down" | "next");
-        if ks.modifiers.control && !ks.modifiers.alt && (is_page_up || is_page_down) {
+        if chord_mod && !ks.modifiers.alt && (is_page_up || is_page_down) {
             let delta = if is_page_up { -1 } else { 1 };
             if ks.modifiers.shift {
                 self.cycle_pane(delta, window, cx);
@@ -1563,7 +1567,7 @@ impl SeanceApp {
             return;
         }
 
-        if ks.modifiers.control && ks.modifiers.shift && !ks.modifiers.alt {
+        if chord_mod && ks.modifiers.shift && !ks.modifiers.alt {
             match key {
                 "n" => {
                     self.new_default_session(cx);
