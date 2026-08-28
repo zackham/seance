@@ -275,6 +275,7 @@ pub fn op_name(req: &crate::control::ControlRequest) -> &'static str {
         Read { .. } => "read",
         Status { .. } => "status",
         Kill { .. } => "kill",
+        Select { .. } => "select",
         Scratchpad { .. } => "scratchpad",
         Timeline { .. } => "timeline",
         StatusSet { .. } => "status_set",

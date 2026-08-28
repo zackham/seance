@@ -498,6 +498,9 @@ fn content_type(path: &Path) -> &'static str {
         "wasm" => "application/wasm",
         "json" => "application/json",
         "map" => "application/json",
+        // Served as octet-stream a browser may ignore the manifest outright,
+        // which costs the home-screen install its name and standalone mode.
+        "webmanifest" => "application/manifest+json",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "ico" => "image/x-icon",
@@ -553,6 +556,15 @@ fn serve_conn(stream: TcpStream, peer: &str, token: &str, dist: &Path) -> Result
             let body = read_body(&stream, &head, replayexport::MAX_PUBLISH_BODY);
             let mut s = stream;
             serve_replay_publish(&mut s, peer, &req, token, body)
+        }
+        // Voice-to-prompt: token-gated like every other non-static route.
+        // This one bills a third-party API, so leaving it open would be worse
+        // than leaking a grid — it must never fall through to the 405 arm
+        // unauthenticated.
+        ("POST", "/transcribe") => {
+            let body = read_body(&stream, &head, MAX_AUDIO_BODY);
+            let mut s = stream;
+            serve_transcribe(&mut s, peer, &req, token, body)
         }
         ("GET", _) => {
             let mut s = stream;
@@ -614,8 +626,15 @@ fn write_response(
     no_store: bool,
     body: &[u8],
 ) -> Result<()> {
+    // `no-store`, not `no-cache`: no-cache still permits the browser to KEEP
+    // a copy and revalidate, and we emit no ETag/Last-Modified for it to
+    // revalidate against. That let Safari hold seance_web.js from one build
+    // while fetching seance_web_bg.wasm from the next — and a wasm-bindgen
+    // glue/module pair is version-locked, so the mismatch throws inside
+    // init() and the page renders its chrome with no data in it. Never
+    // storing is the only way to make that mix impossible.
     let cache = if no_store {
-        "Cache-Control: no-cache\r\n"
+        "Cache-Control: no-store, must-revalidate\r\n"
     } else {
         ""
     };
@@ -696,6 +715,130 @@ fn read_body(stream: &TcpStream, head: &str, cap: usize) -> Result<Vec<u8>> {
 
 /// Same token as `/ws` — but over plain HTTP, where a 401 is visible to
 /// `fetch()` (the websocket close-code dance exists only for upgrades).
+/// Cap on a posted voice clip. Groq's own limit is 25MB; a phone prompt is
+/// seconds long, so anything past 12MB is a mistake or an attack.
+const MAX_AUDIO_BODY: usize = 12 * 1024 * 1024;
+
+/// Container extensions we'll hand to Groq. Allowlisted rather than taken
+/// from the client verbatim — this value reaches a filename.
+fn audio_ext_ok(ext: &str) -> bool {
+    matches!(
+        ext,
+        "webm" | "mp4" | "m4a" | "ogg" | "oga" | "wav" | "mp3" | "flac" | "aac"
+    )
+}
+
+/// `POST /transcribe?token=…&ext=webm` → `{"text": "…"}`.
+///
+/// Speech-to-text for the phone chrome: iOS can't type into a pane, so the
+/// mic is the input path. Shelled out to `curl` on purpose — the bridge has
+/// no HTTP client dependency and this is not worth acquiring one for.
+///
+/// The key is read per request from `~/.config/groq/api_key`; if it isn't
+/// there the feature is simply off (503) and the client keeps the recording
+/// rather than losing what was said.
+fn serve_transcribe(
+    stream: &mut TcpStream,
+    peer: &str,
+    req: &RequestLine,
+    token: &str,
+    body: Result<Vec<u8>>,
+) -> Result<()> {
+    if !replay_auth_ok(req, token) {
+        eprintln!("seance web: [{peer}] transcribe auth failure");
+        return json_err(stream, 401, "Unauthorized", "bad token");
+    }
+    let body = match body {
+        Ok(b) => b,
+        Err(e) => return json_err(stream, 413, "Payload Too Large", &e.to_string()),
+    };
+    if body.is_empty() {
+        return json_err(stream, 400, "Bad Request", "empty audio body");
+    }
+
+    let ext = req.query("ext").unwrap_or_else(|| "webm".to_string());
+    if !audio_ext_ok(&ext) {
+        return json_err(stream, 400, "Bad Request", "unsupported audio container");
+    }
+
+    let key_path = match std::env::var_os("HOME") {
+        Some(h) => PathBuf::from(h).join(".config/groq/api_key"),
+        None => return json_err(stream, 503, "Unavailable", "no HOME for groq key"),
+    };
+    let key = match std::fs::read_to_string(&key_path) {
+        Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
+        _ => {
+            return json_err(
+                stream,
+                503,
+                "Unavailable",
+                "groq api key missing — transcription is off",
+            )
+        }
+    };
+
+    // Unique temp path: pid + nanos, so concurrent posts can't collide.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp =
+        std::env::temp_dir().join(format!("seance-voice-{}-{stamp}.{ext}", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, &body) {
+        return json_err(stream, 500, "Server Error", &format!("temp write: {e}"));
+    }
+
+    let out = std::process::Command::new("curl")
+        .arg("-sS")
+        .args(["--max-time", "120"])
+        .arg("-X")
+        .arg("POST")
+        .arg("https://api.groq.com/openai/v1/audio/transcriptions")
+        .arg("-H")
+        .arg(format!("Authorization: Bearer {key}"))
+        .arg("-F")
+        .arg(format!("file=@{}", tmp.display()))
+        .arg("-F")
+        .arg("model=whisper-large-v3")
+        .arg("-F")
+        .arg("response_format=text")
+        .output();
+    let _ = std::fs::remove_file(&tmp);
+
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => return json_err(stream, 500, "Server Error", &format!("curl: {e}")),
+    };
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        eprintln!("seance web: [{peer}] transcribe failed: {err}");
+        return json_err(stream, 502, "Bad Gateway", "transcription upstream failed");
+    }
+
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // response_format=text gives raw text on success; a JSON body here means
+    // Groq returned a structured error with HTTP 200 semantics from curl.
+    if text.starts_with('{') {
+        eprintln!("seance web: [{peer}] transcribe upstream error: {text}");
+        return json_err(stream, 502, "Bad Gateway", "transcription upstream error");
+    }
+    eprintln!(
+        "seance web: [{peer}] transcribed {} bytes of {ext} → {} chars",
+        body.len(),
+        text.chars().count()
+    );
+
+    let payload = serde_json::json!({ "text": text }).to_string();
+    write_response(
+        stream,
+        200,
+        "OK",
+        "application/json; charset=utf-8",
+        false,
+        payload.as_bytes(),
+    )
+}
+
 fn replay_auth_ok(req: &RequestLine, token: &str) -> bool {
     let presented = req.query("token").unwrap_or_default();
     seance_core::auth::token_well_formed(&presented)

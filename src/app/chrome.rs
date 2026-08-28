@@ -287,6 +287,47 @@ impl SeanceApp {
             .into_any_element()
     }
 
+    /// The daemon refused this connection, and said why.
+    ///
+    /// This bar exists because the alternative is a lie of omission: a client
+    /// the daemon has turned away renders exactly like a client with nothing
+    /// to show — empty rail, no panes, no complaint. The daemon's refusal text
+    /// already names the fix (upgrade the older side); all this does is put it
+    /// where eyes are instead of in `gui.stderr.log`.
+    pub(super) fn render_daemon_error_bar(&self, _cx: &Context<Self>) -> gpui::AnyElement {
+        let Some(err) = self.daemon_error.clone() else {
+            return div().into_any_element();
+        };
+        div()
+            .id("daemon-error-bar")
+            .flex_none()
+            .px_3()
+            .py_2()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap_3()
+            .border_b_1()
+            .border_color(SeancePalette::danger())
+            .bg(SeancePalette::bg_elevated())
+            .child(
+                div()
+                    .flex_none()
+                    .text_sm()
+                    .text_color(SeancePalette::danger())
+                    .child("⚠"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(SeancePalette::text())
+                    .child(format!("daemon refused this connection — {err}")),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_stage_strip(
         &self,
         window_active: bool,

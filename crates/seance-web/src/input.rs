@@ -166,13 +166,33 @@ pub fn wheel_to_action(
     acc: &mut f64,
 ) -> WheelAction {
     let rows = wheel_rows(ev.delta_y(), ev.delta_mode(), cell_h_css, acc);
+    scroll_action(rows, snap, col, row, false)
+}
+
+/// The wheel precedence chain, minus the event: alternate-scroll arrows →
+/// SGR wheel reports → daemon scrollback.
+///
+/// `touch` drops the alternate-scroll arm. That arm exists because a physical
+/// wheel inside an alt-screen TUI conventionally means "arrow key" — it's how
+/// `less` and `man` scroll. A finger drag is a different gesture with a
+/// different meaning: move the viewport. Sending arrows there walked Claude
+/// backwards through prompt history instead of showing scrollback, which is
+/// both wrong and destructive to a half-typed prompt. Mouse-reporting apps
+/// still get their SGR wheel events, because those scroll the app correctly.
+pub fn scroll_action(
+    rows: i32,
+    snap: &GridSnapshot,
+    col: u16,
+    row: u16,
+    touch: bool,
+) -> WheelAction {
     if rows == 0 {
         return WheelAction::None;
     }
     let n = rows.unsigned_abs() as usize;
     let up = rows < 0;
 
-    if snap.alt_screen && snap.alternate_scroll {
+    if snap.alt_screen && snap.alternate_scroll && !touch {
         let modes = TermModes::from_snapshot(snap);
         return WheelAction::Bytes(repeat_key(if up { "up" } else { "down" }, n, modes));
     }

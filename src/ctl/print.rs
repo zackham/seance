@@ -343,6 +343,7 @@ COMMANDS:
     send-raw PANE BYTES           raw PTY bytes (Ctrl-C = $'\\x03')
     read PANE [--lines N]         rendered screen (debug)
     status / kill / scratchpad|pad PANE
+    select|focus PANE             select the pane in every attached GUI window
          pad PANE --cat           print pad body
     note [PANE] TEXT...           append attributed pad note
          --file PATH  --replace

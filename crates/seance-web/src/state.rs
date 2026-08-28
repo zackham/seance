@@ -30,6 +30,9 @@ pub enum Applied {
     Error { message: String },
     /// This window was remote-closed (✦ popover) — stop reconnecting.
     Kicked { by: String },
+    /// The shared rail arrangement changed in some window. Carries the raw blob;
+    /// adopting it needs the app (localStorage + Subscribe), not just state.
+    RailPrefs { json: String },
 }
 
 /// Per-pane co-presence state (from Agency events).
@@ -881,10 +884,11 @@ impl ClientState {
             GuiEvent::Error { message } => Applied::Error { message },
             GuiEvent::Kicked { by } => Applied::Kicked { by },
             GuiEvent::Ack { .. } | GuiEvent::FsResult { .. } => Applied::Nothing,
-            // The browser client has no active/parked rail of its own to
-            // rearrange — it renders what it is subscribed to. Knowing the
-            // native windows' arrangement changed tells it nothing to draw.
-            GuiEvent::RailPrefs { .. } => Applied::Nothing,
+            // The daemon owns the arrangement and broadcasts it to every window
+            // (see subscriptions_pref.rs). Dropping it here is why a pin made at
+            // the desk never showed up in the browser: the pinned band existed
+            // but its membership only ever came from this browser's localStorage.
+            GuiEvent::RailPrefs { json } => Applied::RailPrefs { json: json.clone() },
             GuiEvent::HostWidgets { widgets } => {
                 if let Ok(parsed) = serde_json::from_value::<Vec<HostWidget>>(widgets) {
                     self.host_widgets = parsed;

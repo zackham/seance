@@ -138,6 +138,21 @@ pub enum ControlRequest {
         from: Option<String>,
     },
 
+    /// Select a pane in every attached GUI window: switch each window that can
+    /// see the pane's circle over to it and focus the pane. The remote-control
+    /// verb -- an external surface (a touch strip, a phone) steering what the
+    /// big screen is looking at. Wire-wise this is pure existing machinery:
+    /// the daemon mutates its selection state and re-broadcasts `State`, which
+    /// clients already apply wholesale.
+    Select {
+        #[serde(alias = "session")]
+        pane: String,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
     /// Return the filesystem path of a pane's shared scratchpad file — the
     /// durable side-channel a master and its workers exchange notes through.
     Scratchpad {
@@ -574,6 +589,7 @@ impl ControlRequest {
             | Self::Read { from, .. }
             | Self::Status { from, .. }
             | Self::Kill { from, .. }
+            | Self::Select { from, .. }
             | Self::Scratchpad { from, .. }
             | Self::Timeline { from, .. }
             | Self::StatusSet { from, .. }
@@ -649,6 +665,7 @@ impl ControlRequest {
             | Self::Read { scope, .. }
             | Self::Status { scope, .. }
             | Self::Kill { scope, .. }
+            | Self::Select { scope, .. }
             | Self::Scratchpad { scope, .. }
             | Self::Timeline { scope, .. }
             | Self::StatusSet { scope, .. }

@@ -209,6 +209,7 @@ impl App {
             }
             Applied::Structure => self.need_rebuild.set(true),
             Applied::Badges => self.badges_dirty.set(true),
+            Applied::RailPrefs { json } => self.adopt_rail_prefs(&json),
             Applied::Error { message } => {
                 if let Some(ch) = self.chrome.borrow_mut().as_mut() {
                     ch.toast(&message);
@@ -277,6 +278,65 @@ impl App {
         let st = self.state.borrow();
         subs::save(&LocalStore, &st.subs);
         *self.attach_subs.borrow_mut() = st.subs.attach_subscriptions();
+    }
+
+    /// Pull the daemon-owned rail arrangement on (re)connect.
+    ///
+    /// The daemon only *broadcasts* `RailPrefs` when someone changes it, so an
+    /// event handler alone leaves a freshly-opened browser showing whatever its
+    /// localStorage last held — which is how a desk full of pins rendered here
+    /// with no pinned band at all. Native does the same pull (`gui_client.rs`).
+    fn load_rail_prefs(self: &Rc<Self>) {
+        let app = Rc::clone(self);
+        let cb: Box<dyn FnOnce(Result<serde_json::Value, String>)> = Box::new(move |result| {
+            if let Ok(v) = result {
+                // `{"json": null}` = daemon has no arrangement saved yet.
+                if let Some(blob) = v.get("json").and_then(|j| j.as_str()) {
+                    app.adopt_rail_prefs(blob);
+                }
+            }
+        });
+        if let Some(c) = self.conn.borrow().as_ref() {
+            c.fs_call(seance_core::protocol::FsOp::SubsLoad, cb);
+        }
+    }
+
+    /// Adopt a shared arrangement blob (active/seen/pinned).
+    ///
+    /// Adopt WITHOUT echoing: `persist_subs` only writes localStorage, so this
+    /// never calls `SubsSave` and cannot start the broadcast loop the daemon
+    /// warns about. Local fold state (`collapsed`) is deliberately preserved —
+    /// which bands you keep rolled up is per-window, unlike membership.
+    fn adopt_rail_prefs(&self, json: &str) {
+        let Some(pref) = subs::SubPrefs::parse(json) else {
+            return;
+        };
+        let newly_active: Vec<String> = {
+            let mut st = self.state.borrow_mut();
+            if st.subs.active == pref.active
+                && st.subs.pinned == pref.pinned
+                && st.subs.seen == pref.seen
+            {
+                return;
+            }
+            let before: HashSet<String> = st.subs.active.iter().cloned().collect();
+            st.subs.active = pref.active.clone();
+            st.subs.seen = pref.seen.clone();
+            st.subs.pinned = pref.pinned.clone();
+            st.subs.seeded = true;
+            pref.active
+                .iter()
+                .filter(|w| !before.contains(*w))
+                .cloned()
+                .collect()
+        };
+        self.persist_subs();
+        // A row we now render but never subscribed to would paint an empty
+        // pane, so bring the stream in line with the adopted arrangement.
+        for workspace in newly_active {
+            self.send(&GuiRequest::Subscribe { workspace });
+        }
+        self.need_rebuild.set(true);
     }
 
     /// Context menu "add to active" on a parked row.
@@ -430,6 +490,28 @@ impl App {
                 Err(e) => web_sys::console::error_2(&"renderer init failed".into(), &e),
             }
         }
+    }
+
+    /// Drop the size latch so the next `sync_sizes` re-states our geometry.
+    ///
+    /// PTY dims are last-writer-wins in the engine, and every client only
+    /// sends `Resize` when its *own* measured grid changes. So once another
+    /// client reshapes a pane (the phone attaching at 40 cols), this client
+    /// never mentions its size again and the PTY stays wrong for it until
+    /// the human happens to resize a window.
+    ///
+    /// Re-asserting on activation makes "most recently active client owns the
+    /// dims" fall out of the protocol we already have — and doing it *only*
+    /// on activation is what stops two attached clients from fighting: an
+    /// unfocused client stays quiet instead of reflowing the pane back.
+    fn reassert_grid(&self) {
+        {
+            let mut views = self.views.borrow_mut();
+            for view in views.values_mut() {
+                view.sent_grid = None;
+            }
+        }
+        self.sync_sizes();
     }
 
     /// Size canvases to their tiles; send Resize when the fitting grid changed.
@@ -1220,6 +1302,11 @@ impl App {
                     ConnStatus::Connected => {
                         ch.set_conn_status("live", true);
                         ch.hide_login();
+                        // Drop the chrome borrow before the fs_call: adopting
+                        // rebuilds the sidebar, which borrows chrome again.
+                        drop(chrome);
+                        app_st.load_rail_prefs();
+                        return;
                     }
                     ConnStatus::Disconnected => ch.set_conn_status("reconnecting", false),
                     ConnStatus::AuthFailed => {
@@ -1276,6 +1363,130 @@ fn initial_token() -> Option<String> {
     storage_get("seance_token")
 }
 
+// ── mobile bridge ───────────────────────────────────────────────────────
+// The phone chrome (mic, key pad, swipe) is plain JS in www/index.html,
+// because none of it needs the renderer — but the websocket lives in here,
+// so JS has no way to reach a pane. These three functions are that seam.
+//
+// Deliberately thin: text and keys go through the SAME `key_to_bytes` /
+// `paste_bytes` encoders and the same `pty_input` path a physical keyboard
+// uses, so application-cursor mode and bracketed paste behave identically
+// no matter which surface produced the keystroke. Adding a key later is one
+// arm in `seance_mobile_key` — the encoder already knows every key name
+// `map_key_name` accepts.
+thread_local! {
+    static MOBILE_APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
+}
+
+fn with_mobile_app<T>(f: impl FnOnce(&Rc<App>) -> T) -> Option<T> {
+    MOBILE_APP.with(|m| m.borrow().as_ref().map(f))
+}
+
+/// Type text into the focused pane. `submit` appends a carriage return.
+/// Returns false when nothing is focused, so JS can keep the draft.
+#[wasm_bindgen]
+pub fn seance_mobile_text(text: &str, submit: bool) -> bool {
+    with_mobile_app(|app| {
+        let Some(pane) = app.focused_pane_pub() else {
+            return false;
+        };
+        if !text.is_empty() {
+            app.pty_input(&pane, &input::paste_bytes(text));
+        }
+        if submit {
+            app.pty_input(&pane, b"\r");
+        }
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Send one key to the focused pane, encoded against that pane's current
+/// terminal modes. `key` is either a named key ("ArrowUp", "Escape", "Tab")
+/// or a single character ("c") — with `ctrl` set, core emits the C0 code, so
+/// ctrl+c is a real SIGINT rather than a stray letter.
+#[wasm_bindgen]
+pub fn seance_mobile_key(key: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
+    with_mobile_app(|app| {
+        let Some(pane) = app.focused_pane_pub() else {
+            return false;
+        };
+        let mods = seance_core::input::Modifiers {
+            shift,
+            control: ctrl,
+            alt,
+            platform: false,
+        };
+        let Some(ki) = input::key_input_from_parts(key, mods) else {
+            return false;
+        };
+        let Some(bytes) = seance_core::input::key_to_bytes(&ki, app.modes_for(&pane)) else {
+            return false;
+        };
+        app.pty_input(&pane, &bytes);
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Touch-drag scrollback for `pane`, in CSS pixels of finger travel.
+///
+/// Routed through `scroll_action` with `touch = true`, which is the wheel's
+/// precedence MINUS the alternate-scroll arrow arm: a mouse-reporting app
+/// still gets SGR wheel events, anything else gets daemon scrollback. The
+/// arrow arm is a wheel convention and sending it from a finger drag walked
+/// Claude through prompt history instead of scrolling. Sub-row remainders
+/// accumulate in the shared `wheel_accum`, so a slow drag still moves rather
+/// than rounding to zero.
+#[wasm_bindgen]
+pub fn seance_mobile_scroll(pane: &str, dy_px: f64) -> bool {
+    with_mobile_app(|app| {
+        let st = app.state.borrow();
+        let Some(snap) = st.grids.get(pane).cloned() else {
+            return false;
+        };
+        drop(st);
+        let cell_h = app
+            .views
+            .borrow()
+            .get(pane)
+            .map(|v| v.renderer.cell_size_css().1)
+            .unwrap_or(17.0);
+        let rows = {
+            let mut accum = app.wheel_accum.borrow_mut();
+            let acc = accum.entry(pane.to_string()).or_insert(0.0);
+            // Finger down should reveal earlier output, which is a wheel-up:
+            // negate so the drag carries the content with it.
+            input::wheel_rows(-dy_px, web_sys::WheelEvent::DOM_DELTA_PIXEL, cell_h, acc)
+        };
+        match input::scroll_action(rows, &snap, 0, 0, true) {
+            input::WheelAction::Scroll(r) => {
+                app.send(&GuiRequest::Scroll {
+                    pane: pane.to_string(),
+                    delta: r,
+                });
+                true
+            }
+            input::WheelAction::Bytes(b) => {
+                app.pty_input(pane, &b);
+                true
+            }
+            input::WheelAction::None => false,
+        }
+    })
+    .unwrap_or(false)
+}
+
+/// Swipe target: step to the previous (-1) / next (+1) circle.
+#[wasm_bindgen]
+pub fn seance_mobile_cycle_workspace(delta: i32) -> bool {
+    with_mobile_app(|app| {
+        AppActions(Rc::clone(app)).cycle_workspace(delta);
+        true
+    })
+    .unwrap_or(false)
+}
+
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     std::panic::set_hook(Box::new(|info| {
@@ -1296,6 +1507,7 @@ pub fn start() -> Result<(), JsValue> {
     }
 
     let app = App::new();
+    MOBILE_APP.with(|m| *m.borrow_mut() = Some(Rc::clone(&app)));
     let actions: Rc<dyn Actions> = Rc::new(AppActions(Rc::clone(&app)));
     *app.chrome.borrow_mut() = Some(ui::Chrome::new(actions)?);
 
@@ -1336,6 +1548,38 @@ pub fn start() -> Result<(), JsValue> {
             cb.as_ref().unchecked_ref(),
             &opts,
         )?;
+        cb.forget();
+    }
+
+    // Whoever the human is actually looking at owns the PTY geometry.
+    // Becoming visible (tab switch, unlocking the phone) or regaining window
+    // focus re-states our grid; an unfocused client never does, so the
+    // desktop and the phone hand the pane back and forth instead of
+    // thrashing it between two sizes.
+    {
+        let a = Rc::clone(&app);
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            if document().visibility_state() == web_sys::VisibilityState::Visible {
+                a.reassert_grid();
+            }
+        });
+        doc.add_event_listener_with_callback("visibilitychange", cb.as_ref().unchecked_ref())?;
+        cb.forget();
+    }
+    {
+        let a = Rc::clone(&app);
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| a.reassert_grid());
+        window().add_event_listener_with_callback("focus", cb.as_ref().unchecked_ref())?;
+        cb.forget();
+    }
+    // iOS Safari reflows the viewport after the orientation event, not with
+    // it; the frame loop catches the new size, this just drops the latch so
+    // the daemon hears about it.
+    {
+        let a = Rc::clone(&app);
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| a.reassert_grid());
+        window()
+            .add_event_listener_with_callback("orientationchange", cb.as_ref().unchecked_ref())?;
         cb.forget();
     }
 

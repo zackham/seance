@@ -209,6 +209,7 @@ pub fn run_ctl(args: Vec<String>) -> i32 {
         "read" => parse_read(sub_args),
         "status" => parse_status(sub_args),
         "kill" => parse_kill(sub_args),
+        "select" | "focus" => parse_select(sub_args),
         "scratchpad" | "pad" => parse_scratchpad(sub_args),
         "timeline" | "tl" => parse_timeline(sub_args),
         "status-set" => parse_status_set(sub_args),

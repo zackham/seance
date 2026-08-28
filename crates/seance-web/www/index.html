@@ -7,7 +7,17 @@
     <meta name="theme-color" content="#131111" />
     <title>seance</title>
     <link rel="stylesheet" href="./style.css" />
-    <link rel="icon" href="data:," />
+    <link rel="icon" href="./icon-192.png" />
+
+    <!-- Home-screen install. `black-translucent` puts the web view under the
+         status bar, which is why #topbar carries a safe-area-inset-top pad —
+         without it the circle name sits behind the clock. -->
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./icon-180.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="seance" />
   </head>
   <body>
     <div id="app">
@@ -31,9 +41,815 @@
       <div id="toasts"></div>
     </div>
 
+
     <script type="module">
-      import init from './seance_web.js';
-      init();
+      import init, {
+        seance_mobile_text,
+        seance_mobile_key,
+        seance_mobile_cycle_workspace,
+        seance_mobile_scroll,
+      } from './seance_web.js';
+      await init();
+      // The phone chrome below is plain JS and can't reach the websocket —
+      // the wasm owns it. These are the seam (see lib.rs).
+      window.seanceMobile = {
+        text: seance_mobile_text,
+        key: seance_mobile_key,
+        cycle: seance_mobile_cycle_workspace,
+        scroll: seance_mobile_scroll,
+      };
+      window.dispatchEvent(new Event('seance-ready'));
+    </script>
+
+    <script>
+      // ── phone chrome ───────────────────────────────────────────────────
+      // Drawer, keyboard surface (system keyboard + accessory bar),
+      // voice-to-prompt, swipe-between-circles.
+      //
+      // All of it hangs off <body>: ui.rs calls set_inner_html("") on #topbar
+      // and #sidebar every re-render and would eat anything parented there.
+      // CSS (max-width: 820px) decides what's visible, so on desktop this
+      // whole file is inert.
+      (function () {
+        'use strict';
+
+        var body = document.body;
+        function mk(tag, id, cls, text) {
+          var e = document.createElement(tag);
+          if (id) e.id = id;
+          if (cls) e.className = cls;
+          if (text != null) e.textContent = text;
+          return e;
+        }
+        function mobile() {
+          return window.matchMedia('(max-width: 820px)').matches;
+        }
+        function toast(msg) {
+          var t = document.getElementById('m-toast');
+          if (!t) {
+            t = mk('div', 'm-toast');
+            body.appendChild(t);
+          }
+          t.textContent = msg;
+          t.classList.add('show');
+          clearTimeout(t._h);
+          t._h = setTimeout(function () {
+            t.classList.remove('show');
+          }, 3000);
+        }
+
+        // ── accessory bar layout ──────────────────────────────────────────
+        // Two rows, scrollable, data-driven. Adding a key is one entry:
+        //   {k:'F5'}                     → named key (map_key_name names)
+        //   {k:'c', label:'^C', ctrl:1}  → one-shot combo
+        //   {mod:'ctrl'}                 → sticky modifier
+        // The encoder already understands every name map_key_name accepts, so
+        // nothing below needs a Rust change.
+        var ROW1 = [
+          { mod: 'ctrl', label: 'ctrl' },
+          { mod: 'alt', label: 'alt' },
+          { k: 'Escape', label: 'esc' },
+          { k: 'Tab', label: 'tab' },
+          { k: 'c', ctrl: 1, label: '^C' },
+          { k: 'd', ctrl: 1, label: '^D' },
+          { k: 'r', ctrl: 1, label: '^R' },
+          { k: 'l', ctrl: 1, label: '^L' },
+        ];
+        var ROW2 = [
+          { k: 'ArrowLeft', label: '←' },
+          { k: 'ArrowDown', label: '↓' },
+          { k: 'ArrowUp', label: '↑' },
+          { k: 'ArrowRight', label: '→' },
+          { k: 'Home', label: 'home' },
+          { k: 'End', label: 'end' },
+          { k: 'PageUp', label: 'pgup' },
+          { k: 'PageDown', label: 'pgdn' },
+        ];
+
+        var mods = { ctrl: false, alt: false, shift: false };
+
+        function sendKey(name, extraCtrl, extraAlt) {
+          if (!window.seanceMobile) return false;
+          var ok = window.seanceMobile.key(
+            name,
+            !!(mods.ctrl || extraCtrl),
+            !!(mods.alt || extraAlt),
+            !!mods.shift
+          );
+          if (!ok) toast('no pane focused — tap a terminal first');
+          clearMods();
+          return ok;
+        }
+        function clearMods() {
+          var changed = mods.ctrl || mods.alt || mods.shift;
+          mods.ctrl = mods.alt = mods.shift = false;
+          if (changed) paintMods();
+        }
+        function paintMods() {
+          [].forEach.call(document.querySelectorAll('.m-acc-key[data-mod]'), function (b) {
+            b.classList.toggle('on', !!mods[b.getAttribute('data-mod')]);
+          });
+        }
+
+        // ── button cluster ────────────────────────────────────────────────
+        var bar = mk('div', 'm-bar');
+        var navBtn = mk('button', 'm-nav', 'm-btn', '☰');
+        navBtn.type = 'button';
+        navBtn.setAttribute('aria-label', 'workspaces');
+        var kbBtn = mk('button', 'm-kb-btn', 'm-btn', '⌨');
+        kbBtn.type = 'button';
+        kbBtn.setAttribute('aria-label', 'keyboard');
+        var micBtn = mk('button', 'm-mic', 'm-btn', '●');
+        micBtn.type = 'button';
+        micBtn.setAttribute('aria-label', 'voice prompt');
+        bar.appendChild(navBtn);
+        bar.appendChild(kbBtn);
+        bar.appendChild(micBtn);
+        body.appendChild(bar);
+
+        // ── drawer ────────────────────────────────────────────────────────
+        function setNav(open) {
+          body.classList.toggle('m-nav-open', open);
+          navBtn.textContent = open ? '✕' : '☰';
+          navBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+        navBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          if (kbOpen()) closeKb();
+          setNav(!body.classList.contains('m-nav-open'));
+        });
+        document.getElementById('sidebar').addEventListener('click', function (e) {
+          var t = e.target;
+          if (!t || !t.closest) return;
+          if (t.closest('.ws-banish')) return; // destructive — don't also dismiss
+          if (t.closest('.ws-row')) setNav(false);
+        });
+
+        // ── circle menu ───────────────────────────────────────────────────
+        // The topbar packs title + PR chips + connection + probe into 390px,
+        // and the title lost — "free-premium-rp" wrapped to three lines and
+        // shoved the terminal down. On mobile the title gets the whole bar and
+        // everything else moves in here, reached by tapping the title.
+        //
+        // The chips are wasm-bound buttons (their click opens the PR), so this
+        // MOVES the live #pr-chips node in rather than cloning it — a clone
+        // would look right and do nothing.
+        var menu = mk('div', 'm-menu');
+        menu.hidden = true;
+        var menuTitle = mk('div', 'm-menu-title', null, '');
+        var menuPrsHead = mk('div', null, 'm-menu-sec', 'pull requests');
+        var menuPrs = mk('div', 'm-menu-prs');
+        var menuConnHead = mk('div', null, 'm-menu-sec', 'connection');
+        var menuConn = mk('div', 'm-menu-conn', null, '');
+        var menuClose = mk('button', 'm-menu-close', 'm-sheet-btn', 'close');
+        menuClose.type = 'button';
+        [menuTitle, menuPrsHead, menuPrs, menuConnHead, menuConn, menuClose].forEach(function (el) {
+          menu.appendChild(el);
+        });
+        body.appendChild(menu);
+
+        function chipsNode() {
+          return document.getElementById('pr-chips');
+        }
+        function openMenu() {
+          var t = document.querySelector('.tb-title');
+          menuTitle.textContent = t ? t.textContent : '';
+          var chips = chipsNode();
+          menuPrs.textContent = '';
+          if (chips && chips.children.length) {
+            menuPrs.appendChild(chips); // live move, handlers intact
+          } else {
+            menuPrs.appendChild(mk('div', null, 'm-menu-empty', 'no open PRs'));
+          }
+          var lbl = document.getElementById('conn-label');
+          var dot = document.getElementById('conn-dot');
+          menuConn.textContent = (lbl && lbl.textContent) || 'unknown';
+          menuConn.className = dot && dot.classList.contains('bad') ? 'bad' : '';
+          menu.hidden = false;
+          body.classList.add('m-menu-open');
+        }
+        function closeMenu() {
+          var chips = menuPrs.querySelector('.pr-chips');
+          if (chips) {
+            // A re-render while we were open will have built a fresh row in
+            // the topbar; putting ours back would duplicate the id.
+            var tb = document.getElementById('topbar');
+            if (tb && !tb.querySelector('.pr-chips')) tb.appendChild(chips);
+            else chips.remove();
+          }
+          menu.hidden = true;
+          body.classList.remove('m-menu-open');
+        }
+        menuClose.addEventListener('click', function (e) {
+          e.preventDefault();
+          closeMenu();
+        });
+        // Delegated: #topbar survives re-renders, its children do not.
+        document.getElementById('topbar').addEventListener('click', function (e) {
+          if (!mobile()) return;
+          var t = e.target;
+          if (!t || !t.closest) return;
+          if (!t.closest('.tb-title')) return;
+          e.preventDefault();
+          if (menu.hidden) openMenu();
+          else closeMenu();
+        });
+
+        // ── keyboard surface ──────────────────────────────────────────────
+        // iOS only raises the system keyboard for a focused, VISIBLE, editable
+        // element — display:none or visibility:hidden won't do it. So the
+        // catcher is a real 1px input parked behind the accessory bar.
+        //
+        // ui.rs's on_keydown bails when the active element is an INPUT or
+        // TEXTAREA, so while this is focused the wasm ignores the keyboard
+        // entirely and every keystroke arrives here exactly once.
+        var acc = mk('div', 'm-acc');
+        acc.hidden = true;
+        var accRows = mk('div', null, 'm-acc-rows');
+        var catcher = document.createElement('input');
+        catcher.id = 'm-catch';
+        catcher.type = 'text';
+        catcher.setAttribute('autocomplete', 'off');
+        catcher.setAttribute('autocorrect', 'off');
+        catcher.setAttribute('autocapitalize', 'none');
+        catcher.setAttribute('spellcheck', 'false');
+        catcher.setAttribute('enterkeyhint', 'send');
+        catcher.setAttribute('aria-label', 'terminal input');
+
+        function accKey(spec) {
+          var b = mk('button', null, 'm-acc-key', spec.label || spec.k);
+          b.type = 'button';
+          if (spec.mod) b.setAttribute('data-mod', spec.mod);
+          // pointerdown, not click: the catcher must never lose focus, or iOS
+          // dismisses the keyboard and the bar drops with it.
+          b.addEventListener('pointerdown', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (spec.mod) {
+              mods[spec.mod] = !mods[spec.mod];
+              paintMods();
+              return;
+            }
+            sendKey(spec.k, spec.ctrl, spec.alt);
+          });
+          return b;
+        }
+        [ROW1, ROW2].forEach(function (row) {
+          var r = mk('div', null, 'm-acc-row');
+          row.forEach(function (spec) {
+            r.appendChild(accKey(spec));
+          });
+          accRows.appendChild(r);
+        });
+        var accDone = mk('button', 'm-acc-done', 'm-acc-key wide', 'done');
+        accDone.type = 'button';
+        accDone.addEventListener('pointerdown', function (e) {
+          e.preventDefault();
+          closeKb();
+        });
+        var accRight = mk('div', null, 'm-acc-right');
+        accRight.appendChild(accDone);
+        acc.appendChild(accRows);
+        acc.appendChild(accRight);
+        acc.appendChild(catcher);
+        body.appendChild(acc);
+
+        function kbOpen() {
+          return body.classList.contains('m-kb-open');
+        }
+        function openKb() {
+          setNav(false);
+          acc.hidden = false;
+          body.classList.add('m-kb-open');
+          kbBtn.classList.add('on');
+          catcher.value = '';
+          catcher.focus();
+        }
+        function closeKb() {
+          catcher.blur();
+          acc.hidden = true;
+          body.classList.remove('m-kb-open');
+          kbBtn.classList.remove('on');
+          clearMods();
+          applyInsets();
+        }
+        kbBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          if (kbOpen()) closeKb();
+          else openKb();
+        });
+
+        // Typed characters. iOS software keyboards don't produce reliable
+        // keydown (keyCode 229 / key "Unidentified"), so the character stream
+        // is read off `input` and the catcher is drained after each one.
+        // Backspace and Enter arrive as inputTypes, not keys.
+        catcher.addEventListener('beforeinput', function (e) {
+          if (e.inputType === 'deleteContentBackward') {
+            e.preventDefault();
+            sendKey('Backspace');
+          } else if (e.inputType === 'insertLineBreak') {
+            e.preventDefault();
+            sendKey('Enter');
+          }
+        });
+        catcher.addEventListener('input', function () {
+          var v = catcher.value;
+          if (!v) return;
+          catcher.value = '';
+          if (!window.seanceMobile) return;
+          // A modifier is armed → treat the next character as a combo.
+          if (mods.ctrl || mods.alt) {
+            sendKey(v.slice(-1));
+            return;
+          }
+          if (!window.seanceMobile.text(v, false)) {
+            toast('no pane focused — tap a terminal first');
+          }
+        });
+        // Hardware keyboards (and the ⏎ on the software one) do fire keydown.
+        catcher.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            sendKey('Enter');
+          } else if (e.key === 'Backspace' && !catcher.value) {
+            e.preventDefault();
+            sendKey('Backspace');
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            sendKey('Escape');
+          }
+        });
+        // iOS can dismiss the keyboard without telling us (swipe-down, form
+        // bar "Done"); the blur is the only signal, so mirror our state to it.
+        catcher.addEventListener('blur', function () {
+          if (kbOpen()) setTimeout(function () {
+            if (document.activeElement !== catcher && kbOpen()) closeKb();
+          }, 60);
+        });
+
+        // ── viewport insets ───────────────────────────────────────────────
+        // THIS is what makes the pane resize instead of hiding behind the
+        // keyboard. visualViewport shrinks by exactly the keyboard height, so
+        // #app gets that height minus the accessory bar and the existing
+        // sync_sizes() → Resize path reflows the PTY for free.
+        var vv = window.visualViewport;
+        function applyInsets() {
+          var h = vv ? vv.height : window.innerHeight;
+          var accH = kbOpen() && !acc.hidden ? acc.getBoundingClientRect().height : 0;
+          var avail = Math.max(120, Math.round(h - accH));
+          document.documentElement.style.setProperty('--m-vh', avail + 'px');
+          if (kbOpen()) {
+            // Keyboard height, measured — not guessed at from a device table.
+            var kb = Math.max(0, Math.round(window.innerHeight - h - (vv ? vv.offsetTop : 0)));
+            acc.style.bottom = kb + 'px';
+          } else {
+            acc.style.bottom = '';
+          }
+        }
+        if (vv) {
+          vv.addEventListener('resize', applyInsets);
+          vv.addEventListener('scroll', applyInsets);
+        }
+        window.addEventListener('resize', applyInsets);
+        window.addEventListener('orientationchange', function () {
+          setTimeout(applyInsets, 250);
+        });
+        applyInsets();
+
+        // ── voice → prompt ────────────────────────────────────────────────
+        // The recording is the expensive thing here: you spoke it once, on a
+        // phone, possibly with no reception. So the blob is held in memory and
+        // NOTHING auto-discards it — every failure path lands on a sheet that
+        // still owns the audio and offers retry. Upload uses XHR rather than
+        // fetch purely for upload.onprogress; fetch cannot report bytes sent.
+        var voice = {
+          blob: null,
+          ext: 'webm',
+          durMs: 0,
+          xhr: null,
+          state: 'idle', // idle | uploading | transcribing | error | ready
+          error: '',
+          sent: 0,
+          total: 0,
+          startedAt: 0,
+          tick: null,
+        };
+
+        function fmtBytes(n) {
+          if (!n && n !== 0) return '—';
+          if (n < 1024) return n + ' B';
+          if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+          return (n / 1024 / 1024).toFixed(1) + ' MB';
+        }
+        function fmtClock(ms) {
+          var s = Math.max(0, Math.round(ms / 1000));
+          return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+        }
+
+        var sheet = mk('div', 'm-sheet');
+        sheet.hidden = true;
+        var sheetHead = mk('div', 'm-sheet-head', null, 'voice prompt');
+        var fileRow = mk('div', 'm-file');
+        var fileName = mk('span', null, 'm-file-name', 'voice');
+        var fileMeta = mk('span', null, 'm-file-meta', '');
+        fileRow.appendChild(fileName);
+        fileRow.appendChild(fileMeta);
+        var barWrap = mk('div', 'm-prog');
+        var barFill = mk('div', 'm-prog-fill');
+        barWrap.appendChild(barFill);
+        var statusRow = mk('div', 'm-status', null, '');
+        var errBox = mk('div', 'm-err');
+        errBox.hidden = true;
+        var ta = mk('textarea', 'm-text');
+        ta.setAttribute('rows', '8');
+        var sheetBar = mk('div', 'm-sheet-bar');
+        var discard = mk('button', 'm-discard', 'm-sheet-btn', 'discard');
+        discard.type = 'button';
+        var primary = mk('button', 'm-send', 'm-sheet-btn primary', 'send');
+        primary.type = 'button';
+        sheetBar.appendChild(discard);
+        sheetBar.appendChild(primary);
+        [sheetHead, fileRow, barWrap, statusRow, errBox, ta, sheetBar].forEach(function (el) {
+          sheet.appendChild(el);
+        });
+        body.appendChild(sheet);
+
+        function renderSheet() {
+          var v = voice;
+          var busy = v.state === 'uploading' || v.state === 'transcribing';
+          sheet.hidden = false;
+          body.classList.add('m-sheet-open');
+
+          fileName.textContent = 'voice.' + v.ext;
+          fileMeta.textContent =
+            fmtBytes(v.blob ? v.blob.size : 0) + ' · ' + fmtClock(v.durMs) + ' recorded';
+
+          var elapsed = v.startedAt ? Date.now() - v.startedAt : 0;
+          if (v.state === 'uploading') {
+            var pct = v.total ? Math.min(100, Math.round((v.sent / v.total) * 100)) : 0;
+            barWrap.hidden = false;
+            barWrap.classList.remove('indet');
+            barFill.style.width = pct + '%';
+            sheetHead.textContent = 'uploading';
+            statusRow.textContent =
+              fmtBytes(v.sent) + ' / ' + fmtBytes(v.total) + ' · ' + pct + '% · ' + fmtClock(elapsed);
+          } else if (v.state === 'transcribing') {
+            barWrap.hidden = false;
+            barWrap.classList.add('indet');
+            barFill.style.width = '100%';
+            sheetHead.textContent = 'transcribing';
+            statusRow.textContent = 'uploaded ' + fmtBytes(v.total) + ' · waiting on groq · ' + fmtClock(elapsed);
+          } else {
+            barWrap.hidden = true;
+            barWrap.classList.remove('indet');
+            statusRow.textContent = v.state === 'ready' ? 'transcribed — edit and send' : '';
+            sheetHead.textContent = v.state === 'error' ? 'transcription failed' : 'voice prompt';
+          }
+
+          errBox.hidden = v.state !== 'error';
+          errBox.textContent = v.error || '';
+
+          ta.hidden = v.state !== 'ready';
+          ta.disabled = v.state !== 'ready';
+
+          // Left is always discard. Right is send when there's text to send,
+          // retry otherwise — including mid-upload, where retry means "cancel
+          // this attempt and start it again".
+          if (v.state === 'ready') {
+            primary.textContent = 'send';
+            primary.classList.add('primary');
+            primary.disabled = false;
+          } else {
+            primary.textContent = 'retry';
+            primary.classList.remove('primary');
+            primary.disabled = !v.blob;
+          }
+        }
+
+        function startTick() {
+          stopTick();
+          voice.tick = setInterval(function () {
+            if (voice.state === 'uploading' || voice.state === 'transcribing') renderSheet();
+            else stopTick();
+          }, 250);
+        }
+        function stopTick() {
+          if (voice.tick) {
+            clearInterval(voice.tick);
+            voice.tick = null;
+          }
+        }
+
+        function closeSheet() {
+          abortUpload();
+          stopTick();
+          voice.blob = null;
+          voice.state = 'idle';
+          voice.error = '';
+          sheet.hidden = true;
+          body.classList.remove('m-sheet-open');
+          ta.value = '';
+        }
+        function abortUpload() {
+          if (voice.xhr) {
+            var x = voice.xhr;
+            voice.xhr = null;
+            try {
+              x.abort();
+            } catch (e) {}
+          }
+        }
+
+        function failVoice(msg) {
+          voice.state = 'error';
+          voice.error = msg;
+          stopTick();
+          renderSheet();
+        }
+
+        function uploadVoice() {
+          if (!voice.blob) return;
+          abortUpload();
+          var tok = '';
+          try {
+            tok = localStorage.getItem('seance_token') || '';
+          } catch (e) {}
+          voice.state = 'uploading';
+          voice.error = '';
+          voice.sent = 0;
+          voice.total = voice.blob.size;
+          voice.startedAt = Date.now();
+          renderSheet();
+          startTick();
+
+          var xhr = new XMLHttpRequest();
+          voice.xhr = xhr;
+          xhr.open('POST', '/transcribe?token=' + encodeURIComponent(tok) + '&ext=' + voice.ext);
+          xhr.timeout = 180000;
+          xhr.upload.onprogress = function (e) {
+            if (!e.lengthComputable) return;
+            voice.sent = e.loaded;
+            voice.total = e.total;
+            renderSheet();
+          };
+          // Body fully sent — from here we're waiting on groq, not the network.
+          xhr.upload.onload = function () {
+            voice.sent = voice.total;
+            voice.state = 'transcribing';
+            voice.startedAt = Date.now();
+            renderSheet();
+          };
+          xhr.onload = function () {
+            voice.xhr = null;
+            stopTick();
+            var body = null;
+            try {
+              body = JSON.parse(xhr.responseText || '{}');
+            } catch (e) {}
+            if (xhr.status === 200 && body && typeof body.text === 'string') {
+              voice.state = 'ready';
+              renderSheet();
+              ta.value = body.text;
+              ta.focus();
+              try {
+                ta.setSelectionRange(ta.value.length, ta.value.length);
+              } catch (e) {}
+              return;
+            }
+            failVoice(
+              (body && body.error ? body.error : 'server returned ' + xhr.status) +
+                ' — the recording is still here, hit retry'
+            );
+          };
+          xhr.onerror = function () {
+            voice.xhr = null;
+            failVoice(
+              navigator.onLine === false
+                ? 'no connection — wait for reception, then retry'
+                : 'network error reaching the bridge — hit retry'
+            );
+          };
+          xhr.ontimeout = function () {
+            voice.xhr = null;
+            failVoice('timed out after 3 minutes — hit retry');
+          };
+          xhr.onabort = function () {
+            // Only ever from retry/discard, which set their own state.
+          };
+          xhr.send(voice.blob);
+        }
+
+        discard.addEventListener('click', function (e) {
+          e.preventDefault();
+          closeSheet();
+        });
+        primary.addEventListener('click', function (e) {
+          e.preventDefault();
+          if (voice.state === 'ready') {
+            if (!window.seanceMobile) return;
+            if (!window.seanceMobile.text(ta.value, true)) {
+              toast('no pane focused — tap a terminal first');
+              return;
+            }
+            closeSheet();
+            return;
+          }
+          uploadVoice(); // cancels any in-flight attempt and starts over
+        });
+
+        function pickMime() {
+          if (typeof MediaRecorder === 'undefined') return null;
+          var c = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+          for (var i = 0; i < c.length; i++) {
+            try {
+              if (MediaRecorder.isTypeSupported(c[i])) return c[i];
+            } catch (e) {}
+          }
+          return '';
+        }
+        function extFor(m) {
+          if (!m) return 'webm';
+          if (m.indexOf('mp4') >= 0) return 'mp4';
+          if (m.indexOf('ogg') >= 0) return 'ogg';
+          return 'webm';
+        }
+
+        var rec = null,
+          chunks = [],
+          stream = null,
+          recStart = 0,
+          recTick = null;
+        var recTimer = mk('div', 'm-rec-timer', null, '0:00');
+        recTimer.hidden = true;
+        bar.appendChild(recTimer);
+
+        function stopTracks() {
+          if (stream) {
+            stream.getTracks().forEach(function (t) {
+              t.stop();
+            });
+            stream = null;
+          }
+        }
+        function paintRec(on) {
+          micBtn.classList.toggle('rec', on);
+          micBtn.textContent = on ? '■' : '●';
+          recTimer.hidden = !on;
+          body.classList.toggle('m-rec', on);
+        }
+        function startRec() {
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            toast(
+              window.isSecureContext
+                ? 'no microphone api in this browser'
+                : 'mic needs https — use the seance.ham.xyz url'
+            );
+            return;
+          }
+          var mime = pickMime();
+          if (mime === null) {
+            toast('MediaRecorder unsupported');
+            return;
+          }
+          navigator.mediaDevices
+            .getUserMedia({ audio: true })
+            .then(function (s) {
+              stream = s;
+              chunks = [];
+              rec = mime ? new MediaRecorder(s, { mimeType: mime }) : new MediaRecorder(s);
+              rec.ondataavailable = function (e) {
+                if (e.data && e.data.size) chunks.push(e.data);
+              };
+              rec.onstop = function () {
+                stopTracks();
+                clearInterval(recTick);
+                recTick = null;
+                var type = (rec && rec.mimeType) || mime || 'audio/webm';
+                var blob = new Blob(chunks, { type: type });
+                chunks = [];
+                rec = null;
+                paintRec(false);
+                if (blob.size < 800) {
+                  toast('recording too short');
+                  return;
+                }
+                voice.blob = blob;
+                voice.ext = extFor(type);
+                voice.durMs = Date.now() - recStart;
+                uploadVoice();
+              };
+              rec.start();
+              recStart = Date.now();
+              recTimer.textContent = '0:00';
+              paintRec(true);
+              recTick = setInterval(function () {
+                recTimer.textContent = fmtClock(Date.now() - recStart);
+              }, 250);
+            })
+            .catch(function (err) {
+              stopTracks();
+              paintRec(false);
+              toast('mic denied: ' + (err && err.name ? err.name : err));
+            });
+        }
+        micBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          if (rec && rec.state === 'recording') rec.stop();
+          else startRec();
+        });
+
+        // ── touch gestures on the panes ───────────────────────────────────
+        // Axis is locked once, on the first ~10px of travel, and never
+        // revisited for that gesture — otherwise a drifting vertical drag
+        // starts flipping circles halfway through a scroll.
+        //   vertical   → scrollback for the pane under the finger
+        //   horizontal → previous / next circle
+        var tiles = document.getElementById('tiles');
+        var g = null;
+
+        function slugAt(target) {
+          if (!target || !target.closest) return null;
+          var hit = target.closest('[data-slug]');
+          return hit ? hit.getAttribute('data-slug') : null;
+        }
+
+        tiles.addEventListener(
+          'touchstart',
+          function (e) {
+            if (e.touches.length !== 1) {
+              g = null;
+              return;
+            }
+            var t = e.touches[0];
+            g = {
+              x0: t.clientX,
+              y0: t.clientY,
+              lastY: t.clientY,
+              t0: Date.now(),
+              axis: null,
+              slug: slugAt(e.target),
+            };
+          },
+          { passive: true }
+        );
+
+        tiles.addEventListener(
+          'touchmove',
+          function (e) {
+            if (!g || e.touches.length !== 1) return;
+            var t = e.touches[0];
+            var dx = t.clientX - g.x0;
+            var dy = t.clientY - g.y0;
+            if (!g.axis) {
+              if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+              g.axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+            }
+            if (g.axis !== 'y') {
+              // Horizontal: swallow it so the page doesn't rubber-band while
+              // the circle change waits for touchend.
+              if (e.cancelable) e.preventDefault();
+              return;
+            }
+            var step = t.clientY - g.lastY;
+            g.lastY = t.clientY;
+            if (!g.slug || !window.seanceMobile || !window.seanceMobile.scroll) return;
+            // preventDefault BEFORE the call: #tiles scrolls natively when
+            // panes are stacked, and letting both happen drags the layout and
+            // the scrollback at once.
+            if (e.cancelable) e.preventDefault();
+            window.seanceMobile.scroll(g.slug, step);
+          },
+          { passive: false }
+        );
+
+        tiles.addEventListener(
+          'touchend',
+          function (e) {
+            if (!g) return;
+            var gesture = g;
+            g = null;
+            if (gesture.axis !== 'x') return;
+            if (!mobile() || !window.seanceMobile) return;
+            var t = e.changedTouches && e.changedTouches[0];
+            if (!t) return;
+            var dx = t.clientX - gesture.x0;
+            if (Date.now() - gesture.t0 > 800) return;
+            if (Math.abs(dx) < 60) return;
+            window.seanceMobile.cycle(dx < 0 ? 1 : -1); // left = forward
+          },
+          { passive: true }
+        );
+        tiles.addEventListener('touchcancel', function () {
+          g = null;
+        }, { passive: true });
+
+        document.addEventListener('keydown', function (e) {
+          if (e.key !== 'Escape') return;
+          if (document.activeElement === catcher) return;
+          if (!sheet.hidden) closeSheet();
+          setNav(false);
+        });
+      })();
     </script>
   </body>
 </html>

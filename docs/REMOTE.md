@@ -49,6 +49,26 @@ of corrupting the protocol. Upgrade the older side (`cargo build --release &&
 seance upgrade` on the daemon host; redeploy the client binary elsewhere).
 `handoff`/`upgrade` roles are exempt (upgrades cross versions by design).
 
+**Where the refusal shows up.** The GUI asks before it opens a window
+(`gui_client::preflight`, a `ctl` hello + one `whoami`): a refusal goes to the
+launch picker with the daemon's own text. If the daemon is upgraded under a
+*live* thin client, the refusal arrives mid-session instead and the window
+carries a sticky ⚠ bar until it reattaches. Both say the same thing the daemon
+said, which names the fix. (Before 0.25.5 neither did — the client read the
+refusal into `gui.stderr.log` and reconnected forever behind an empty rail.
+A mac stuck on 0.24.0 that way looked exactly like a daemon with no circles.)
+
+**Redeploying the client.** The client is built on the client machine, so
+"upgrade the mac" is a pull and a bundle:
+
+```bash
+ssh <mac> 'cd ~/work/seance && git pull --ff-only && ./scripts/bundle-macos.sh'
+```
+
+Then quit and relaunch the app — an already-running GUI keeps the binary it
+started with. Deploy the client *after* the daemon host, never before: a client
+ahead of its daemon is the same refusal in the other direction.
+
 ## Everything comes from the daemon
 
 The fs bridge (`GuiRequest::Fs` / `daemon::fsbridge`) serves the GUI:

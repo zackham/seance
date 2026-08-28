@@ -15,6 +15,55 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [Unreleased]
+
+### Fixed
+
+- **A woken circle paints again.** Awakening a slept circle brought back the
+  frozen pre-sleep screen and then stopped there: typing put a character or two
+  on the glass and nothing more, until you left the circle and came back. The
+  frames were arriving the whole time — the client was throwing every one of
+  them away. `rev` is how a client tells a frame it hasn't painted from one it
+  has, and it drops anything not *greater* than the last rev it applied. A woken
+  pane is a new `PtySession`, and a new session starts counting at 1, thousands
+  of revs below where the old one died, so the frozen frame outranked every live
+  frame behind it. (The character or two was local echo, which deliberately
+  leaves `rev` alone. Switching circles fixed it because that path already zeroes
+  the rev gate.) A replacement session now resumes the count above the frame the
+  pane went to sleep on (`PtySession::seed_rev`), and waking also drops the
+  daemon's damage base and every window's claim to one — so the first frame back
+  is a whole grid for every window watching the circle, not just the one that
+  clicked awaken.
+
+- **A daemon that refuses the client now says so on screen.** The version gate
+  has always answered a stale client with a sentence naming the fix — but the
+  GUI never read it. A mac thin client left on 0.24.0 against a 0.25.4 daemon
+  opened its window, hello'd, got refused, and reconnected every 400ms forever:
+  empty rail, no circles, no error, nothing in the UI to distinguish "the
+  daemon turned me away" from "there is nothing here yet". Three changes, all
+  aimed at that silence:
+
+  - **Boot asks first.** `gui_client::preflight` hellos as `ctl` and reads the
+    answer before a window opens; a refusal routes to the launch picker, which
+    already renders errors. Applies to the local daemon too, not just the ssh
+    tunnel — a socket that accepts a connection is not yet a daemon that will
+    talk to *this build*.
+  - **Mid-session refusals reach the app.** The reader thread forwards the
+    daemon's text as `GuiEvent::Error` instead of only `eprintln!`-ing it into
+    `gui.stderr.log`, and the window carries a sticky ⚠ bar until a successful
+    attach clears it. This is the path a live thin client takes when the daemon
+    it's attached to gets upgraded underneath it.
+  - **Backoff.** A refusal is a standing condition, not a blip — retry every 5s
+    instead of every 400ms, and stop repeating the disconnect line.
+
+- **A remotely-spawned daemon keeps a log.** `ensure_daemon` sent the daemon's
+  stdout/stderr to `/dev/null`, which is exactly the daemon nobody can see: the
+  one a thin client starts over ssh with no terminal on either end. It now
+  appends to `<state-dir>/daemon.log` (rotating to `.1` past 5 MiB, falling back
+  to null if the file won't open), stamped with the requesting pid and build.
+  The first run of it caught a bind failure that "daemon did not become ready"
+  had been hiding.
+
 ## [0.25.4] — 2026-08-18
 
 ### Added

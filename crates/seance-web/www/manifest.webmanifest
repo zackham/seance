@@ -1,0 +1,15 @@
+{
+  "name": "seance",
+  "short_name": "seance",
+  "description": "a circle of agents, one shared room",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#131111",
+  "theme_color": "#131111",
+  "icons": [
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

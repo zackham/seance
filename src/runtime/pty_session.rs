@@ -537,6 +537,22 @@ impl PtySession {
         self.rev.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Resume the frame count above `floor` instead of starting over.
+    ///
+    /// `rev` is how a client tells a frame it hasn't painted from one it has:
+    /// anything not *greater* than the last rev it applied is dropped. Every
+    /// session starts counting at 1, which is right for a pane the clients have
+    /// never seen — and wrong for one they have, when the session behind it is
+    /// replaced (waking a slept pane). There the count has to carry on from
+    /// where the old session left off, or every frame the new one produces
+    /// reads as stale.
+    ///
+    /// Never lowers the counter — seeding is a floor, not an assignment.
+    pub fn seed_rev(&self, floor: u64) {
+        self.rev
+            .fetch_max(floor.saturating_add(1), Ordering::SeqCst);
+    }
+
     pub fn rev(&self) -> u64 {
         self.rev.load(Ordering::SeqCst)
     }
@@ -1228,5 +1244,55 @@ fn indexed_fallback(idx: usize, dim: bool) -> u32 {
         dim_u32(packed)
     } else {
         packed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A live session on a command that just sits there. Spawns a real PTY —
+    /// cheap on Linux, and the rev counter is only meaningful on a real one.
+    fn idle_session(slug: &str) -> (PtySession, Receiver<SessionEvent>) {
+        let (tx, rx) = mpsc::channel();
+        let s = PtySession::spawn(
+            slug.to_string(),
+            SpawnConfig {
+                command: "sleep 30".into(),
+                cwd: std::env::temp_dir(),
+                env: HashMap::new(),
+                cols: 40,
+                rows: 10,
+            },
+            tx,
+        )
+        .expect("spawn pty");
+        (s, rx)
+    }
+
+    /// The invariant waking a slept pane rests on: a replacement session must
+    /// carry the frame count forward, because clients drop every frame that
+    /// isn't newer than the last one they painted. A pane that slept at rev
+    /// 5000 and woke at rev 1 stayed frozen on its pre-sleep screen.
+    #[test]
+    fn a_seeded_session_counts_on_from_the_frame_it_replaced() {
+        let (s, _rx) = idle_session("seed");
+        assert_eq!(s.rev(), 1, "a fresh session starts the count");
+
+        s.seed_rev(5000);
+        assert_eq!(s.rev(), 5001, "the next frame must beat the frozen one");
+
+        s.bump_rev();
+        assert_eq!(s.rev(), 5002);
+    }
+
+    /// Seeding is a floor, never an assignment — a stale floor arriving after
+    /// the session has already drawn must not rewind it under a client.
+    #[test]
+    fn seeding_below_the_current_count_leaves_it_alone() {
+        let (s, _rx) = idle_session("floor");
+        s.seed_rev(100);
+        s.seed_rev(7);
+        assert_eq!(s.rev(), 101);
     }
 }

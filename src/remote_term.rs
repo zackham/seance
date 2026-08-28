@@ -215,6 +215,24 @@ impl RemoteTerminal {
     ///   seconds when nothing else was painting (idle shells after a kill).
     /// - **±1 cell jitter**: still needs 2 consecutive matching frames so
     ///   float cell-width noise can't thrash 120↔121 forever.
+    /// Forget the size we last told the daemon, so the next layout pass
+    /// re-states it even though our own geometry never changed.
+    ///
+    /// PTY dims are last-writer-wins in the engine and every client only
+    /// speaks up when its *own* measured grid moves. So once the web client
+    /// reshapes a pane to fit a phone, this window would never mention its
+    /// geometry again — the pane stays phone-sized inside a desktop window
+    /// until something happens to jog a resize. Called on window activation:
+    /// the client the human just switched to re-takes the dims, and an
+    /// inactive one stays quiet instead of fighting over them.
+    pub fn forget_sent_size(&self) {
+        if let Ok(mut g) = self.resize.lock() {
+            g.sent = (0, 0);
+            g.seen = (0, 0);
+            g.stable = 0;
+        }
+    }
+
     pub fn resize_cells(&self, cols: u16, rows: u16) {
         let cols = cols.max(2);
         let rows = rows.max(2);

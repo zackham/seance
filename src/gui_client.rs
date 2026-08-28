@@ -7,19 +7,27 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{anyhow, Context as _, Result};
 use base64::Engine as _;
 
-use crate::control::socket_path;
+use crate::control::{socket_path, ControlRequest, ControlResponse};
 use crate::runtime::protocol::{GuiEvent, GuiRequest};
 
 /// How long to wait between reconnect attempts after a disconnect.
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(400);
+/// Backoff after the daemon *refuses* us (version gate). A refusal stands
+/// until a human upgrades one side, so hammering the socket every 400ms just
+/// fills the log with the same sentence a hundred times a minute.
+const REFUSED_BACKOFF: Duration = Duration::from_secs(5);
+/// Preflight is a boot-blocking question — bounded so an unresponsive daemon
+/// delays launch rather than hanging it.
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Poll interval while connected so we notice a dead reader promptly.
 const WRITE_POLL: Duration = Duration::from_millis(200);
 
@@ -618,6 +626,11 @@ fn connection_supervisor(
         let (death_tx, death_rx) = mpsc::channel::<()>();
         let ev_tx_reader = ev_tx.clone();
         let fs_pending_reader = Arc::clone(&fs_pending);
+        // Set by the reader when the daemon refuses this connection, read by
+        // the loop below to pick a backoff — a refusal is a standing condition,
+        // not a blip.
+        let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refused_reader = Arc::clone(&refused);
         thread::Builder::new()
             .name("seance-gui-read".into())
             .spawn(move || {
@@ -655,6 +668,15 @@ fn connection_supervisor(
                             {
                                 if let Some(err) = resp.error {
                                     eprintln!("[seance gui] daemon refused connection: {err}");
+                                    // Push it at the app too. A refusal means
+                                    // no State and no grids will ever arrive
+                                    // on this connection, so the window it
+                                    // leaves behind is empty — and an empty
+                                    // window that doesn't say why reads as
+                                    // "seance is broken" instead of "these two
+                                    // builds disagree".
+                                    let _ = ev_tx_reader.send(GuiEvent::Error { message: err });
+                                    refused_reader.store(true, Ordering::SeqCst);
                                     continue;
                                 }
                             }
@@ -732,10 +754,63 @@ fn connection_supervisor(
         if intentional || stop.load(Ordering::SeqCst) {
             return;
         }
-        eprintln!("[seance gui] disconnected from daemon; reconnecting…");
+        if !refused.load(Ordering::SeqCst) {
+            eprintln!("[seance gui] disconnected from daemon; reconnecting…");
+        }
         // Give the old reader a moment to exit before we open a new socket.
         let _ = death_rx.recv_timeout(Duration::from_millis(50));
-        thread::sleep(RECONNECT_BACKOFF);
+        thread::sleep(if refused.load(Ordering::SeqCst) {
+            REFUSED_BACKOFF
+        } else {
+            RECONNECT_BACKOFF
+        });
+    }
+}
+
+/// Ask the daemon whether it will have us, before the GUI commits to a window.
+///
+/// The daemon's version gate refuses a `ctl`/`gui` hello with a
+/// [`ControlResponse`] error and hangs up. From inside the app that refusal
+/// looked like *nothing*: the supervisor reconnected forever and the window sat
+/// there with an empty rail, no error, no workspaces (2026-08-20 — a mac thin
+/// client left on 0.24.0 against a 0.25.4 daemon). The daemon was shouting; the
+/// GUI had no ears. Ask here, at boot, where the answer still reaches a human —
+/// a refusal routes to the launch picker, which renders it.
+///
+/// Probes as `ctl`, not `gui`: same version gate either way, but a ctl
+/// connection that asks one question and leaves is routine, where a `gui` hello
+/// registers a window for broadcasts we'd immediately abandon.
+pub fn preflight(path: &Path) -> Result<()> {
+    let stream = UnixStream::connect(path)
+        .with_context(|| format!("connect to daemon at {}", path.display()))?;
+    let _ = stream.set_read_timeout(Some(PREFLIGHT_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PREFLIGHT_TIMEOUT));
+    let mut writer = stream.try_clone().context("clone preflight stream")?;
+    writer.write_all(crate::runtime::protocol::hello_line("ctl").as_bytes())?;
+    // Cheapest request that always answers. We don't care what it says when
+    // it works — only that something comes back, and what it says when it
+    // doesn't.
+    let mut req = serde_json::to_string(&ControlRequest::Whoami {
+        scope: None,
+        from: None,
+    })?;
+    req.push('\n');
+    writer.write_all(req.as_bytes())?;
+    writer.flush()?;
+
+    let mut line = String::new();
+    match BufReader::new(stream).read_line(&mut line) {
+        // Closed without a word. Not the version gate — that answers first —
+        // so don't invent a diagnosis for it; let the GUI try.
+        Ok(0) => Ok(()),
+        Ok(_) => match serde_json::from_str::<ControlResponse>(line.trim()) {
+            Ok(resp) if !resp.ok => Err(anyhow!(resp
+                .error
+                .unwrap_or_else(|| "daemon refused the connection".into()))),
+            _ => Ok(()),
+        },
+        // A slow daemon is not a broken one. Only a refusal is a refusal.
+        Err(_) => Ok(()),
     }
 }
 
@@ -758,4 +833,79 @@ fn write_request(writer: &mut UnixStream, req: &GuiRequest) -> std::io::Result<(
     writer.write_all(line.as_bytes())?;
     writer.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    /// A daemon stand-in: reads the hello + one request, answers with `reply`,
+    /// hangs up. Mirrors what `daemon::handle_connection` does on the version
+    /// gate (answer, then close).
+    fn fake_daemon(reply: &'static str) -> (std::path::PathBuf, thread::JoinHandle<()>) {
+        let path = std::env::temp_dir().join(format!(
+            "seance-preflight-test-{}-{:?}.sock",
+            std::process::id(),
+            thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind fake daemon");
+        let handle = thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut hello = String::new();
+                let _ = reader.read_line(&mut hello);
+                // The version gate answers on the hello alone; a healthy
+                // daemon waits for the request first. Reading one line either
+                // way keeps the stand-in honest about both.
+                let mut req = String::new();
+                let _ = reader.read_line(&mut req);
+                let mut w = stream;
+                let _ = w.write_all(reply.as_bytes());
+                let _ = w.flush();
+            }
+        });
+        (path, handle)
+    }
+
+    #[test]
+    fn preflight_surfaces_a_refusal_verbatim() {
+        let (path, h) = fake_daemon(
+            r#"{"ok":false,"error":"version mismatch: daemon is seance 0.25.4, client is 0.24.0"}"#,
+        );
+        let err = preflight(&path).expect_err("a refusal must not read as success");
+        assert!(
+            err.to_string().contains("version mismatch"),
+            "refusal text lost on the way to the human: {err}"
+        );
+        assert!(err.to_string().contains("0.24.0"), "got: {err}");
+        let _ = h.join();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn preflight_accepts_a_daemon_that_answers() {
+        let (path, h) = fake_daemon(r#"{"ok":true,"data":{"principal":"human"}}"#);
+        preflight(&path).expect("a daemon that answers must boot the GUI");
+        let _ = h.join();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn preflight_fails_when_nothing_is_listening() {
+        let path = std::env::temp_dir().join("seance-preflight-test-absent.sock");
+        let _ = std::fs::remove_file(&path);
+        assert!(preflight(&path).is_err());
+    }
+
+    /// A daemon that hangs up wordlessly isn't the version gate — that one
+    /// always answers first. Don't invent a diagnosis for it.
+    #[test]
+    fn preflight_tolerates_a_silent_close() {
+        let (path, h) = fake_daemon("");
+        preflight(&path).expect("a wordless close is not a refusal");
+        let _ = h.join();
+        let _ = std::fs::remove_file(&path);
+    }
 }

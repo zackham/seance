@@ -252,6 +252,10 @@ pub struct SeanceApp {
     /// Render-safe cache of daemon-side files (pad sidecars, phone binds,
     /// prompt library) — refreshed by a ~2s background loop.
     remote_cache: Arc<crate::remote_cache::RemoteCache>,
+    /// The daemon told us why it won't talk to us (version gate, policy) —
+    /// held until a successful attach clears it. Without this a refusal is
+    /// indistinguishable from an idle window: same empty rail, same silence.
+    daemon_error: Option<String>,
     render_probe: RenderProbe,
 }
 
@@ -444,6 +448,7 @@ impl SeanceApp {
             pr_tip_pinned: false,
             pr_board: false,
             remote_cache,
+            daemon_error: None,
             render_probe: RenderProbe::default(),
             nav: workspaces::NavHistory::default(),
         };
@@ -668,7 +673,26 @@ impl SeanceApp {
         })
         .detach();
 
-        let _ = window;
+        // Most recently active client owns the PTY geometry. Every client
+        // latches the size it last sent, so after the web client reshapes a
+        // pane for a phone screen this window would keep painting a
+        // phone-sized grid indefinitely. Dropping the latch when the window
+        // is activated — and only then — lets the desktop re-take the dims on
+        // the next layout pass, while an unfocused window stays quiet so two
+        // attached clients can't thrash the pane between two sizes.
+        cx.observe_window_activation(window, |app, window, cx| {
+            if !window.is_window_active() {
+                return;
+            }
+            for pane in &app.panes {
+                if let Some(terminal) = pane.remote_terminal() {
+                    terminal.read(cx).forget_sent_size();
+                }
+            }
+            cx.notify();
+        })
+        .detach();
+
         app
     }
 
@@ -689,6 +713,9 @@ impl SeanceApp {
                 subscriptions,
                 workspace_meta,
             } => {
+                // A State means the daemon attached us — whatever it refused
+                // us for last time no longer holds.
+                self.daemon_error = None;
                 // Multi-window identity + peer roster.
                 if let Some(id) = window_id {
                     self.window_id = Some(id);
@@ -1079,6 +1106,11 @@ impl SeanceApp {
             }
             GuiEvent::Error { message } => {
                 eprintln!("[seance gui] daemon error: {message}");
+                // Sticky, not a toast: the conditions that produce this
+                // (version skew, a policy refusal) don't clear on their own,
+                // and the window has nothing else in it to look at.
+                self.daemon_error = Some(message);
+                cx.notify();
             }
             GuiEvent::RailPrefs { json } => {
                 // Another window (or this one) changed the shared arrangement.
@@ -2483,6 +2515,7 @@ impl Render for SeanceApp {
         let shelf_el = self.render_minimize_shelf(active, cx).into_any_element();
         let stage_el = self.render_stage_strip(active, cx).into_any_element();
         let awaken_el = self.render_awaken_bar(cx);
+        let daemon_err_el = self.render_daemon_error_bar(cx);
         let pr_el = self.render_pr_chip(cx);
         let t2 = std::time::Instant::now();
         let tiles_el = self.render_tiles(active, cx).into_any_element();
@@ -2679,6 +2712,9 @@ impl Render for SeanceApp {
                     .overflow_hidden()
                     .flex()
                     .flex_col()
+                    // Above everything: if the daemon won't have us, nothing
+                    // below this line is going to explain itself.
+                    .child(daemon_err_el)
                     .children(asks_el)
                     .child(shelf_el)
                     .child(pr_el)

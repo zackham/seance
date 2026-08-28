@@ -459,7 +459,14 @@ impl Chrome {
         let doc = self.doc.clone();
         self.topbar.set_inner_html("");
 
-        let title = text_el(&doc, "div", "tb-title", selected.unwrap_or("no workspace"))?;
+        // The slug is fixed at creation ("claude-24"); a rename only moves the
+        // display name, which is what the sidebar has always shown. Reading
+        // the slug here meant the topbar kept announcing whatever the circle
+        // was called before it was named.
+        let title_txt = selected
+            .map(|ws| state.workspace_label(ws))
+            .unwrap_or_else(|| "no workspace".to_string());
+        let title = text_el(&doc, "div", "tb-title", &title_txt)?;
         self.topbar.append_child(&title)?;
         if let Some(ws) = selected {
             self.build_pr_chip(state, ws)?;

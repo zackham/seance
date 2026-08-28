@@ -22,12 +22,24 @@ fi
 
 "$CARGO" build -p seance-web --target wasm32-unknown-unknown $FLAG
 
+# Build into a staging dir and swap it in with a rename. `rm -rf dist` in
+# place meant any client reloading mid-build got a half-populated directory —
+# and a browser that catches seance_web.js from one build with
+# seance_web_bg.wasm from another throws inside init() and renders empty
+# chrome. The swap is not atomic across two renames, but it closes the window
+# from "the whole build" to microseconds.
 DIST=crates/seance-web/dist
-rm -rf "$DIST"
-mkdir -p "$DIST"
+STAGE="$DIST.new"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
 "$BINDGEN" "$TARGET_DIR/seance_web.wasm" \
-  --target web --no-typescript --out-dir "$DIST"
-cp crates/seance-web/www/* "$DIST/"
+  --target web --no-typescript --out-dir "$STAGE"
+cp crates/seance-web/www/* "$STAGE/"
+
+OLD="$DIST.old.$$"
+if [ -d "$DIST" ]; then mv "$DIST" "$OLD"; fi
+mv "$STAGE" "$DIST"
+rm -rf "$OLD"
 
 # wasm-opt if available (not required).
 if command -v wasm-opt >/dev/null 2>&1; then

@@ -101,6 +101,11 @@ impl Engine {
                     "event_seq": events::current_seq(),
                     "focused_pane": self.focused_pane,
                     "selected_workspace": self.selected_workspace,
+                    // Daemon-owned per-workspace clocks (ms since epoch) —
+                    // what the GUI rail sorts idle circles by. Exposed so
+                    // external walls (ledge) can mirror the rail exactly.
+                    "workspace_output": self.workspace_output,
+                    "workspace_touch": self.workspace_touch_ms,
                 }))
             }
             New {
@@ -382,6 +387,22 @@ impl Engine {
                     self.kill_pane(&slug);
                     self.broadcast(GuiEvent::PaneKilled { slug });
                     self.persist();
+                    ok(serde_json::Value::Null)
+                }
+                Err(e) => err(e),
+            },
+            Select { pane, scope, from } => match find(self, &pane, &scope) {
+                Ok(idx) => {
+                    let slug = self.panes[idx].slug.clone();
+                    let ws = self.panes[idx].workspace.clone();
+                    events::log(
+                        &actor(&from),
+                        Some(&ws),
+                        Some(&slug),
+                        "ctl_select",
+                        "selected".into(),
+                    );
+                    self.select_pane_everywhere(&slug, &ws);
                     ok(serde_json::Value::Null)
                 }
                 Err(e) => err(e),

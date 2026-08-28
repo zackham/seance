@@ -225,7 +225,13 @@ fn main() {
             } else {
                 eprintln!("[seance] launch preference: remote → {host}");
                 match tunnel::Tunnel::establish(&host) {
-                    Ok(t) => Boot::Remote(t),
+                    // A forwarded socket that accepts TCP still isn't a daemon
+                    // that will talk to *this build* — ask before opening a
+                    // window that can only sit there empty.
+                    Ok(t) => match gui_client::preflight(&t.local_sock) {
+                        Ok(()) => Boot::Remote(t),
+                        Err(e) => Boot::Picker(pref.clone(), Some(format!("{host}: {e:#}"))),
+                    },
                     Err(e) => Boot::Picker(pref.clone(), Some(format!("{host}: {e:#}"))),
                 }
             }
@@ -236,7 +242,10 @@ fn main() {
                     "[seance] {} session daemon",
                     if spawned { "started" } else { "connected to" }
                 );
-                Boot::Local
+                match gui_client::preflight(&control::bind_socket_path()) {
+                    Ok(()) => Boot::Local,
+                    Err(e) => Boot::Picker(pref.clone(), Some(format!("local daemon: {e:#}"))),
+                }
             }
             Err(e) => Boot::Picker(pref.clone(), Some(format!("local daemon: {e:#}"))),
         },
@@ -244,8 +253,13 @@ fn main() {
             // No preference: a running local daemon means business as usual;
             // otherwise ask rather than silently spawning one.
             if std::os::unix::net::UnixStream::connect(control::bind_socket_path()).is_ok() {
-                eprintln!("[seance] connected to session daemon");
-                Boot::Local
+                match gui_client::preflight(&control::bind_socket_path()) {
+                    Ok(()) => {
+                        eprintln!("[seance] connected to session daemon");
+                        Boot::Local
+                    }
+                    Err(e) => Boot::Picker(None, Some(format!("local daemon: {e:#}"))),
+                }
             } else {
                 Boot::Picker(None, None)
             }

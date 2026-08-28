@@ -207,6 +207,7 @@ pub(crate) fn with_identity(
         },
         Status { pane, .. } => Status { pane, scope, from },
         Kill { pane, .. } => Kill { pane, scope, from },
+        Select { pane, .. } => Select { pane, scope, from },
         Scratchpad { pane, .. } => Scratchpad { pane, scope, from },
         Propose {
             pane, text, reason, ..
@@ -720,6 +721,15 @@ pub(crate) fn parse_status(args: Vec<String>) -> Result<ControlRequest, String> 
 pub(crate) fn parse_kill(args: Vec<String>) -> Result<ControlRequest, String> {
     let pane = single_positional(args, "kill")?;
     Ok(ControlRequest::Kill {
+        pane,
+        scope: None,
+        from: None,
+    })
+}
+
+pub(crate) fn parse_select(args: Vec<String>) -> Result<ControlRequest, String> {
+    let pane = single_positional(args, "select")?;
+    Ok(ControlRequest::Select {
         pane,
         scope: None,
         from: None,

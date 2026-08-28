@@ -243,6 +243,27 @@ impl Engine {
         None
     }
 
+    /// Point every window that can see `ws` at it, focused on `slug`, then
+    /// re-broadcast state. Windows NOT subscribed to that circle are left
+    /// alone -- a remote select must not yank a window off the circle its
+    /// human deliberately parked it on.
+    pub(crate) fn select_pane_everywhere(&mut self, slug: &str, ws: &str) {
+        self.selected_workspace = Some(ws.to_string());
+        self.focused_pane = Some(slug.to_string());
+        let ids: Vec<String> = self.gui_conns.iter().map(|c| c.id.clone()).collect();
+        for id in ids {
+            let sees = self.workspaces_for_window(&id).iter().any(|w| w == ws);
+            if !sees {
+                continue;
+            }
+            if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == id) {
+                c.selected_workspace = Some(ws.to_string());
+                c.focused_pane = Some(slug.to_string());
+            }
+        }
+        self.push_state_to_all();
+    }
+
     pub(crate) fn push_state_to_all(&mut self) {
         self.prune_dead_guis();
         let ids: Vec<String> = self.gui_conns.iter().map(|c| c.id.clone()).collect();

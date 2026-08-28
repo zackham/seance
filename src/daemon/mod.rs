@@ -821,6 +821,34 @@ fn resolve_upgrade_bin() -> Result<PathBuf> {
     );
 }
 
+/// Append handle for `<state-dir>/daemon.log`, rotated to `.1` past ~5 MiB —
+/// same shape as the GUI's stderr log. `None` if the state dir or the file
+/// can't be opened; the caller falls back to `/dev/null`.
+fn daemon_log_file() -> Option<std::fs::File> {
+    let dir = crate::state::state_dir().ok()?;
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("daemon.log");
+    const MAX: u64 = 5 * 1024 * 1024;
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() >= MAX) {
+        let _ = std::fs::rename(&path, dir.join("daemon.log.1"));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    // Who started this daemon, and which build — the two questions asked
+    // first when a session's panes turn out to belong to someone else's
+    // daemon.
+    let _ = writeln!(
+        file,
+        "\n--- seance daemon spawn requested by pid={} version={} ---",
+        std::process::id(),
+        env!("CARGO_PKG_VERSION"),
+    );
+    Some(file)
+}
+
 /// Ensure a daemon is running; spawn one if needed. Returns true if we spawned.
 pub fn ensure_daemon() -> Result<bool> {
     let path = control::socket_path();
@@ -831,13 +859,32 @@ pub fn ensure_daemon() -> Result<bool> {
         let _ = std::fs::remove_file(&path);
     }
     let bin = std::env::current_exe()?;
-    std::process::Command::new(bin)
-        .arg("daemon")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("spawn seance daemon")?;
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg("daemon").stdin(std::process::Stdio::null());
+    // The daemon spawned this way is usually the one nobody can see: started
+    // over ssh by a thin client's `_ensure-daemon`, with no terminal attached
+    // on either end. Sending its output to /dev/null meant a remote daemon
+    // that refused connections, or died, left nothing behind to read — the
+    // whole diagnosis had to be reconstructed from sshd's log (2026-08-20).
+    // Best-effort: if the log won't open, fall back to null rather than
+    // failing the spawn.
+    match daemon_log_file() {
+        Some(log) => match log.try_clone() {
+            Ok(err_half) => {
+                cmd.stdout(std::process::Stdio::from(log))
+                    .stderr(std::process::Stdio::from(err_half));
+            }
+            Err(_) => {
+                cmd.stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+            }
+        },
+        None => {
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+    }
+    cmd.spawn().context("spawn seance daemon")?;
     // Wait for socket.
     for _ in 0..100 {
         if path.exists() && UnixStream::connect(&path).is_ok() {

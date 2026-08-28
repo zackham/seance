@@ -143,6 +143,14 @@ impl Engine {
             )
         };
 
+        // What comes back is a different screen from the frozen one every
+        // window is still holding, so nobody may be sent damage against it:
+        // drop the daemon's damage base and every connection's claim to one,
+        // and the first frame after waking is a whole grid for all of them —
+        // not just for the window that happened to click awaken.
+        self.last_grid_cells.remove(slug);
+        self.invalidate_bases(slug);
+
         if kind == "file" {
             self.panes[idx].asleep = false;
             self.thaw_grid(slug);
@@ -158,6 +166,14 @@ impl Engine {
             None => command.clone(),
         };
         let session = self.spawn_terminal_session(slug, &launch, &cwd, &workspace, false)?;
+        // A fresh session counts frames from 1, but clients drop anything that
+        // isn't newer than the last frame they painted — and while this pane
+        // slept, the only frame served for it was the frozen one, at the rev
+        // the old session died on. Without carrying that count forward the
+        // woken pane keeps painting its pre-sleep screen forever while the live
+        // one scrolls past underneath, and only local echo (which leaves rev
+        // alone) puts a character or two on the glass.
+        session.seed_rev(self.frozen_grid(slug).map(|s| s.rev).unwrap_or(0));
         let pane = &mut self.panes[idx];
         pane.session = Some(session);
         pane.asleep = false;
