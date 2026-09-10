@@ -5,6 +5,7 @@
 //! Pure state — no rendering lives here (the sidebar/overview views call
 //! these to compute their layout).
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use gpui::{Context, Window};
@@ -22,6 +23,45 @@ pub(super) fn banish_arm_live(armed: Option<&(String, Instant)>, ws: &str, now: 
     armed.is_some_and(|(w, at)| w == ws && now.duration_since(*at) < BANISH_ARM)
 }
 
+/// Is a broadcast rail arrangement someone else's, or our own echo?
+///
+/// `pending > 0` means a write of ours is queued or in flight, so nothing the
+/// daemon is broadcasting right now can reflect our newest state. Otherwise it
+/// is ours exactly when it matches what we last sent.
+pub(super) fn rail_prefs_is_foreign(pending: usize, last_sent: Option<&str>, json: &str) -> bool {
+    pending == 0 && last_sent != Some(json)
+}
+
+/// Track how long each name the arrangement references has been missing from
+/// the daemon's world, and return the set `prune` may keep: what the daemon
+/// knows, plus anything missing for less than [`ABSENT_GRACE_MS`].
+///
+/// Pruning straight against `known` is destructive on a view that merely lags:
+/// a quicklaunch pin placed before its spawn lands, or a circle another window
+/// created a moment ago, both look identical to "killed" for one `State`.
+pub(super) fn settle_absent<'a>(
+    absent: &mut std::collections::HashMap<String, u64>,
+    referenced: impl Iterator<Item = &'a str>,
+    known: &std::collections::BTreeSet<String>,
+    now: u64,
+) -> std::collections::BTreeSet<String> {
+    for name in referenced {
+        if !known.contains(name) {
+            absent.entry(name.to_string()).or_insert(now);
+        }
+    }
+    // Back in the world → forget it ever went missing.
+    absent.retain(|name, _| !known.contains(name));
+    let mut protected = known.clone();
+    protected.extend(
+        absent
+            .iter()
+            .filter(|(_, since)| now.saturating_sub(**since) < ABSENT_GRACE_MS)
+            .map(|(name, _)| name.clone()),
+    );
+    protected
+}
+
 /// Coarse one-unit relative time for sidebar labels.
 pub(super) fn rel_label(delta_ms: u64) -> String {
     let s = delta_ms / 1000;
@@ -34,6 +74,16 @@ pub(super) fn rel_label(delta_ms: u64) -> String {
     }
 }
 use super::{RenameTarget, SeanceApp};
+
+/// How long the arrangement may reference a circle the daemon hasn't mentioned
+/// before `prune` drops it.
+///
+/// The asymmetry is the whole point: keeping a dead name costs one string in a
+/// json file, dropping a live one destroys something he asked for. Two ways a
+/// name goes briefly missing — a quicklaunch pin lands before its spawn round
+/// trip completes, and any window's `State` can lag another window's fresh
+/// circle. Both resolve in well under a minute.
+const ABSENT_GRACE_MS: u64 = 60_000;
 
 /// How many circles back the mouse can walk. A long day of cycling shouldn't
 /// grow a list forever, and nobody navigates back past a few dozen hops.
@@ -151,43 +201,41 @@ impl SeanceApp {
             .collect()
     }
 
-    /// Fold a fresh `State` into this window's persisted active/seen sets.
+    /// Fold a fresh `State` into this window's persisted arrangement, and make
+    /// sure the daemon is streaming every circle it knows about.
     ///
-    /// The daemon auto-subscribes on select / spawn / create / fork from this
-    /// window, so its subscription set *is* the auto-add signal (minus
-    /// anything we just parked, whose `Unsubscribe` may still be in flight).
-    /// With no persisted file the first State seeds the active list outright —
-    /// that's the migration from the ownership model.
+    /// Every non-blank window subscribes to everything (0.26, when park went
+    /// away), so the only reason this still touches subscriptions is catch-up:
+    /// a circle created or renamed since the last `State` isn't in the
+    /// connection's set until we ask for it.
     pub(super) fn reconcile_subscriptions(&mut self, known: &std::collections::BTreeSet<String>) {
         let subs = self.subscriptions.clone();
         let mut changed = false;
-        if self.rail_from_daemon {
-            // We took the arrangement from the daemon after attaching on a
-            // different seed. Folding this connection's subscriptions in would
-            // undo it — a fresh window attaches to *everything*, so the rail
-            // would bloom back to every circle the moment it opened. Push the
-            // arrangement onto the connection instead.
-            self.rail_from_daemon = false;
-            for ws in subs.iter().filter(|w| !self.subs_pref.active.contains(*w)) {
-                let _ = self.client.unsubscribe(ws);
-                self.park_pending.insert(ws.clone());
-            }
-        } else if !self.subs_seeded {
-            self.subs_pref.seed_from_daemon(&subs, known);
+        if !self.subs_seeded {
+            // Fresh install: everything that already exists counts as
+            // looked-at, so the rail doesn't come up all badged.
+            self.subs_pref.seed_seen(known);
             self.subs_seeded = true;
             changed = true;
-        } else {
-            changed |= self
-                .subs_pref
-                .adopt_daemon_subscriptions(&subs, &self.park_pending);
         }
-        // The park landed once the daemon stops listing the workspace.
-        self.park_pending.retain(|w| subs.iter().any(|s| s == w));
         // Selecting is looking: never badge the circle you're in as unseen.
         if let Some(sel) = self.selected_workspace.clone() {
-            changed |= self.subs_pref.activate(&sel);
+            changed |= self.subs_pref.mark_seen(&sel);
         }
-        changed |= self.subs_pref.prune(known);
+        let referenced: Vec<String> = self
+            .subs_pref
+            .pinned
+            .iter()
+            .chain(self.subs_pref.seen.iter())
+            .cloned()
+            .collect();
+        let protected = settle_absent(
+            &mut self.absent_since,
+            referenced.iter().map(String::as_str),
+            known,
+            now_ms(),
+        );
+        changed |= self.subs_pref.prune(&protected);
         // A cluster that no longer exists shouldn't leave a fold behind to
         // surprise you when that name comes back.
         let live_groups: std::collections::BTreeSet<String> = self
@@ -206,32 +254,46 @@ impl SeanceApp {
             .collect();
         changed |= self.subs_pref.prune_collapsed(&live_groups);
         if changed {
-            self.save_subscriptions();
+            self.save_arrangement_local();
         }
-        // Anything active the daemon isn't streaming (reconnect, rename) gets
-        // re-subscribed so its grids flow again.
-        let missing: Vec<String> = self
-            .subs_pref
-            .active
-            .iter()
-            .filter(|w| !subs.iter().any(|s| s == *w) && known.contains(*w))
-            .cloned()
-            .collect();
-        for ws in missing {
-            let _ = self.client.subscribe(&ws);
+        // Anything the daemon isn't streaming yet (reconnect, rename, a circle
+        // ctl just spawned) gets subscribed so its grids flow.
+        if !self.empty_window {
+            let missing: Vec<String> = known
+                .iter()
+                .filter(|w| !subs.iter().any(|s| s == *w))
+                .cloned()
+                .collect();
+            for ws in missing {
+                let _ = self.client.subscribe(&ws);
+            }
         }
     }
 
-    /// Persist the arrangement and refresh the reconnect `Attach` seed.
-    /// Blank windows own no arrangement — they must not clobber it.
-    pub(super) fn save_subscriptions(&self) {
+    /// Persist a DELIBERATE arrangement change — pin, unpin, a fold you
+    /// clicked, the notes face — locally and to the daemon, which shares it
+    /// with every other window.
+    pub(super) fn save_arrangement(&self) {
         if self.empty_window {
             return;
         }
         crate::subscriptions_pref::save(&self.subs_pref);
         self.push_rail_to_daemon();
-        self.client
-            .set_subscription_seed(self.subs_pref.active.iter().cloned().collect());
+    }
+
+    /// Persist incidental bookkeeping — `seen`, a prune, a fold opened just to
+    /// reveal a row — to the LOCAL cache only.
+    ///
+    /// These fire on selection and on every `State`, so pushing them raced the
+    /// deliberate changes: a window whose copy predated your pin by
+    /// milliseconds would push its own arrangement over the top and the daemon
+    /// would broadcast the pin away. Nothing here is worth another window's
+    /// attention; the next real change carries it along.
+    pub(super) fn save_arrangement_local(&self) {
+        if self.empty_window {
+            return;
+        }
+        crate::subscriptions_pref::save(&self.subs_pref);
     }
 
     /// Hand the arrangement to the daemon, which persists it and pushes it to
@@ -239,9 +301,13 @@ impl SeanceApp {
     ///
     /// Off the UI thread on purpose: this is a blocking bridge round trip and
     /// every caller is a click — pinning a circle must not wait on a socket,
-    /// least of all over ssh from the mac. Fire-and-forget is safe because the
-    /// local cache is already written and the daemon's copy is what any later
-    /// window reads.
+    /// least of all over ssh from the mac.
+    ///
+    /// Through one long-lived writer, NOT a thread per call. A thread per call
+    /// has no ordering, so pin-then-unpin could land unpin-then-pin; the daemon
+    /// would persist the loser and broadcast it back, and the pin visibly
+    /// undid itself. The queue also coalesces: only the newest arrangement is
+    /// worth writing.
     pub(super) fn push_rail_to_daemon(&self) {
         if self.empty_window {
             return;
@@ -249,72 +315,43 @@ impl SeanceApp {
         let Some(json) = crate::subscriptions_pref::encode(&self.subs_pref) else {
             return;
         };
-        let client = std::sync::Arc::clone(&self.client);
-        std::thread::Builder::new()
-            .name("seance-rail-push".into())
-            .spawn(move || {
-                if let Err(e) = client.subs_save(&json) {
-                    eprintln!("[seance gui] rail prefs save failed: {e}");
-                }
-            })
-            .ok();
-    }
-
-    /// Add a workspace to the active band (context menu "add to active", and
-    /// every select of a parked circle).
-    pub(super) fn activate_workspace(&mut self, ws: &str) {
-        self.park_pending.remove(ws);
-        if self.subs_pref.activate(ws) {
-            self.save_subscriptions();
+        if let Ok(mut last) = self.rail_push.last_sent.lock() {
+            *last = Some(json.clone());
         }
-        if !self.subscriptions.iter().any(|s| s == ws) {
-            let _ = self.client.subscribe(ws);
+        self.rail_push.pending.fetch_add(1, Ordering::SeqCst);
+        if self.rail_push.tx.send(json).is_err() {
+            self.rail_push.pending.fetch_sub(1, Ordering::SeqCst);
         }
     }
 
-    /// Move a workspace to the parked group. Parking the circle you're looking
-    /// at moves the selection to the next active one first (the daemon would
-    /// otherwise pick for us on `Unsubscribe`).
-    pub(super) fn park_workspace(&mut self, ws: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_workspace.as_deref() == Some(ws) {
-            let order = self.visible_workspaces();
-            let next = order
-                .iter()
-                .position(|w| w == ws)
-                .and_then(|idx| {
-                    order
-                        .get(idx + 1)
-                        .or_else(|| idx.checked_sub(1).and_then(|j| order.get(j)))
-                })
-                .cloned();
-            if let Some(next) = next {
-                self.select_workspace(&next, window, cx);
-            }
-        }
-        self.subs_pref.park(ws);
-        self.park_pending.insert(ws.to_string());
-        self.save_subscriptions();
-        let _ = self.client.unsubscribe(ws);
-        cx.notify();
+    /// Should an inbound `RailPrefs` be adopted, or is it our own change coming
+    /// back around?
+    ///
+    /// The daemon broadcasts to every window INCLUDING the sender, so without
+    /// this a window overwrites its own fresh state with an older copy of it.
+    pub(super) fn rail_prefs_is_foreign(&self, json: &str) -> bool {
+        let last = self.rail_push.last_sent.lock().ok();
+        rail_prefs_is_foreign(
+            self.rail_push.pending.load(Ordering::SeqCst),
+            last.as_ref().and_then(|l| l.as_deref()),
+            json,
+        )
     }
 
-    /// Pin a circle to the top section (context menu "pin to top"). Pinned
-    /// implies active, so a parked circle is promoted + subscribed here.
+    /// Pin a circle to the top section (context menu "pin to top", and every
+    /// quicklaunch click, which pins before the spawn round trip returns —
+    /// see [`ABSENT_GRACE_MS`]).
     pub(super) fn pin_workspace(&mut self, ws: &str) {
-        self.park_pending.remove(ws);
         if self.subs_pref.pin(ws) {
-            self.save_subscriptions();
-        }
-        if !self.subscriptions.iter().any(|s| s == ws) {
-            let _ = self.client.subscribe(ws);
+            self.save_arrangement();
         }
     }
 
-    /// Drop a circle out of the pinned section. It stays active — it just
-    /// falls back below the divider into the normal band.
+    /// Drop a circle out of the pinned section. It falls back below the
+    /// divider into its lifecycle band.
     pub(super) fn unpin_workspace(&mut self, ws: &str) {
         if self.subs_pref.unpin(ws) {
-            self.save_subscriptions();
+            self.save_arrangement();
         }
     }
 
@@ -329,20 +366,10 @@ impl SeanceApp {
         }
     }
 
-    /// The rail's four bands in display order, each carrying the single sort
-    /// from [`Self::workspaces`]: pinned, active, sleeping, parked.
+    /// The rail's two bands in display order, each carrying the single sort
+    /// from [`Self::workspaces`]: pinned, then everything else.
     pub(super) fn workspace_sections(&self) -> Vec<(Section, Vec<String>)> {
-        let asleep: std::collections::BTreeSet<String> = self
-            .known_workspace_names()
-            .into_iter()
-            .filter(|ws| self.workspace_asleep(ws))
-            .collect();
-        seance_core::grouping::partition_sections(
-            &self.workspaces(),
-            &self.subs_pref.active,
-            &self.subs_pref.pinned,
-            &asleep,
-        )
+        seance_core::grouping::partition_sections(&self.workspaces(), &self.subs_pref.pinned)
     }
 
     /// One band's rows: loose circles and prefix clusters, in sort order.
@@ -352,7 +379,7 @@ impl SeanceApp {
     }
 
     /// Every circle the rail is actually SHOWING, top-to-bottom, in draw
-    /// order. This is the ctrl+page ring and the neighbour list for park/kill.
+    /// order. This is the ctrl+page ring and the neighbour list for kill.
     ///
     /// Folds count: a collapsed band or cluster is not on screen, so cycling
     /// skips it. That makes collapsing a way to narrow what ctrl+page walks —
@@ -360,7 +387,7 @@ impl SeanceApp {
     pub(super) fn visible_workspaces(&self) -> Vec<String> {
         let mut out = Vec::new();
         for (section, circles) in self.workspace_sections() {
-            if circles.is_empty() || self.subs_pref.is_collapsed(section.key()) {
+            if circles.is_empty() {
                 continue;
             }
             for row in self.section_rows(&circles) {
@@ -379,16 +406,18 @@ impl SeanceApp {
     }
 
     /// Position of a circle's row among the elements the rail emits, so
-    /// scroll-to-item lands on it. Headers are rows too.
+    /// scroll-to-item lands on it. Cluster headers and the pinned rule are
+    /// rows too.
     fn rail_row_index(&self, workspace: &str) -> Option<usize> {
         let mut i = 0usize;
+        let mut any_pinned = false;
         for (section, circles) in self.workspace_sections() {
             if circles.is_empty() {
                 continue;
             }
-            i += 1; // band header
-            if self.subs_pref.is_collapsed(section.key()) {
-                continue;
+            any_pinned |= section == Section::Pinned;
+            if section == Section::Active && any_pinned {
+                i += 1; // the rule under the pinned band
             }
             for row in self.section_rows(&circles) {
                 match row {
@@ -417,25 +446,16 @@ impl SeanceApp {
         None
     }
 
-    /// The band + cluster keys a circle's row lives under, if the rail knows
-    /// it. Pure lookup over the same sectioning the rail renders from, so the
-    /// unfold and the row index can never disagree about where a circle is.
-    fn rail_row_keys(&self, workspace: &str) -> Option<(String, Option<String>)> {
+    /// The cluster fold a circle's row hides under, if any. Pure lookup over
+    /// the same sectioning the rail renders from, so the unfold and the row
+    /// index can never disagree about where a circle is.
+    fn rail_row_cluster(&self, workspace: &str) -> Option<String> {
         for (section, circles) in self.workspace_sections() {
             for row in self.section_rows(&circles) {
-                match row {
-                    SectionRow::Circle(ws) if ws == workspace => {
-                        return Some((section.key().to_string(), None));
+                if let SectionRow::Group { prefix, members } = row {
+                    if members.iter().any(|m| m == workspace) {
+                        return Some(crate::subscriptions_pref::group_key(section.key(), &prefix));
                     }
-                    SectionRow::Group { prefix, members }
-                        if members.iter().any(|m| m == workspace) =>
-                    {
-                        return Some((
-                            section.key().to_string(),
-                            Some(crate::subscriptions_pref::group_key(section.key(), &prefix)),
-                        ));
-                    }
-                    _ => {}
                 }
             }
         }
@@ -448,25 +468,22 @@ impl SeanceApp {
     /// creating a circle all land the same way — the rail always shows you
     /// where you just went.
     pub(super) fn reveal_workspace_row(&mut self, workspace: &str) {
-        if let Some((band, cluster)) = self.rail_row_keys(workspace) {
-            let mut changed = self.subs_pref.uncollapse(&band);
-            if let Some(key) = cluster {
-                changed |= self.subs_pref.uncollapse(&key);
-            }
-            if changed {
-                self.save_subscriptions();
+        if let Some(key) = self.rail_row_cluster(workspace) {
+            if self.subs_pref.uncollapse(&key) {
+                self.save_arrangement_local();
             }
         }
-        // Count the elements the rail actually emits above this row: one per
-        // band header, one per cluster header, one per circle.
+        // Count the elements the rail actually emits above this row: the
+        // pinned rule, one per cluster header, one per circle.
         if let Some(idx) = self.rail_row_index(workspace) {
             self.sidebar_scroll.scroll_to_item(idx);
         }
     }
 
-    /// Badge for a parked row: the normal live attention, or `needs` for a
-    /// circle this window has never looked at (ctl spawns land parked+needs).
-    pub(super) fn parked_attention(&self, ws: &str) -> Option<WorkspaceAttention> {
+    /// Badge for a rail row: the normal live attention, or `needs` for a circle
+    /// this window has never selected — which is how a ctl-spawned circle
+    /// announces itself.
+    pub(super) fn row_attention(&self, ws: &str) -> Option<WorkspaceAttention> {
         self.workspace_attention_cx(ws).or({
             if self.subs_pref.never_seen(ws) {
                 Some(WorkspaceAttention::NeedsHuman)
@@ -748,8 +765,9 @@ impl SeanceApp {
             n += 1;
         };
         let _ = self.client.create_workspace(&name);
-        // Born here → active here (the daemon subscribes us too).
-        self.activate_workspace(&name);
+        // Born here → looked at here; the daemon subscribes us on create.
+        self.subs_pref.mark_seen(&name);
+        self.save_arrangement_local();
         if !self.extra_workspaces.contains(&name) {
             self.extra_workspaces.push(name.clone());
         }
@@ -772,9 +790,11 @@ impl SeanceApp {
         cx: &mut Context<Self>,
     ) {
         let changed = self.selected_workspace.as_deref() != Some(workspace);
-        // Selecting a parked circle promotes it: subscribe + into the active
-        // band + marked seen (the daemon auto-subscribes on SetFocus too).
-        self.activate_workspace(workspace);
+        // Selecting is looking — clears the `needs` badge. The daemon
+        // auto-subscribes on SetFocus, so nothing to ask for here.
+        if self.subs_pref.mark_seen(workspace) {
+            self.save_arrangement_local();
+        }
         // Remember which pane was active in the circle we're leaving.
         if changed {
             if let (Some(old_ws), Some(slug)) =
@@ -792,7 +812,7 @@ impl SeanceApp {
         self.selected_workspace = Some(workspace.to_string());
         // Reveal the selection in the rail. Scrolling alone isn't enough: a
         // circle inside a folded band or cluster has no row to scroll TO, so
-        // jumping into one (the sleeping and parked bands start folded) left
+        // jumping into one (the sleeping band starts folded) left
         // the rail sitting wherever it was, showing no sign of where you went.
         // Unfold first, then scroll.
         self.reveal_workspace_row(workspace);
@@ -865,7 +885,7 @@ impl SeanceApp {
     ///
     /// The selection moves from a dozen places — a rail click, ctrl+page, the
     /// jump palette, clicking a pane that lives in another circle
-    /// (`set_active` sets it directly), parking the circle you're in, a `ctl`
+    /// (`set_active` sets it directly), a `ctl`
     /// spawn pulling this window across — and the daemon can move it without
     /// this window asking. Watching the value catches all of them; asking
     /// every caller to remember would catch the ones I thought of today.
@@ -917,7 +937,7 @@ impl SeanceApp {
         cx: &mut Context<Self>,
     ) {
         // Parked circles are deliberately out of the rotation — that's the
-        // point of parking them. Cycle EXACTLY the list the sidebar shows,
+        // point of folding them away. Cycle EXACTLY the list the sidebar shows,
         // read live at each press (owner decision 2026-08-02: pageup/down
         // must always correspond to what the left sidebar displays — no
         // snapshots, no alternate orders).
@@ -1196,5 +1216,86 @@ mod tests {
             now + BANISH_ARM
         ));
         assert!(!banish_arm_live(None, "circle-7", now));
+    }
+
+    /// The daemon echoes every write back to its sender. Adopting that echo is
+    /// how a pin undid itself: the window replaced fresh local state with an
+    /// older copy of it.
+    #[test]
+    fn our_own_echo_is_never_adopted() {
+        let mine = r#"{"pinned":["lab"]}"#;
+        assert!(!rail_prefs_is_foreign(0, Some(mine), mine));
+    }
+
+    /// A real change from another window still lands.
+    #[test]
+    fn another_windows_arrangement_is_adopted() {
+        assert!(rail_prefs_is_foreign(
+            0,
+            Some(r#"{"pinned":["lab"]}"#),
+            r#"{"pinned":["lab","raid"]}"#
+        ));
+        // Nothing sent yet — anything inbound is foreign by definition.
+        assert!(rail_prefs_is_foreign(0, None, r#"{"pinned":[]}"#));
+    }
+
+    /// While a write of ours is queued or in flight, ANY broadcast is stale by
+    /// construction — including one that happens to differ from what we sent.
+    #[test]
+    fn nothing_is_adopted_while_our_write_is_in_flight() {
+        assert!(!rail_prefs_is_foreign(1, Some("a"), "b"));
+        assert!(!rail_prefs_is_foreign(3, None, "b"));
+    }
+
+    fn known(items: &[&str]) -> std::collections::BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The quicklaunch bug: the pin lands before the spawn round trip does, so
+    /// the next `State` carries no such circle.
+    #[test]
+    fn a_name_the_daemon_has_not_mentioned_yet_survives() {
+        let mut absent = std::collections::HashMap::new();
+        let p = settle_absent(&mut absent, ["staff-report"].into_iter(), &known(&["lab"]), 1_000);
+        assert!(p.contains("staff-report"), "a fresh pin must not be pruned");
+        assert_eq!(absent.get("staff-report"), Some(&1_000));
+    }
+
+    /// Still missing a full grace period later — now it really is gone.
+    #[test]
+    fn a_name_missing_past_the_grace_is_dropped() {
+        let mut absent = std::collections::HashMap::new();
+        settle_absent(&mut absent, ["gone"].into_iter(), &known(&["lab"]), 1_000);
+        let p = settle_absent(
+            &mut absent,
+            ["gone"].into_iter(),
+            &known(&["lab"]),
+            1_000 + ABSENT_GRACE_MS,
+        );
+        assert!(!p.contains("gone"));
+    }
+
+    /// The clock starts at FIRST absence and doesn't restart on every `State`,
+    /// or a killed circle would be shielded forever.
+    #[test]
+    fn the_absence_clock_does_not_restart_each_state() {
+        let mut absent = std::collections::HashMap::new();
+        for t in [1_000, 2_000, 3_000] {
+            settle_absent(&mut absent, ["gone"].into_iter(), &known(&[]), t);
+        }
+        assert_eq!(absent.get("gone"), Some(&1_000), "first sighting wins");
+    }
+
+    /// A circle that shows up resets: a later disappearance gets its own full
+    /// grace rather than inheriting a stale clock.
+    #[test]
+    fn reappearing_clears_the_absence() {
+        let mut absent = std::collections::HashMap::new();
+        settle_absent(&mut absent, ["ws"].into_iter(), &known(&[]), 1_000);
+        settle_absent(&mut absent, ["ws"].into_iter(), &known(&["ws"]), 2_000);
+        assert!(absent.is_empty(), "back in the world");
+        let p = settle_absent(&mut absent, ["ws"].into_iter(), &known(&[]), 3_000);
+        assert!(p.contains("ws"));
+        assert_eq!(absent.get("ws"), Some(&3_000));
     }
 }

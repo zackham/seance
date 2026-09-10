@@ -26,8 +26,21 @@ pub fn slugify(name: &str) -> String {
     }
 }
 
-/// Claude Code / ink TUIs put a braille spinner in the OSC title while
-/// streaming. Idle Claude uses `✳` (U+2733) — that is *not* busy.
+/// Claude Code / ink TUIs put an animated spinner at the head of the OSC title
+/// while working. Idle Claude uses `✳` (U+2733) — that is *not* busy.
+///
+/// Two frame families, because the spinner is not one fixed set:
+/// * braille `U+2800..=U+28FF` — the classic ink spinner,
+/// * circle quadrants `U+25D0..=U+25D3` — what Claude Code emits today.
+///
+/// The quadrant family was missing until 2026-08-31, and its absence was
+/// silent in the worst way: the daemon reported "not busy" for panes that were
+/// visibly working, so every working circle fell into the idle band and its
+/// row churned against the activity clock. Sampled live over ~6s across a
+/// dozen panes, working ones alternated `◐`/`◑` and idle ones sat on `✳`; the
+/// other two quadrants complete that rotation. **If a working agent stops
+/// reading as busy, suspect this list before anything else** — a spinner
+/// change upstream lands here as a lie, not as an error.
 ///
 /// Lives here because the **daemon** is the authority on busy: it sees every
 /// title change, while a client only receives grid frames for the workspace
@@ -36,7 +49,7 @@ pub fn slugify(name: &str) -> String {
 pub fn title_looks_busy(title: &str) -> bool {
     matches!(
         title.trim_start().chars().next(),
-        Some('\u{2800}'..='\u{28FF}')
+        Some('\u{2800}'..='\u{28FF}') | Some('\u{25D0}'..='\u{25D3}')
     )
 }
 
@@ -58,5 +71,38 @@ pub fn unique_slug(name: &str, taken: &[&str]) -> String {
             return candidate;
         }
         n += 1;
+    }
+}
+
+#[cfg(test)]
+mod busy_title_tests {
+    use super::title_looks_busy;
+
+    /// The regression: Claude Code's spinner is circle quadrants now, and
+    /// matching only braille reported every working agent as idle.
+    #[test]
+    fn the_circle_quadrant_spinner_reads_as_busy() {
+        assert!(title_looks_busy("◐ Value per account churn adjustment"));
+        assert!(title_looks_busy("◑ Ad monitoring integration into Cadence"));
+        assert!(title_looks_busy("◒ working"));
+        assert!(title_looks_busy("◓ working"));
+    }
+
+    #[test]
+    fn the_braille_spinner_still_reads_as_busy() {
+        assert!(title_looks_busy("⠂ Understanding parked variables"));
+        assert!(title_looks_busy("⠐ doing a thing"));
+        // Leading whitespace is trimmed before the check.
+        assert!(title_looks_busy("  ⠋ indented"));
+    }
+
+    /// `✳` is idle Claude waiting on you. Calling it busy would park every
+    /// finished circle in the working band, which is the inverse failure.
+    #[test]
+    fn idle_claude_and_plain_titles_are_not_busy() {
+        assert!(!title_looks_busy("✳ Review support drafts application"));
+        assert!(!title_looks_busy("zsh"));
+        assert!(!title_looks_busy(""));
+        assert!(!title_looks_busy("~/work/seance"));
     }
 }

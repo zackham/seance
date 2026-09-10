@@ -245,8 +245,7 @@ impl Engine {
 
     /// Point every window that can see `ws` at it, focused on `slug`, then
     /// re-broadcast state. Windows NOT subscribed to that circle are left
-    /// alone -- a remote select must not yank a window off the circle its
-    /// human deliberately parked it on.
+    /// alone -- that is a blank window, which must stay blank.
     pub(crate) fn select_pane_everywhere(&mut self, slug: &str, ws: &str) {
         self.selected_workspace = Some(ws.to_string());
         self.focused_pane = Some(slug.to_string());
@@ -344,8 +343,7 @@ impl Engine {
     }
 
     /// The State push for one window. Everything except `selected_workspace` /
-    /// `focused_pane` / `subscriptions` is GLOBAL — clients render their own
-    /// active/parked split from the subscription set.
+    /// `focused_pane` / `subscriptions` is GLOBAL.
     fn state_for_window(&self, window_id: &str) -> GuiEvent {
         let subs = self.workspaces_for_window(window_id);
         let panes: Vec<PaneInfo> = self.pane_infos();
@@ -386,7 +384,7 @@ impl Engine {
             })
             .collect();
         // Daemon-owned activity clocks for EVERY known workspace, subscribed or
-        // not — a parked circle must still show its real "time since update".
+        // not — an unselected circle must still show its real "time since update".
         let mut meta_names: Vec<String> = order.clone();
         for ws in self
             .workspace_output
@@ -1123,26 +1121,6 @@ impl Engine {
                     },
                 });
             }
-            GuiRequest::Unsubscribe { workspace } => {
-                let was_selected = self.gui_conns.iter().any(|c| {
-                    c.id == window_id && c.selected_workspace.as_deref() == Some(workspace.as_str())
-                });
-                if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
-                    c.subscriptions.remove(&workspace);
-                }
-                if was_selected {
-                    // Dropping the circle you were looking at moves you to the
-                    // next one you still subscribe to (or nothing).
-                    let next_sel = self.workspaces_for_window(window_id).first().cloned();
-                    if let Some(c) = self.gui_conns.iter_mut().find(|c| c.id == window_id) {
-                        c.selected_workspace = next_sel;
-                        c.focused_pane = None;
-                    }
-                }
-                let st = self.state_for_window(window_id);
-                self.send_to(window_id, st);
-                None
-            }
             GuiRequest::Input { pane, bytes_b64 } => {
                 // Typing into a sleeping pane wakes it — same rule as ctl send.
                 // Scrolling deliberately does not: reading the frozen frame is
@@ -1436,7 +1414,7 @@ impl Engine {
                 // A rename sets the LABEL. The slug — the circle's identity —
                 // does not move, so there is nothing to migrate: panes,
                 // activity clocks, PR links and dismissals, every window's
-                // selection and subscription set, each client's pin/park
+                // selection and subscription set, each client's rail
                 // prefs, and every running pane's `SEANCE_WORKSPACE` all keep
                 // pointing at the same circle. The eight-structure migration
                 // this replaced could never reach that last one.
@@ -1480,7 +1458,7 @@ impl Engine {
                 let mut workspace_changed = false;
                 let mut flush_ws: Option<String> = None;
                 let mut flush_pane: Option<String> = None;
-                // Selecting a circle auto-subscribes to it ("add to active").
+                // Selecting a circle auto-subscribes to it.
                 if let Some(w) = workspace.as_ref() {
                     self.subscribe_conn(window_id, w);
                 }

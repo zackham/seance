@@ -128,7 +128,6 @@ pub(super) struct BoardRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BoardSection {
     pub workspace: String,
-    pub parked: bool,
     pub needs: bool,
     pub rows: Vec<BoardRow>,
 }
@@ -144,17 +143,17 @@ fn row_stale(state: &str, review: Option<&str>, now: u64, opened: u64, touch: u6
     now.saturating_sub(quiet_from) > STALE_MS
 }
 
-/// Build the whole board. `input` is `(circle, parked, links)` for every circle
-/// this client knows; ordering is needs-first, then most-recent PR activity.
-pub(super) fn build_board(input: &[(String, bool, Vec<PrLink>)], now: u64) -> Vec<BoardSection> {
+/// Build the whole board. `input` is `(circle, links)` for every circle this
+/// client knows; ordering is needs-first, then most-recent PR activity.
+pub(super) fn build_board(input: &[(String, Vec<PrLink>)], now: u64) -> Vec<BoardSection> {
     let with_org = spans_multiple_orgs(
         input
             .iter()
-            .flat_map(|(_, _, links)| links.iter().map(|l| l.url.as_str())),
+            .flat_map(|(_, links)| links.iter().map(|l| l.url.as_str())),
     );
     // URL → circles pinning it (for the duplicate annotation).
     let mut owners: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
-    for (ws, _, links) in input {
+    for (ws, links) in input {
         for l in links {
             let e = owners.entry(l.url.as_str()).or_default();
             if !e.contains(&ws.as_str()) {
@@ -164,7 +163,7 @@ pub(super) fn build_board(input: &[(String, bool, Vec<PrLink>)], now: u64) -> Ve
     }
 
     let mut sections: Vec<BoardSection> = Vec::new();
-    for (ws, parked, links) in input {
+    for (ws, links) in input {
         if links.is_empty() {
             continue;
         }
@@ -217,7 +216,6 @@ pub(super) fn build_board(input: &[(String, bool, Vec<PrLink>)], now: u64) -> Ve
             .any(|r| !r.done && r.attention.as_deref() == Some("needs"));
         sections.push(BoardSection {
             workspace: ws.clone(),
-            parked: *parked,
             needs,
             rows,
         });
@@ -250,25 +248,20 @@ pub(super) fn board_counts(sections: &[BoardSection]) -> (usize, usize, usize) {
 }
 
 impl SeanceApp {
-    /// `(circle, parked, links)` for every circle with PR links, in sidebar
-    /// order — the board's raw input.
-    fn pr_board_input(&self) -> Vec<(String, bool, Vec<PrLink>)> {
-        let ordered = self.workspaces();
-        let (_, parked) = crate::subscriptions_pref::partition(&ordered, &self.subs_pref.active);
-        ordered
+    /// `(circle, links)` for every circle with PR links, in sidebar order —
+    /// the board's raw input.
+    fn pr_board_input(&self) -> Vec<(String, Vec<PrLink>)> {
+        self.workspaces()
             .into_iter()
             .filter_map(|ws| {
                 let links = self.pr_links_for(&ws);
-                (!links.is_empty()).then(|| {
-                    let is_parked = parked.contains(&ws);
-                    (ws, is_parked, links.to_vec())
-                })
+                (!links.is_empty()).then(|| (ws, links.to_vec()))
             })
             .collect()
     }
 
-    /// Count for the sidebar button: live PRs across every circle, parked
-    /// included. Zero hides the button.
+    /// Count for the sidebar button: live PRs across every circle. Zero hides
+    /// the button.
     pub(super) fn pr_open_count(&self) -> usize {
         self.pr_links
             .values()
@@ -425,14 +418,6 @@ impl SeanceApp {
                                 .text_xs()
                                 .text_color(SeancePalette::violet())
                                 .child("needs"),
-                        )
-                    })
-                    .when(section.parked, |d| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(SeancePalette::text_faint())
-                                .child("parked"),
                         )
                     }),
             )
@@ -650,12 +635,10 @@ mod tests {
         let input = vec![
             (
                 "alpha".into(),
-                false,
                 vec![link("https://github.com/o/r/pull/1", st)],
             ),
             (
                 "beta".into(),
-                true,
                 vec![link("https://github.com/o/r/pull/1", open_status())],
             ),
         ];
@@ -668,7 +651,6 @@ mod tests {
         assert!(row.is_draft);
         assert_eq!(row.also_in, vec!["beta".to_string()]);
         let b = board.iter().find(|s| s.workspace == "beta").unwrap();
-        assert!(b.parked);
         assert_eq!(b.rows[0].also_in, vec!["alpha".to_string()]);
     }
 
@@ -680,15 +662,13 @@ mod tests {
         let mut fresh = open_status();
         fresh.updated_ms = NOW;
         let input = vec![
-            ("quiet".into(), false, vec![]),
+            ("quiet".into(), vec![]),
             (
                 "fresh".into(),
-                false,
                 vec![link("https://github.com/o/r/pull/2", fresh)],
             ),
             (
                 "asks".into(),
-                false,
                 vec![link("https://github.com/o/r/pull/3", needs)],
             ),
         ];
@@ -713,7 +693,6 @@ mod tests {
         draft.updated_ms = NOW - HOUR;
         let input = vec![(
             "one".into(),
-            false,
             vec![
                 link("https://github.com/o/r/pull/1", merged),
                 link("https://github.com/o/r/pull/2", draft),

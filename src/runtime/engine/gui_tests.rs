@@ -1,5 +1,5 @@
 //! Hermetic `handle_gui` tests for the SUBSCRIPTION model (0.12): Attach
-//! seeding, Subscribe/Unsubscribe, auto-subscribe on select/spawn/create,
+//! seeding, Subscribe, auto-subscribe on select/spawn/create,
 //! the grid-rate matrix, and the recorder invariant. Driven through a fake
 //! `GuiConn` (an in-memory `OutQueue` registered via `register_gui`). No real
 //! sockets, no PTYs (stub panes only), `SEANCE_STATE_DIR` guarded by
@@ -209,7 +209,7 @@ fn attach_with_empty_list_is_a_blank_window() {
         assert!(st.subscriptions.is_empty(), "{:?}", st.subscriptions);
         assert!(st.selected_workspace.is_none());
         // Blank means "subscribed to nothing", NOT "told nothing" — the census
-        // is what phase 2's parked list renders from.
+        // is what the rail renders from.
         assert!(st.knows_ws("lab") && st.knows_ws("cadence"));
         assert_eq!(st.windows.len(), 2);
         // g1 keeps everything — a second window takes nothing away (no custody).
@@ -249,67 +249,7 @@ fn two_windows_can_subscribe_to_the_same_workspace() {
 }
 
 #[test]
-fn unsubscribe_drops_the_workspace_and_moves_selection_on() {
-    with_test_state_dir("gui-unsub", || {
-        let scratch = temp_scratch("gui-unsub");
-        let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
-        eng.push_stub_pane("worker-a", "lab");
-        eng.push_stub_pane("worker-b", "cadence");
-
-        let g = FakeGui::attach_to(&mut eng);
-        let _ = attach_all(&mut eng, &g.id);
-        let _ = eng.handle_gui(
-            GuiRequest::SetFocus {
-                pane: None,
-                workspace: Some("cadence".into()),
-            },
-            &g.id,
-        );
-
-        let _ = eng.handle_gui(
-            GuiRequest::Unsubscribe {
-                workspace: "cadence".into(),
-            },
-            &g.id,
-        );
-        let st = g.last_state().expect("unsubscribe pushes State");
-        assert!(!st.subscribes("cadence"));
-        assert_ne!(st.selected_workspace.as_deref(), Some("cadence"));
-        assert!(
-            st.selected_workspace
-                .as_deref()
-                .is_some_and(|s| st.subscribes(s)),
-            "selection must stay inside the subscription set: {st:?}",
-            st = st.subscriptions
-        );
-
-        // Unsubscribing the last one leaves no selection at all.
-        let remaining = st.selected_workspace.clone().unwrap();
-        let _ = eng.handle_gui(
-            GuiRequest::Unsubscribe {
-                workspace: remaining,
-            },
-            &g.id,
-        );
-        let st = g.last_state().unwrap();
-        for ws in &st.subscriptions {
-            let _ = eng.handle_gui(
-                GuiRequest::Unsubscribe {
-                    workspace: ws.clone(),
-                },
-                &g.id,
-            );
-        }
-        let st = g.last_state().unwrap();
-        assert!(st.subscriptions.is_empty());
-        assert!(st.selected_workspace.is_none());
-
-        let _ = std::fs::remove_dir_all(&scratch);
-    });
-}
-
-#[test]
-fn selecting_a_parked_workspace_auto_subscribes() {
+fn selecting_an_unsubscribed_workspace_auto_subscribes() {
     with_test_state_dir("gui-focus-sub", || {
         let scratch = temp_scratch("gui-focus-sub");
         let (mut eng, _rx) = Engine::bare_for_test(scratch.clone());
@@ -351,7 +291,7 @@ fn gui_spawn_and_create_auto_subscribe_the_requester() {
         );
         assert!(eng.subscriptions_of(&g.id).contains(&"notes".to_string()));
 
-        // A ctl-side spawn subscribes NOBODY (parked everywhere; GUIs badge it).
+        // A ctl-side spawn subscribes NOBODY — GUIs badge it `needs`.
         let _ = eng.spawn(SpawnSpec {
             name: "ctl-worker".into(),
             cwd: None,
@@ -414,7 +354,7 @@ fn bye_drops_the_window_without_reassigning_anything() {
         assert_eq!(eng.subscriptions_of(&g1.id), vec!["lab".to_string()]);
         let s1 = g1.last_state().expect("g1 State after Bye");
         assert_eq!(s1.subscriptions, vec!["lab".to_string()]);
-        // cadence still exists globally, just parked everywhere.
+        // cadence still exists globally, just unsubscribed everywhere.
         assert!(s1.knows_ws("cadence"));
         assert_eq!(s1.windows.len(), 1);
 
@@ -738,7 +678,7 @@ fn activity_and_touch_clocks_are_daemon_owned() {
     });
 }
 
-/// A parked circle still reports its real clocks — the census a phase-2 parked
+/// An unsubscribed circle still reports its real clocks — the census a rail
 /// list will render from must not be blank.
 #[test]
 fn workspace_meta_covers_unsubscribed_workspaces() {
@@ -767,7 +707,7 @@ fn workspace_meta_covers_unsubscribed_workspaces() {
         let m = meta
             .iter()
             .find(|m| m.workspace == "offstage")
-            .expect("parked circle still has meta");
+            .expect("unsubscribed circle still has meta");
         assert_eq!(m.last_output_ms, 1_700_000_000_000);
 
         let _ = std::fs::remove_dir_all(&scratch);
@@ -847,7 +787,7 @@ fn busy_flips_reach_a_window_that_does_not_subscribe_to_the_circle() {
         let worker = eng.push_stub_pane("worker", "lab");
         eng.push_stub_pane("other", "cadence");
 
-        // This window watches `cadence` only — `lab` is parked for it.
+        // This window watches `cadence` only — it never subscribed to `lab`.
         let gui = FakeGui::attach_to(&mut eng);
         let st = attach_with(&mut eng, &gui.id, &["cadence"]);
         assert!(!st.subscribes("lab"), "subs={:?}", st.subscriptions);

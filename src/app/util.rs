@@ -50,8 +50,11 @@ pub(super) fn tip_s(
 /// Standard selected-row fill for sidebar lists (workspaces, host chips, panes).
 /// High-contrast on `bg_elevated` — not `surface` (too close to the panel).
 #[inline]
+/// Selected-row fill. Deliberately well clear of `bg_elevated()` (L10) — at
+/// the old `border()` (L19) the selected circle was hard to pick out of a long
+/// rail at a glance.
 pub(super) fn selected_row_fill() -> gpui::Hsla {
-    SeancePalette::border()
+    gpui::hsla(345. / 360., 0.14, 0.28, 1.0)
 }
 
 pub(super) fn ui_debug(msg: &str) {

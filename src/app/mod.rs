@@ -103,6 +103,51 @@ struct OwnerChrome {
     exit_code: Option<i32>,
 }
 
+/// Serialises rail-arrangement writes to the daemon.
+///
+/// One long-lived thread, newest-wins. See `push_rail_to_daemon` for why a
+/// thread per call was wrong.
+struct RailPush {
+    tx: std::sync::mpsc::Sender<String>,
+    /// Writes queued or in flight. Non-zero means an inbound `RailPrefs`
+    /// cannot reflect our newest state.
+    pending: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// The last blob handed to the daemon — its broadcast comes back to us.
+    last_sent: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl RailPush {
+    fn spawn(client: std::sync::Arc<GuiClient>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let pending = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pending_w = std::sync::Arc::clone(&pending);
+        std::thread::Builder::new()
+            .name("seance-rail-push".into())
+            .spawn(move || {
+                while let Ok(first) = rx.recv() {
+                    // Coalesce whatever piled up behind it: only the newest
+                    // arrangement is worth a round trip.
+                    let mut json = first;
+                    let mut n = 1usize;
+                    while let Ok(next) = rx.try_recv() {
+                        json = next;
+                        n += 1;
+                    }
+                    if let Err(e) = client.subs_save(&json) {
+                        eprintln!("[seance gui] rail prefs save failed: {e}");
+                    }
+                    pending_w.fetch_sub(n, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+            .ok();
+        Self {
+            tx,
+            pending,
+            last_sent: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
 pub struct SeanceApp {
     panes: Vec<Pane>,
     asks: Vec<PendingAsk>,
@@ -172,24 +217,23 @@ pub struct SeanceApp {
     window_id: Option<String>,
     /// Live windows (multiplayer roster).
     windows: Vec<WindowInfo>,
-    /// This window's subscription set, daemon order. State arrives GLOBAL
-    /// (every workspace, every pane) and is kept whole — the sidebar renders
-    /// the active/parked split locally.
+    /// This window's subscription set, daemon order. Every non-blank window
+    /// subscribes to everything, so this is really just "what the daemon has
+    /// caught up to" — used to re-Subscribe after a rename or reconnect.
     subscriptions: Vec<String>,
-    /// Persisted per-GUI presentation state: which workspaces sit in the
-    /// active band, and which this window has ever looked at (`seen`).
+    /// Persisted per-GUI presentation state: pins, folds, and which circles
+    /// this window has ever looked at (`seen`).
     subs_pref: crate::subscriptions_pref::SubscriptionsPref,
-    /// A cached list was found (or the first State already seeded one).
-    /// Until then, the first State's subscription set becomes the active list.
+    /// Ordered writer for the daemon-owned rail arrangement.
+    rail_push: RailPush,
+    /// Names the arrangement references that the daemon hasn't mentioned →
+    /// when they first went missing. Shields them from `prune` while a `State`
+    /// merely lags (see `ABSENT_GRACE_MS`).
+    absent_since: std::collections::HashMap<String, u64>,
+    /// A cached arrangement was found (or the first State already seeded one).
+    /// Until then the first State marks every known circle seen, so a fresh
+    /// install doesn't badge the whole rail `needs`.
     subs_seeded: bool,
-    /// We adopted the daemon's arrangement and this connection is still
-    /// attached on a different set. Inverts the next `State`: bring the
-    /// connection to the arrangement instead of folding the connection's
-    /// subscriptions into it. Cleared once that reconcile has run.
-    rail_from_daemon: bool,
-    /// Workspaces parked locally whose `Unsubscribe` may still be in flight —
-    /// a State composed before it landed must not re-activate them.
-    park_pending: std::collections::BTreeSet<String>,
     /// Last activity timestamp (ms) per workspace — input/inject/status, not click.
     workspace_touch: std::collections::HashMap<String, u64>,
     /// Last observed pane output per workspace (ms) — sidebar shows "time
@@ -357,25 +401,23 @@ impl SeanceApp {
     /// Empty window: subscribes to no workspaces until one is selected.
     /// A second OS window that subscribes to nothing. Its only caller
     /// ("send to new window") went with the ownership model; phase 2's
-    /// active/parked sidebar re-wires it as "open a window here".
+    /// sidebar re-wires it as "open a window here".
     #[allow(dead_code)]
     pub fn new_empty_window(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_inner(window, cx, true)
     }
 
     fn new_inner(window: &mut Window, cx: &mut Context<Self>, empty: bool) -> Self {
-        // Connect to the session daemon (PTYs live there). The persisted
-        // active list must be read BEFORE connecting — it seeds `Attach`.
+        // Connect to the session daemon (PTYs live there).
         let pref = if empty {
             None
         } else {
             crate::subscriptions_pref::load()
         };
-        let seed: Option<Vec<String>> = pref.as_ref().map(|p| p.active.iter().cloned().collect());
         let (client, event_rx) = if empty {
             GuiClient::connect_empty().expect("gui client connect empty")
         } else {
-            GuiClient::connect(seed).expect("gui client connect to daemon")
+            GuiClient::connect().expect("gui client connect to daemon")
         };
         // `connect()` decides blank-window on its own (second process /
         // SEANCE_EMPTY_WINDOW); such a window must never persist a list.
@@ -402,6 +444,7 @@ impl SeanceApp {
             drawer: Drawer::Closed,
             focus_handle: cx.focus_handle(),
             session_counter: 0,
+            rail_push: RailPush::spawn(Arc::clone(&client)),
             client,
             pending_focus: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
@@ -421,9 +464,8 @@ impl SeanceApp {
             windows: Vec::new(),
             subscriptions: Vec::new(),
             subs_pref: pref.unwrap_or_default(),
+            absent_since: std::collections::HashMap::new(),
             subs_seeded,
-            rail_from_daemon: false,
-            park_pending: std::collections::BTreeSet::new(),
             workspace_touch: std::collections::HashMap::new(),
             workspace_activity: std::collections::HashMap::new(),
             resize_settle: std::collections::HashMap::new(),
@@ -484,23 +526,16 @@ impl SeanceApp {
         app.pane_weights = weights;
         app.row_weights = row_weights;
 
-        // The rail arrangement is daemon-owned too (0.23). The local file read
-        // before connecting was only the `Attach` seed; whatever the daemon
-        // holds is the arrangement, and a window that disagrees is the one
-        // that's wrong. Same blocking-call-at-boot shape as the layout above.
+        // The rail arrangement is daemon-owned too (0.23). Whatever the daemon
+        // holds wins over the local cache, and a window that disagrees is the
+        // one that's wrong. Same blocking-call-at-boot shape as the layout above.
         if !app.empty_window {
             match app.client.subs_load() {
                 Ok(Some(json)) => {
                     if let Some(pref) = crate::subscriptions_pref::parse(&json) {
                         app.subs_pref = pref;
-                        // Don't let the first `State` seed or fold anything in:
-                        // this connection attached on a different set, so the
-                        // connection follows the arrangement, not vice versa.
                         app.subs_seeded = true;
-                        app.rail_from_daemon = true;
                         crate::subscriptions_pref::save(&app.subs_pref);
-                        app.client
-                            .set_subscription_seed(app.subs_pref.active.iter().cloned().collect());
                     }
                 }
                 // A daemon with no copy yet — first window up after the
@@ -723,9 +758,8 @@ impl SeanceApp {
                 self.windows = windows;
                 self.subscriptions = subscriptions;
 
-                // State is global from 0.12 — every workspace, every pane. The
-                // active/parked split is presentation state this window owns,
-                // so nothing is dropped here; the sidebar renders the split.
+                // State is global from 0.12 — every workspace, every pane;
+                // nothing is dropped here.
                 let known: std::collections::BTreeSet<String> = panes
                     .iter()
                     .map(|p| p.workspace.clone())
@@ -1117,15 +1151,16 @@ impl SeanceApp {
                 // Adopt wholesale and DO NOT save: the daemon broadcasts to
                 // every window including the sender, so saving here would put
                 // one pin into an endless round trip.
+                // Our own write coming back would overwrite fresher local
+                // state with an older copy of it — that was a pin undoing
+                // itself, and a click re-partitioning the rail.
+                if !self.rail_prefs_is_foreign(&json) {
+                    return;
+                }
                 if let Some(pref) = crate::subscriptions_pref::parse(&json) {
                     if pref != self.subs_pref {
                         self.subs_pref = pref;
                         crate::subscriptions_pref::save(&self.subs_pref);
-                        self.client
-                            .set_subscription_seed(self.subs_pref.active.iter().cloned().collect());
-                        // Bring this connection to the new arrangement on the
-                        // next State, the same way boot adoption does.
-                        self.rail_from_daemon = true;
                         cx.notify();
                     }
                 }
@@ -1237,7 +1272,12 @@ impl SeanceApp {
                     rt.update(cx, |t, cx| {
                         t.apply_snapshot(snap, cx);
                     });
-                    self.sync_workspace_working_touches();
+                    // Deliberately NO touch bump here. Grid frames arrive only
+                    // for the SELECTED circle, so this edge fires when a stale
+                    // title catches up on click — bumping touch there moved the
+                    // row you just clicked. The falling edge that earns a bump
+                    // is the daemon's `PaneBusy` broadcast, which sees every
+                    // circle.
                     cx.notify();
                 }
                 return;
@@ -1939,7 +1979,7 @@ impl SeanceApp {
             RenameTarget::Workspace(slug) => {
                 // Nothing local to migrate: the slug is the identity and it
                 // does not move. Every map here — touch, unread, focus,
-                // selection, pin/park prefs — is keyed by it and stays
+                // selection, rail prefs — is keyed by it and stays
                 // correct. Optimistically show the new label; the daemon's
                 // next State push confirms it.
                 self.workspace_names
@@ -2266,7 +2306,7 @@ impl SeanceApp {
             return;
         }
         self.subs_pref.flipped = slug;
-        self.save_subscriptions();
+        self.save_arrangement();
     }
 
     /// Materialize `subs_pref.flipped` into a live drawer, or drop the one we
@@ -2687,13 +2727,6 @@ impl Render for SeanceApp {
             }))
             .on_action(cx.listener(|this, act: &ActWakeWorkspace, window, cx| {
                 this.wake_workspace_focused(&act.0.clone(), window, cx);
-            }))
-            .on_action(cx.listener(|this, act: &ActParkWorkspace, window, cx| {
-                this.park_workspace(&act.0.clone(), window, cx);
-            }))
-            .on_action(cx.listener(|this, act: &ActActivateWorkspace, _, cx| {
-                this.activate_workspace(&act.0.clone());
-                cx.notify();
             }))
             .on_action(cx.listener(|this, act: &ActPinWorkspace, _, cx| {
                 this.pin_workspace(&act.0.clone());

@@ -3,8 +3,10 @@
 //!
 //! Two independent axes:
 //!
-//! * **Section** — where a circle sits: pinned, active, sleeping, parked. This
-//!   is lifecycle, and mostly not something you choose.
+//! * **Section** — pinned or not. The rail draws no band headers; pinned rows
+//!   sit above a full-width rule and everything else below it. The enum
+//!   survives because prefix groups fold per band (`pinned/mtg` is not
+//!   `active/mtg`).
 //! * **Group** — visual clustering *inside* a section, from the text before the
 //!   first `-` in a circle's label. Name three circles `mtg-growth`,
 //!   `mtg-ai`, `mtg-carl` and they cluster under `mtg`.
@@ -15,9 +17,8 @@
 //! want only matters for an afternoon. A prefix carried by just one circle is
 //! not a group; it renders as a plain row.
 //!
-//! Each section groups **independently**: `mtg` circles that are awake cluster
-//! under Active, the slept ones cluster under Sleeping, and neither knows
-//! about the other.
+//! Each section groups **independently**: pinned `mtg` circles cluster above
+//! the rule, the rest cluster below it, and neither knows about the other.
 
 use std::collections::BTreeSet;
 
@@ -27,35 +28,21 @@ pub enum Section {
     /// Explicitly pinned. Wins over every other state — a pin is a statement
     /// about where you want to *look*, not about what the circle is doing.
     Pinned,
-    /// Subscribed and awake: the working set.
+    /// Everything else, asleep or not — a slept circle keeps its place and
+    /// says so with its own row styling.
     Active,
-    /// Subscribed but slept — no process, wakeable onto its own conversation.
-    Sleeping,
-    /// Not in this window's active set.
-    Parked,
 }
 
 impl Section {
     /// Top-to-bottom rail order.
-    pub const ALL: [Section; 4] = [
-        Section::Pinned,
-        Section::Active,
-        Section::Sleeping,
-        Section::Parked,
-    ];
+    pub const ALL: [Section; 2] = [Section::Pinned, Section::Active];
 
-    pub fn title(self) -> &'static str {
+    /// Stable key for persisting group-fold state.
+    pub fn key(self) -> &'static str {
         match self {
             Section::Pinned => "pinned",
             Section::Active => "active",
-            Section::Sleeping => "sleeping",
-            Section::Parked => "parked",
         }
-    }
-
-    /// Stable key for persisting collapse state.
-    pub fn key(self) -> &'static str {
-        self.title()
     }
 }
 
@@ -71,40 +58,25 @@ pub enum SectionRow {
     },
 }
 
-/// Split circles into the four bands.
+/// Split circles into the two bands.
 ///
-/// `ordered` carries the sidebar sort, and each band preserves it. Pinned wins
-/// outright; among the rest, being asleep decides Sleeping vs Active, and
-/// anything unsubscribed is Parked. A pinned circle that is asleep stays
-/// pinned — you asked for it to be at the top, and the daemon dozing it off is
-/// not a reason to move it.
+/// `ordered` carries the sidebar sort, and both bands preserve it. A pinned
+/// circle that is asleep stays pinned — you asked for it to be at the top, and
+/// the daemon dozing it off is not a reason to move it.
 pub fn partition_sections(
     ordered: &[String],
-    active: &BTreeSet<String>,
     pinned: &BTreeSet<String>,
-    asleep: &BTreeSet<String>,
 ) -> Vec<(Section, Vec<String>)> {
     let mut pin = Vec::new();
     let mut act = Vec::new();
-    let mut sleep = Vec::new();
-    let mut parked = Vec::new();
     for ws in ordered {
         if pinned.contains(ws) {
             pin.push(ws.clone());
-        } else if !active.contains(ws) {
-            parked.push(ws.clone());
-        } else if asleep.contains(ws) {
-            sleep.push(ws.clone());
         } else {
             act.push(ws.clone());
         }
     }
-    vec![
-        (Section::Pinned, pin),
-        (Section::Active, act),
-        (Section::Sleeping, sleep),
-        (Section::Parked, parked),
-    ]
+    vec![(Section::Pinned, pin), (Section::Active, act)]
 }
 
 /// The grouping key of a label: the text before its first `-`, lowercased.
@@ -193,44 +165,23 @@ mod tests {
     }
 
     #[test]
-    fn sections_split_by_lifecycle_and_pinned_wins() {
+    fn pinned_splits_off_and_everything_else_keeps_its_place() {
         let ordered = v(&["a", "b", "c", "d", "e"]);
-        let bands = partition_sections(
-            &ordered,
-            &set(&["a", "b", "c", "d"]),
-            &set(&["a"]),
-            &set(&["b", "a", "e"]),
-        );
+        let bands = partition_sections(&ordered, &set(&["a"]));
         let by = |s: Section| bands.iter().find(|(k, _)| *k == s).unwrap().1.clone();
-        // `a` is pinned AND asleep — a pin is about where you look.
         assert_eq!(by(Section::Pinned), v(&["a"]));
-        assert_eq!(by(Section::Active), v(&["c", "d"]));
-        assert_eq!(by(Section::Sleeping), v(&["b"]));
-        // `e` is unsubscribed; parked outranks its sleep state.
-        assert_eq!(by(Section::Parked), v(&["e"]));
+        // Asleep or not, everything else stays in one band in sort order.
+        assert_eq!(by(Section::Active), v(&["b", "c", "d", "e"]));
     }
 
     /// Band ORDER is a contract, not an implementation detail: "jump to the
     /// top of the rail" (ctrl+shift+home) is the first name of the first
-    /// non-empty band, so pinned has to come back first and parked last.
+    /// non-empty band, so pinned has to come back first.
     #[test]
     fn bands_come_back_in_rail_order() {
-        let bands = partition_sections(
-            &v(&["a", "b", "c", "d"]),
-            &set(&["a", "b", "c"]),
-            &set(&["c"]),
-            &set(&["b"]),
-        );
+        let bands = partition_sections(&v(&["a", "b", "c", "d"]), &set(&["c"]));
         let order: Vec<Section> = bands.iter().map(|(s, _)| *s).collect();
-        assert_eq!(
-            order,
-            vec![
-                Section::Pinned,
-                Section::Active,
-                Section::Sleeping,
-                Section::Parked
-            ]
-        );
+        assert_eq!(order, vec![Section::Pinned, Section::Active]);
         // Top of the rail with something pinned is that pinned circle, even
         // though `a` sorts first overall.
         let top = bands

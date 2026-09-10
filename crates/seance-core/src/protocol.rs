@@ -71,10 +71,6 @@ pub enum GuiRequest {
     Subscribe {
         workspace: String,
     },
-    /// Drop `workspace` from this connection's subscription set.
-    Unsubscribe {
-        workspace: String,
-    },
     /// Put a whole circle to sleep: every pane's process exits, the last frame
     /// is frozen, identity and claude conversation are kept. Refused unless
     /// every pane in it is restorable.
@@ -263,7 +259,7 @@ pub enum FsOp {
     LayoutSave {
         json: String,
     },
-    /// Shared rail arrangement — active/parked, pins, seen, folds — persisted
+    /// Shared rail arrangement — pins, seen, folds — persisted
     /// beside the layout in the daemon state dir, for the same reason: the
     /// circles you keep in front of you belong to *you*, not to whichever
     /// window you happened to open. → `{json: string|null}`, null before the
@@ -340,11 +336,11 @@ pub enum GuiEvent {
     /// Another window changed the shared rail arrangement. Carries the whole
     /// `subscriptions.json` body — a wholesale replace, not a delta, because
     /// the sender already resolved every implication (pinning activates,
-    /// parking unpins) and re-deriving that here could disagree.
+    /// pinning implies seen) and re-deriving that here could disagree.
     ///
     /// The daemon broadcasts to *all* windows including the sender, so the
     /// receiving side must adopt without saving; saving in response is what
-    /// would turn one park into an endless round trip.
+    /// would turn one pin into an endless round trip.
     RailPrefs {
         json: String,
     },
@@ -521,7 +517,7 @@ pub struct StatusInfo {
 pub struct WorkspaceMeta {
     /// The circle's stable **slug** — its identity. Minted once at creation
     /// and never rewritten, so anything holding it (a pane's environment, a
-    /// client's pin/park prefs, a path on disk) survives a rename.
+    /// client's rail prefs, a path on disk) survives a rename.
     pub workspace: String,
     /// Human-facing label. Free text, mutable, and the only thing a rename
     /// changes. Absent means "same as the slug".
@@ -684,9 +680,6 @@ mod workspace_meta_tests {
         assert_eq!(json, r#"{"op":"subscribe","workspace":"lab"}"#);
         let back: GuiRequest = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, GuiRequest::Subscribe { workspace } if workspace == "lab"));
-        let back: GuiRequest =
-            serde_json::from_str(r#"{"op":"unsubscribe","workspace":"lab"}"#).unwrap();
-        assert!(matches!(back, GuiRequest::Unsubscribe { workspace } if workspace == "lab"));
     }
 
     /// `subscriptions` defaults to empty on a payload that predates it.

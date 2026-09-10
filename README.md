@@ -13,7 +13,7 @@ daemon; the window is disposable.
 
 ![seance](docs/screenshot.png)
 
-**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.25.7
+**License:** MIT · **Platform:** Linux (Wayland / X11) + macOS thin client · **Status:** 0.26.0
 
 Release notes: [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -174,7 +174,7 @@ attention routing free.
 | ctrl+pageup / pagedown | cycle workspaces |
 | ctrl+shift+pageup / pagedown | cycle panes in this workspace |
 | ctrl+shift+v | paste |
-| ctrl+click / middle-click | open OSC-8 / URL (ours → scry, rest → default browser) |
+| ctrl+click / middle-click | open OSC-8 / URL in the default browser |
 | mouse back / forward | walk the circles you've been in |
 | stage chip click | focus + pad drawer |
 | stage chip double-click | zoom |

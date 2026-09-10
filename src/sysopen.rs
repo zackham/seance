@@ -13,14 +13,11 @@ pub fn opener() -> &'static str {
 /// GUI goes through** — a terminal's ctrl/middle-click, a PR chip, a pad link,
 /// the PR board.
 ///
-/// Off-thread because the routing in [`crate::scrylink`] talks to a socket,
-/// and every caller here is a click listener on the render thread.
+/// Off-thread because of the `wait()` below, and every caller here is a click
+/// listener on the render thread.
 pub fn open_detached(target: &str) {
     let target = target.to_string();
     std::thread::spawn(move || {
-        if crate::scrylink::open(&target) {
-            return;
-        }
         // Reaped: nothing is waiting on this thread, and a window that runs
         // for days shouldn't collect a zombie per link click.
         if let Ok(mut child) = spawn_opener(&target) {
@@ -29,12 +26,9 @@ pub fn open_detached(target: &str) {
     });
 }
 
-/// Same routing, on this thread — for CLI paths that return straight into
-/// process exit and would otherwise outlive the thread doing the work.
+/// Same, on this thread — for CLI paths that return straight into process exit
+/// and would otherwise outlive the thread doing the work.
 pub fn open_blocking(target: &str) {
-    if crate::scrylink::open(target) {
-        return;
-    }
     // Deliberately not waited on here: a handler that doesn't fork would hang
     // the command. Exit reaps it.
     let _ = spawn_opener(target);

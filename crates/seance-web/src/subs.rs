@@ -1,20 +1,14 @@
-//! Per-GUI subscription preferences: which circles are **active** (rendered as
-//! today's sidebar rows, streamed by the daemon) and which are **parked** (the
-//! collapsed group underneath).
+//! Per-GUI rail preferences: pins, folds, and which circles this GUI has
+//! looked at. The client subscribes to every circle the daemon knows — the
+//! active/parked split and its park verb were removed in 0.26.
 //!
-//! Active/parked is presentation state owned by *this client*, not the daemon —
-//! the daemon only knows a subscription set, and the two are kept in sync:
-//! every activate sends `Subscribe`, every park sends `Unsubscribe`, and the
-//! `State` push reconciles (a daemon-side auto-subscribe — spawn, fork, create,
-//! select — folds straight back into the active list).
-//!
-//! A subset of the active circles may additionally be **pinned** — rendered in
-//! their own section at the top of the sidebar, above the normal active band.
+//! Circles may be **pinned** — rendered in their own section at the top of the
+//! sidebar, above the normal band.
 //!
 //! Persistence is `localStorage["seance_active"]` =
-//! `{"active":[…],"seen":[…],"pinned":[…]}` behind the [`SubStore`] seam so the
-//! logic stays testable off-wasm (`pinned` is `serde(default)`: blobs written
-//! before pins existed still parse).
+//! `{"seen":[…],"pinned":[…],"collapsed":[…]}` behind the [`SubStore`] seam so
+//! the logic stays testable off-wasm. Every field is `serde(default)`, and an
+//! `active` key from a pre-0.26 blob is simply ignored.
 
 use std::collections::HashSet;
 
@@ -31,25 +25,21 @@ pub fn group_key(section: &str, prefix: &str) -> String {
 /// The persisted per-GUI split.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubPrefs {
-    /// Circles rendered in the main sidebar list (client-side truth).
-    #[serde(default)]
-    pub active: Vec<String>,
-    /// Circles this GUI has acknowledged. An unseen, non-active circle badges
-    /// `needs` until it is first selected ("ctl spawns parked+needs").
+    /// Circles this GUI has acknowledged. One it has never selected badges
+    /// `needs` — that's how a ctl-spawned circle announces itself.
     #[serde(default)]
     pub seen: Vec<String>,
-    /// Circles pinned to their own section at the TOP of the sidebar. A pinned
-    /// circle is always active (pinning a parked one activates it; parking a
-    /// pinned one unpins it). `serde(default)` so pre-pin stored blobs parse.
+    /// Circles pinned to their own section at the TOP of the sidebar.
+    /// `serde(default)` so pre-pin stored blobs parse.
     #[serde(default)]
     pub pinned: Vec<String>,
-    /// Folded rail nodes: a band (`"active"`) or a prefix cluster inside one
-    /// (`"active/mtg"`). `None` = never touched, which folds the quiet bands
-    /// by default; the first fold makes the list authoritative.
+    /// Folded prefix clusters, keyed `"<band>/<prefix>"`. Bands themselves
+    /// stopped being foldable in 0.26 (their headers are gone), so a bare key
+    /// here is dead weight and `prune_collapsed` sweeps it.
     #[serde(default)]
     pub collapsed: Option<Vec<String>>,
-    /// False until a stored list was loaded or the first `State` seeded one.
-    /// Drives the three-valued `Attach.subscriptions` (None = "everything").
+    /// False until a stored blob was loaded or the first `State` seeded one.
+    /// Gates the first-run "mark everything known as seen" pass.
     #[serde(skip)]
     pub seeded: bool,
 }
@@ -67,38 +57,18 @@ impl SubPrefs {
         serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
     }
 
-    pub fn is_active(&self, ws: &str) -> bool {
-        self.active.iter().any(|w| w == ws)
-    }
-
     pub fn has_seen(&self, ws: &str) -> bool {
-        self.is_active(ws) || self.seen.iter().any(|w| w == ws)
-    }
-
-    /// `Attach.subscriptions`: `None` (subscribe to everything) until a list
-    /// exists, then exactly the stored active list.
-    pub fn attach_subscriptions(&self) -> Option<Vec<String>> {
-        self.seeded.then(|| self.active.clone())
-    }
-
-    /// Add to active (and mark seen). Returns whether anything changed.
-    pub fn activate(&mut self, ws: &str) -> bool {
-        let mut changed = self.mark_seen(ws);
-        if !self.is_active(ws) {
-            self.active.push(ws.to_string());
-            changed = true;
-        }
-        changed
+        self.seen.iter().any(|w| w == ws)
     }
 
     pub fn is_pinned(&self, ws: &str) -> bool {
         self.pinned.iter().any(|w| w == ws)
     }
 
-    /// Pin a circle to the top section. Pinning implies active (a parked circle
-    /// is promoted). Returns whether anything changed.
+    /// Pin a circle to the top section. Implies seen. Returns whether anything
+    /// changed.
     pub fn pin(&mut self, ws: &str) -> bool {
-        let mut changed = self.activate(ws);
+        let mut changed = self.mark_seen(ws);
         if !self.is_pinned(ws) {
             self.pinned.push(ws.to_string());
             changed = true;
@@ -106,26 +76,23 @@ impl SubPrefs {
         changed
     }
 
-    /// Drop the pin, leaving the circle active. Returns whether anything changed.
+    /// Drop the pin. Returns whether anything changed.
     pub fn unpin(&mut self, ws: &str) -> bool {
         let before = self.pinned.len();
         self.pinned.retain(|w| w != ws);
         self.pinned.len() != before
     }
 
-    /// Is this rail node folded?
+    /// Is this cluster folded?
     pub fn is_collapsed(&self, key: &str) -> bool {
-        match &self.collapsed {
-            None => matches!(key, "sleeping" | "parked"),
-            Some(list) => list.iter().any(|k| k == key),
-        }
+        self.collapsed
+            .as_ref()
+            .is_some_and(|l| l.iter().any(|k| k == key))
     }
 
     /// Fold / unfold. Always reports `true` — the caller persists.
     pub fn toggle_collapsed(&mut self, key: &str) -> bool {
-        let list = self
-            .collapsed
-            .get_or_insert_with(|| vec!["sleeping".to_string(), "parked".to_string()]);
+        let list = self.collapsed.get_or_insert_with(Vec::new);
         if let Some(i) = list.iter().position(|k| k == key) {
             list.remove(i);
         } else {
@@ -134,30 +101,16 @@ impl SubPrefs {
         true
     }
 
-    /// Drop cluster folds whose group no longer exists; band folds stay.
+    /// Drop folds for clusters that no longer exist. Bare band keys
+    /// (`active`, and `parked`/`sleeping` from older blobs) name nothing
+    /// foldable now and go the same way.
     pub fn prune_collapsed(&mut self, live_groups: &[String]) -> bool {
         let Some(list) = self.collapsed.as_mut() else {
             return false;
         };
         let before = list.len();
-        list.retain(|k| !k.contains('/') || live_groups.iter().any(|g| g == k));
+        list.retain(|k| live_groups.iter().any(|g| g == k));
         before != list.len()
-    }
-
-    /// Remove from active, keeping it seen. Returns whether anything changed.
-    pub fn park(&mut self, ws: &str) -> bool {
-        // Parking a pinned circle drops the pin.
-        let mut changed = self.unpin(ws);
-        if self.is_active(ws) {
-            self.active.retain(|w| w != ws);
-            changed = true;
-        }
-        // `has_seen` reads active too, so record it explicitly on the way out.
-        if !self.seen.iter().any(|w| w == ws) {
-            self.seen.push(ws.to_string());
-            changed = true;
-        }
-        changed
     }
 
     pub fn mark_seen(&mut self, ws: &str) -> bool {
@@ -168,34 +121,21 @@ impl SubPrefs {
         true
     }
 
-    /// First-run migration: no stored list → the active list *is* whatever the
-    /// daemon subscribed us to (Attach sent `None` = everything), and every
-    /// circle that already exists counts as seen so nothing badges `needs`
-    /// retroactively.
-    pub fn seed(&mut self, subscriptions: &[String], known: &[String]) {
-        self.active = subscriptions.to_vec();
+    /// First run: every circle that already exists counts as seen, so an
+    /// upgrade doesn't badge the whole rail `needs`.
+    pub fn seed(&mut self, known: &[String]) {
         self.seen = known.to_vec();
         self.seeded = true;
     }
 
-    /// Fold a `State` push back in: daemon-side auto-subscribes (spawn / fork /
-    /// create / select) join the active list, and circles the daemon no longer
-    /// knows about drop out of both lists. Returns whether anything changed.
-    pub fn reconcile(&mut self, subscriptions: &[String], known: &[String]) -> bool {
+    /// Fold a `State` push back in: circles the daemon no longer knows about
+    /// drop out. Returns whether anything changed.
+    pub fn reconcile(&mut self, known: &[String]) -> bool {
         let known: HashSet<&str> = known.iter().map(String::as_str).collect();
-        let before = (self.active.clone(), self.seen.clone(), self.pinned.clone());
-        for ws in subscriptions {
-            if !self.is_active(ws) {
-                self.active.push(ws.clone());
-            }
-        }
-        self.active.retain(|w| known.contains(w.as_str()));
+        let before = (self.seen.clone(), self.pinned.clone());
         self.seen.retain(|w| known.contains(w.as_str()));
-        // Killed circles drop their pin; a pin can never outlive the active set.
-        let active = &self.active;
-        self.pinned
-            .retain(|w| known.contains(w.as_str()) && active.iter().any(|a| a == w));
-        (self.active.clone(), self.seen.clone(), self.pinned.clone()) != before
+        self.pinned.retain(|w| known.contains(w.as_str()));
+        (self.seen.clone(), self.pinned.clone()) != before
     }
 }
 
@@ -240,26 +180,22 @@ mod tests {
     }
 
     #[test]
-    fn empty_store_is_unseeded_and_attaches_to_everything() {
+    fn empty_store_is_unseeded() {
         let store = MemStore::default();
-        let prefs = load(&store);
-        assert!(!prefs.seeded);
-        assert_eq!(prefs.attach_subscriptions(), None);
+        assert!(!load(&store).seeded);
     }
 
     #[test]
     fn round_trips_through_the_store() {
         let store = MemStore::default();
         let mut prefs = SubPrefs::default();
-        prefs.activate("lab");
-        prefs.park("old");
+        prefs.mark_seen("lab");
+        prefs.mark_seen("old");
         save(&store, &prefs);
 
         let back = load(&store);
         assert!(back.seeded);
-        assert_eq!(back.active, v(&["lab"]));
         assert_eq!(back.seen, v(&["lab", "old"]));
-        assert_eq!(back.attach_subscriptions(), Some(v(&["lab"])));
     }
 
     #[test]
@@ -270,81 +206,44 @@ mod tests {
     }
 
     #[test]
-    fn seed_takes_the_daemon_set_and_marks_everything_seen() {
+    fn seed_marks_everything_known_seen() {
         let mut prefs = SubPrefs::default();
-        prefs.seed(&v(&["lab", "web"]), &v(&["lab", "web", "ghost"]));
+        prefs.seed(&v(&["lab", "web", "ghost"]));
         assert!(prefs.seeded);
-        assert_eq!(prefs.active, v(&["lab", "web"]));
-        // Parked-but-known circles must NOT badge `needs` on first run.
+        // Nothing badges `needs` on first run.
         assert!(prefs.has_seen("ghost"));
-    }
-
-    #[test]
-    fn reconcile_adopts_daemon_auto_subscribes() {
-        let mut prefs = SubPrefs::default();
-        prefs.seed(&v(&["lab"]), &v(&["lab"]));
-        // Daemon subscribed us to a circle we just forked.
-        assert!(prefs.reconcile(&v(&["lab", "fork-1"]), &v(&["lab", "fork-1"])));
-        assert_eq!(prefs.active, v(&["lab", "fork-1"]));
-        // Idempotent.
-        assert!(!prefs.reconcile(&v(&["lab", "fork-1"]), &v(&["lab", "fork-1"])));
     }
 
     #[test]
     fn reconcile_prunes_dead_circles() {
         let mut prefs = SubPrefs::default();
-        prefs.seed(&v(&["lab", "web"]), &v(&["lab", "web", "old"]));
-        assert!(prefs.reconcile(&v(&["lab"]), &v(&["lab"])));
-        assert_eq!(prefs.active, v(&["lab"]));
+        prefs.seed(&v(&["lab", "web", "old"]));
+        assert!(prefs.reconcile(&v(&["lab"])));
         assert!(prefs.seen.iter().all(|w| w == "lab"));
+        assert!(!prefs.reconcile(&v(&["lab"])));
     }
 
     #[test]
-    fn park_then_activate_is_a_round_trip() {
+    fn pin_implies_seen_and_unpin_keeps_it() {
         let mut prefs = SubPrefs::default();
-        prefs.seed(&v(&["lab", "web"]), &v(&["lab", "web"]));
-        assert!(prefs.park("web"));
-        assert!(!prefs.is_active("web"));
-        assert!(prefs.has_seen("web"));
-        assert!(prefs.activate("web"));
-        assert!(prefs.is_active("web"));
-        assert!(!prefs.activate("web"));
-    }
-
-    #[test]
-    fn pin_implies_active_and_unpin_leaves_it_active() {
-        let mut prefs = SubPrefs::default();
-        prefs.seed(&v(&["lab"]), &v(&["lab", "raid"]));
-        // Pinning a PARKED circle activates it too.
+        prefs.seed(&v(&["lab"]));
         assert!(prefs.pin("raid"));
         assert!(prefs.is_pinned("raid"));
-        assert!(prefs.is_active("raid"));
         assert!(prefs.has_seen("raid"));
         // Idempotent.
         assert!(!prefs.pin("raid"));
-        // Unpin keeps it active.
         assert!(prefs.unpin("raid"));
         assert!(!prefs.is_pinned("raid"));
-        assert!(prefs.is_active("raid"));
+        assert!(prefs.has_seen("raid"));
         assert!(!prefs.unpin("raid"));
-    }
-
-    #[test]
-    fn park_unpins() {
-        let mut prefs = SubPrefs::default();
-        prefs.seed(&v(&["lab", "web"]), &v(&["lab", "web"]));
-        prefs.pin("web");
-        assert!(prefs.park("web"));
-        assert!(!prefs.is_pinned("web"));
-        assert!(!prefs.is_active("web"));
     }
 
     #[test]
     fn reconcile_prunes_pins_of_dead_circles() {
         let mut prefs = SubPrefs::default();
-        prefs.seed(&v(&["lab", "web"]), &v(&["lab", "web"]));
+        prefs.seed(&v(&["lab", "web"]));
         prefs.pin("web");
-        assert!(prefs.reconcile(&v(&["lab"]), &v(&["lab"])));
+        assert!(prefs.reconcile(&v(&["lab"])));
         assert!(prefs.pinned.is_empty());
     }
 
@@ -356,42 +255,35 @@ mod tests {
         save(&store, &prefs);
         let back = load(&store);
         assert_eq!(back.pinned, v(&["lab"]));
-        assert_eq!(back.active, v(&["lab"]));
 
-        // Pre-pin localStorage blob: no `pinned` key at all.
+        // Pre-0.26 blob: an `active` key that no longer means anything, and no
+        // `pinned` key at all. Both are ignored rather than fatal.
         let old = SubPrefs::parse(r#"{"active":["lab"],"seen":["lab","old"]}"#).unwrap();
         assert!(old.seeded);
-        assert_eq!(old.active, v(&["lab"]));
+        assert_eq!(old.seen, v(&["lab", "old"]));
         assert!(old.pinned.is_empty());
-        assert!(!old.is_pinned("lab"));
     }
 
     #[test]
-    fn unseen_parked_circle_is_the_ctl_spawn_case() {
+    fn an_unselected_circle_is_the_ctl_spawn_case() {
         let mut prefs = SubPrefs::default();
-        prefs.seed(&v(&["lab"]), &v(&["lab"]));
-        // ctl spawned `raid` with no GUI attribution: known, not subscribed.
-        prefs.reconcile(&v(&["lab"]), &v(&["lab", "raid"]));
-        assert!(!prefs.is_active("raid"));
+        prefs.seed(&v(&["lab"]));
+        // ctl spawned `raid` with no GUI attribution: known, never looked at.
+        prefs.reconcile(&v(&["lab", "raid"]));
         assert!(!prefs.has_seen("raid"));
         prefs.mark_seen("raid");
         assert!(prefs.has_seen("raid"));
     }
-    /// Untouched means the quiet bands are folded; the first fold makes the
-    /// list authoritative so unfolding everything stays unfolded.
+    /// Nothing is folded until the human folds it — no band defaults left.
     #[test]
-    fn collapse_defaults_then_become_authoritative() {
+    fn nothing_is_folded_by_default() {
         let mut p = SubPrefs::default();
-        assert!(!p.is_collapsed("active"));
-        assert!(p.is_collapsed("sleeping") && p.is_collapsed("parked"));
-
-        p.toggle_collapsed("parked");
-        assert!(!p.is_collapsed("parked"));
-        assert!(p.is_collapsed("sleeping"), "the other default survived");
-
-        p.toggle_collapsed("sleeping");
-        assert!(!p.is_collapsed("sleeping"));
-        assert!(!p.is_collapsed("parked"), "does not spring back");
+        let k = group_key("active", "mtg");
+        assert!(!p.is_collapsed(&k));
+        p.toggle_collapsed(&k);
+        assert!(p.is_collapsed(&k));
+        p.toggle_collapsed(&k);
+        assert!(!p.is_collapsed(&k));
     }
 
     /// Cluster folds are per band: folding `mtg` under active leaves the
@@ -407,16 +299,23 @@ mod tests {
         assert!(!p.is_collapsed(&s));
     }
 
-    /// A cluster that no longer exists takes its fold with it; bands stay.
     #[test]
-    fn prune_drops_dead_group_folds_only() {
+    fn prune_drops_dead_group_folds() {
         let mut p = SubPrefs::default();
-        p.toggle_collapsed("active");
         p.toggle_collapsed(&group_key("active", "mtg"));
         p.toggle_collapsed(&group_key("active", "gone"));
         assert!(p.prune_collapsed(&["active/mtg".to_string()]));
         assert!(p.is_collapsed("active/mtg"));
         assert!(!p.is_collapsed("active/gone"));
-        assert!(p.is_collapsed("active"));
+    }
+
+    /// Older blobs carry bare band keys that name nothing foldable now.
+    #[test]
+    fn prune_sweeps_bare_band_folds() {
+        let mut p = SubPrefs::parse(r#"{"collapsed":["parked","sleeping","active/mtg"]}"#).unwrap();
+        assert!(p.prune_collapsed(&["active/mtg".to_string()]));
+        assert!(!p.is_collapsed("parked"));
+        assert!(!p.is_collapsed("sleeping"));
+        assert!(p.is_collapsed("active/mtg"), "live clusters survive");
     }
 }

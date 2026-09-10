@@ -106,11 +106,6 @@ pub struct App {
     /// (native `rename_next_spawn`).
     rename_next_spawn: Cell<bool>,
     session_counter: Cell<u64>,
-    /// `Attach.subscriptions` for the NEXT (re)connect — the persisted active
-    /// list, or `None` on a virgin client ("subscribe to everything", which the
-    /// first `State` then seeds the list from). Shared with `Conn`, which
-    /// re-attaches on every socket open.
-    attach_subs: Rc<RefCell<Option<Vec<String>>>>,
 }
 
 /// localStorage-backed [`subs::SubStore`].
@@ -130,17 +125,13 @@ impl App {
         // Local activity/touch clocks live in the performance.now() domain;
         // the daemon's are unix ms. Capture the offset once at boot so daemon
         // stamps can be converted on ingest (see ClientState::to_perf).
-        // The persisted active/parked split must be loaded BEFORE the first
-        // Attach — it is that request's subscription seed.
         let prefs = subs::load(&LocalStore);
-        let attach_subs = Rc::new(RefCell::new(prefs.attach_subscriptions()));
         let state = ClientState {
             clock_offset_ms: js_sys::Date::now() - now_ms(),
             subs: prefs,
             ..Default::default()
         };
         Rc::new(App {
-            attach_subs,
             state: RefCell::new(state),
             conn: RefCell::new(None),
             chrome: RefCell::new(None),
@@ -272,12 +263,10 @@ impl App {
         }
     }
 
-    /// Write the active/parked split to localStorage and refresh the seed the
-    /// next re-attach will send.
+    /// Write the rail arrangement to localStorage.
     fn persist_subs(&self) {
         let st = self.state.borrow();
         subs::save(&LocalStore, &st.subs);
-        *self.attach_subs.borrow_mut() = st.subs.attach_subscriptions();
     }
 
     /// Pull the daemon-owned rail arrangement on (re)connect.
@@ -311,88 +300,29 @@ impl App {
         let Some(pref) = subs::SubPrefs::parse(json) else {
             return;
         };
-        let newly_active: Vec<String> = {
+        {
             let mut st = self.state.borrow_mut();
-            if st.subs.active == pref.active
-                && st.subs.pinned == pref.pinned
-                && st.subs.seen == pref.seen
-            {
+            if st.subs.pinned == pref.pinned && st.subs.seen == pref.seen {
                 return;
             }
-            let before: HashSet<String> = st.subs.active.iter().cloned().collect();
-            st.subs.active = pref.active.clone();
             st.subs.seen = pref.seen.clone();
             st.subs.pinned = pref.pinned.clone();
             st.subs.seeded = true;
-            pref.active
-                .iter()
-                .filter(|w| !before.contains(*w))
-                .cloned()
-                .collect()
-        };
-        self.persist_subs();
-        // A row we now render but never subscribed to would paint an empty
-        // pane, so bring the stream in line with the adopted arrangement.
-        for workspace in newly_active {
-            self.send(&GuiRequest::Subscribe { workspace });
         }
+        self.persist_subs();
         self.need_rebuild.set(true);
     }
 
-    /// Context menu "add to active" on a parked row.
-    pub fn activate_workspace(self: &Rc<Self>, ws: &str) {
-        if !self.state.borrow_mut().subs.activate(ws) {
-            return;
-        }
-        self.persist_subs();
-        self.send(&GuiRequest::Subscribe {
-            workspace: ws.to_string(),
-        });
-        self.need_rebuild.set(true);
-    }
-
-    /// Context menu "park". Parking the SELECTED circle moves the human to the
-    /// next active one first, so the unsubscribe never lands on the tile area
-    /// they're looking at.
-    pub fn park_workspace(self: &Rc<Self>, ws: &str) {
-        let next = {
-            let st = self.state.borrow();
-            if st.selected_workspace.as_deref() == Some(ws) {
-                st.active_workspaces().into_iter().find(|w| w != ws)
-            } else {
-                None
-            }
-        };
-        if !self.state.borrow_mut().subs.park(ws) {
-            return;
-        }
-        self.persist_subs();
-        self.send(&GuiRequest::Unsubscribe {
-            workspace: ws.to_string(),
-        });
-        match next {
-            Some(n) => self.select_workspace(&n),
-            None => self.need_rebuild.set(true),
-        }
-    }
-
-    /// Context menu "pin": into the top section. A parked circle is activated
-    /// (and subscribed) on the way in — pinned implies active.
+    /// Context menu "pin": into the top section.
     pub fn pin_workspace(self: &Rc<Self>, ws: &str) {
-        let was_active = self.state.borrow().subs.is_active(ws);
         if !self.state.borrow_mut().subs.pin(ws) {
             return;
         }
         self.persist_subs();
-        if !was_active {
-            self.send(&GuiRequest::Subscribe {
-                workspace: ws.to_string(),
-            });
-        }
         self.need_rebuild.set(true);
     }
 
-    /// Context menu "unpin": back into the normal active band (still active).
+    /// Context menu "unpin": back into the normal band.
     pub fn unpin_workspace(self: &Rc<Self>, ws: &str) {
         if !self.state.borrow_mut().subs.unpin(ws) {
             return;
@@ -724,7 +654,7 @@ impl App {
     }
 
     /// Ctrl+PageUp/Down. Parked circles are deliberately out of the rotation —
-    /// that is the point of parking them.
+    /// that is the point of folding them away.
     fn cycle_workspace(self: &Rc<Self>, dir: i32) {
         // Cycle EXACTLY the list the sidebar shows, read live at each press
         // (owner decision 2026-08-02: pageup/down must always correspond to
@@ -984,7 +914,7 @@ impl Actions for AppActions {
             .send(&GuiRequest::CreateWorkspace { name: name.into() });
     }
     fn rename_workspace(&self, old: &str, new: &str) {
-        // A rename sets the label; the slug this circle is pinned/parked under
+        // A rename sets the label; the slug this circle is pinned under
         // does not move, so there is nothing to carry.
         self.0.send(&GuiRequest::RenameWorkspace {
             old: old.into(),
@@ -1093,14 +1023,6 @@ impl Actions for AppActions {
     }
     fn request_rebuild(&self) {
         self.0.need_rebuild.set(true);
-    }
-
-    fn park_workspace(&self, ws: &str) {
-        self.0.park_workspace(ws);
-    }
-
-    fn activate_workspace(&self, ws: &str) {
-        self.0.activate_workspace(ws);
     }
 
     fn pin_workspace(&self, ws: &str) {
@@ -1253,13 +1175,12 @@ impl App {
     }
 
     fn select_workspace(self: &Rc<Self>, ws: &str) {
-        // Selecting a parked circle promotes it: the daemon auto-subscribes on
-        // SetFocus, so the client just mirrors that into its active list.
-        let promoted = {
+        // Selecting is looking — clears the `needs` badge.
+        let looked = {
             let mut st = self.state.borrow_mut();
-            st.subs.activate(ws)
+            st.subs.mark_seen(ws)
         };
-        if promoted {
+        if looked {
             self.persist_subs();
         }
         {
@@ -1292,7 +1213,6 @@ impl App {
         let app_st = Rc::clone(self);
         let conn = conn::connect(
             url,
-            Rc::clone(&self.attach_subs),
             Box::new(move |ev| app_ev.handle_event(ev)),
             Box::new(move |status| {
                 let mut chrome = app_st.chrome.borrow_mut();

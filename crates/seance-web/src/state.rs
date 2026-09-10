@@ -59,9 +59,9 @@ pub struct ClientState {
     pub window_id: Option<String>,
     pub windows: Vec<WindowInfo>,
     /// This connection's subscription set (daemon order). State arrives and is
-    /// KEPT global; the sidebar splits it into active/parked from [`subs`].
+    /// KEPT global — every circle, every pane.
     pub subscriptions: Vec<String>,
-    /// Per-GUI active/parked split (localStorage-backed; see [`crate::subs`]).
+    /// Per-GUI rail prefs: pins, folds, seen (localStorage; see [`crate::subs`]).
     pub subs: SubPrefs,
     /// Set when a fold changed [`subs`] — the app persists and clears it.
     pub subs_dirty: bool,
@@ -92,7 +92,7 @@ pub struct ClientState {
     pub resize_settle: HashMap<String, f64>,
     /// slug → display label, mirrored from `WorkspaceMeta.name`. A circle's
     /// slug is its identity; nothing here is keyed by the label, so a rename
-    /// disturbs none of it — including the localStorage pin/park prefs.
+    /// disturbs none of it — including the localStorage rail prefs.
     pub workspace_names: HashMap<String, String>,
     /// PR links per workspace, daemon-owned (`WorkspaceMeta.pr_links`),
     /// most-recently-seen LAST. Statuses come from the external poller.
@@ -254,58 +254,36 @@ impl ClientState {
         out
     }
 
-    /// Sidebar main list: [`workspaces`](Self::workspaces) restricted to the
-    /// active set. Ctrl+PageUp/Down cycles exactly this.
+    /// Sidebar main list. Ctrl+PageUp/Down cycles exactly this.
     pub fn active_workspaces(&self) -> Vec<String> {
         self.workspaces()
-            .into_iter()
-            .filter(|w| self.subs.is_active(w))
-            .collect()
     }
 
-    /// The pinned section, rendered ABOVE everything else in the sidebar: the
-    /// pinned subset of the active list, with the same working/idle sort
-    /// applied within it (pins reorder among themselves, they don't freeze).
+    /// The pinned section, rendered ABOVE everything else in the sidebar, with
+    /// the same working/idle sort applied within it (pins reorder among
+    /// themselves, they don't freeze).
     pub fn pinned_workspaces(&self) -> Vec<String> {
-        self.active_workspaces()
+        self.workspaces()
             .into_iter()
             .filter(|w| self.subs.is_pinned(w))
             .collect()
     }
 
-    /// The normal active band under the pinned section: active, not pinned.
+    /// The normal band under the pinned section.
     pub fn unpinned_active_workspaces(&self) -> Vec<String> {
-        self.active_workspaces()
+        self.workspaces()
             .into_iter()
             .filter(|w| !self.subs.is_pinned(w))
             .collect()
     }
 
-    /// The collapsed "parked (N)" group: everything else, same sort.
-    pub fn parked_workspaces(&self) -> Vec<String> {
-        self.workspaces()
-            .into_iter()
-            .filter(|w| !self.subs.is_active(w))
-            .collect()
-    }
-
-    /// Row badge including the parked-only rule: a circle this GUI has never
-    /// seen (a `ctl` spawn with no GUI attribution) badges `needs` until it is
-    /// first selected.
+    /// Row badge: a circle this GUI has never selected (a `ctl` spawn with no
+    /// GUI attribution) badges `needs` until it is.
     pub fn row_attention(&self, ws: &str) -> Option<Attention> {
         if !self.subs.has_seen(ws) {
             return Some(Attention::NeedsHuman);
         }
         self.workspace_attention(ws)
-    }
-
-    /// Highest-priority badge among the parked rows — what the collapsed
-    /// header dot shows.
-    pub fn parked_attention(&self) -> Option<Attention> {
-        self.parked_workspaces()
-            .iter()
-            .filter_map(|w| self.row_attention(w))
-            .max_by_key(|a| a.priority())
     }
 
     /// Live-busy as the DAEMON sees it: braille title spinner, or agent-driven
@@ -349,7 +327,7 @@ impl ClientState {
         if self.workspace_has_working_agent(workspace) {
             return Some(Attention::Working);
         }
-        // PR verdicts from the external poller: a red PR resurfaces a parked
+        // PR verdicts from the external poller: a red PR resurfaces a quiet
         // circle exactly like an agent asking for help. Live work still wins.
         if let Some(a) = self.pr_attention(workspace) {
             return Some(a);
@@ -411,25 +389,15 @@ impl ClientState {
     }
 
     /// Bump recency (human typing here / fresh spawn).
-    /// The rail's four bands in display order, each carrying the same sort.
+    /// The rail's two bands in display order, each carrying the same sort.
     pub fn workspace_sections(&self) -> Vec<(Section, Vec<String>)> {
         let ordered = self.workspaces();
-        let active: std::collections::BTreeSet<String> = ordered
-            .iter()
-            .filter(|w| self.subs.is_active(w))
-            .cloned()
-            .collect();
         let pinned: std::collections::BTreeSet<String> = ordered
             .iter()
             .filter(|w| self.subs.is_pinned(w))
             .cloned()
             .collect();
-        let asleep: std::collections::BTreeSet<String> = ordered
-            .iter()
-            .filter(|w| self.workspace_asleep(w))
-            .cloned()
-            .collect();
-        seance_core::grouping::partition_sections(&ordered, &active, &pinned, &asleep)
+        seance_core::grouping::partition_sections(&ordered, &pinned)
     }
 
     /// One band's rows: loose circles and prefix clusters, in sort order.
@@ -662,9 +630,8 @@ impl ClientState {
                 subscriptions,
                 workspace_meta,
             } => {
-                // State is global from 0.12 and STAYS global: the sidebar
-                // renders the active list plus a parked group built from the
-                // same lists, so nothing is dropped at ingest.
+                // State is global from 0.12 and STAYS global — nothing is
+                // dropped at ingest.
                 // Drop grids for panes that no longer exist (reattach after
                 // daemon restart must not paint ghosts).
                 let live: std::collections::HashSet<String> =
@@ -705,15 +672,13 @@ impl ClientState {
                             .insert(m.workspace.clone(), m.pr_links);
                     }
                 }
-                // Active/parked bookkeeping: first State seeds the list
-                // (migration), every State folds daemon-side auto-subscribes
-                // in and prunes circles that are gone.
+                // Rail bookkeeping: first State marks everything known as
+                // looked-at, every State prunes circles that are gone.
                 let known = self.workspaces();
-                let subscriptions = self.subscriptions.clone();
                 if self.subs.seeded {
-                    self.subs_dirty |= self.subs.reconcile(&subscriptions, &known);
+                    self.subs_dirty |= self.subs.reconcile(&known);
                 } else {
-                    self.subs.seed(&subscriptions, &known);
+                    self.subs.seed(&known);
                     self.subs_dirty = true;
                 }
                 self.structure_rev += 1;
@@ -1153,7 +1118,6 @@ mod tests {
     fn displayed_active_ring_is_the_sidebar_order_live() {
         let mut st = ClientState::default();
         st.apply_event(pr_state_event("needs"), 0.0);
-        st.subs.activate("lab");
         st.touch_workspace("raid", 100.0);
         assert_eq!(
             st.displayed_active_ring(),
@@ -1171,7 +1135,6 @@ mod tests {
     fn pinned_section_floats_above_the_active_band_and_owns_the_ring() {
         let mut st = ClientState::default();
         st.apply_event(pr_state_event("needs"), 0.0);
-        st.subs.activate("lab");
         st.touch_workspace("raid", 100.0);
         st.touch_workspace("lab", 200.0);
         // Unpinned order: lab (fresher touch) then raid.
@@ -1199,7 +1162,6 @@ mod tests {
     fn pinned_subset_keeps_the_working_idle_sort_internally() {
         let mut st = ClientState::default();
         st.apply_event(pr_state_event("needs"), 0.0);
-        st.subs.activate("lab");
         st.subs.pin("lab");
         st.subs.pin("raid");
         st.touch_workspace("lab", 100.0);
@@ -1220,15 +1182,16 @@ mod tests {
     }
 
     #[test]
-    fn first_state_seeds_the_active_list_from_the_daemon_set() {
+    fn first_state_marks_every_known_circle_seen() {
         let mut st = ClientState::default();
         st.apply_event(global_state_event(), 0.0);
         assert!(st.subs_dirty, "seeding must be persisted");
-        assert_eq!(st.active_workspaces(), vec!["lab".to_string()]);
-        assert_eq!(st.parked_workspaces(), vec!["raid".to_string()]);
+        assert_eq!(
+            st.active_workspaces(),
+            vec!["lab".to_string(), "raid".to_string()]
+        );
         // Migration marks pre-existing circles seen: no retroactive `needs`.
         assert_eq!(st.row_attention("raid"), None);
-        assert_eq!(st.parked_attention(), None);
     }
 
     /// `lab` only, subscribed — the pre-existing world before a ctl spawn.
@@ -1245,52 +1208,20 @@ mod tests {
         .unwrap()
     }
 
+    /// A circle that shows up after the seed was never selected here, so it
+    /// badges `needs` — the ctl-spawn case, now the only source of that badge.
     #[test]
-    fn ctl_spawned_circle_lands_parked_and_needs_human() {
+    fn a_ctl_spawned_circle_badges_needs_human() {
         let mut st = ClientState::default();
         // Seed with `lab` alone…
         st.apply_event(lab_only_event(), 0.0);
-        assert_eq!(st.parked_workspaces(), Vec::<String>::new());
-        // …then `raid` appears with nobody subscribed to it.
+        // …then `raid` appears, spawned by ctl with no GUI attribution.
         st.subs_dirty = false;
         st.apply_event(global_state_event(), 0.0);
-        assert_eq!(st.parked_workspaces(), vec!["raid".to_string()]);
         assert_eq!(st.row_attention("raid"), Some(Attention::NeedsHuman));
-        assert_eq!(st.parked_attention(), Some(Attention::NeedsHuman));
         // First select acknowledges it.
         st.subs.mark_seen("raid");
         assert_eq!(st.row_attention("raid"), None);
-    }
-
-    #[test]
-    fn parking_moves_a_circle_between_the_two_lists() {
-        let mut st = ClientState::default();
-        st.apply_event(global_state_event(), 0.0);
-        st.subs.activate("raid");
-        assert_eq!(
-            st.active_workspaces(),
-            vec!["lab".to_string(), "raid".to_string()]
-        );
-        assert!(st.parked_workspaces().is_empty());
-        st.subs.park("lab");
-        assert_eq!(st.active_workspaces(), vec!["raid".to_string()]);
-        assert_eq!(st.parked_workspaces(), vec!["lab".to_string()]);
-    }
-
-    #[test]
-    fn both_lists_share_one_sort() {
-        let mut st = ClientState::default();
-        st.apply_event(global_state_event(), 0.0);
-        // Idle band sorts by most recent activity; park both so one call
-        // proves the parked list uses the same key as the active one.
-        st.subs.park("lab");
-        st.workspace_activity.insert("lab".into(), 100.0);
-        st.workspace_activity.insert("raid".into(), 900.0);
-        assert_eq!(
-            st.parked_workspaces(),
-            vec!["raid".to_string(), "lab".to_string()]
-        );
-        assert_eq!(st.parked_workspaces(), st.workspaces());
     }
 
     #[test]
@@ -1377,12 +1308,12 @@ mod tests {
 
     /// A circle is keyed by its slug and shown by its label. Renaming moves
     /// only the label, so everything the client files under the slug — pins,
-    /// park state, activity clocks — is untouched by construction.
+    /// seen, activity clocks — is untouched by construction.
     #[test]
     fn a_label_changes_what_is_shown_and_nothing_else() {
         let mut st = ClientState::default();
         st.apply_event(state_with(&[("lab", "w-1", false)]), 0.0);
-        st.subs.seed(&["lab".to_string()], &["lab".to_string()]);
+        st.subs.seed(&["lab".to_string()]);
         st.subs.pin("lab");
         st.workspace_touch.insert("lab".into(), 123.0);
 

@@ -81,16 +81,12 @@ struct Inner {
 pub struct Conn {
     inner: RefCell<Inner>,
     handlers: RefCell<Handlers>,
-    /// `Attach.subscriptions` seed, owned by the app and re-read on EVERY
-    /// open: parking a circle must not come back after a reconnect.
-    subscriptions: Rc<RefCell<Option<Vec<String>>>>,
 }
 
 /// Open a connection and keep it open. `url` is the full ws URL including
 /// `?token=…`. Returns immediately; status arrives via `on_status`.
 pub fn connect(
     url: String,
-    subscriptions: Rc<RefCell<Option<Vec<String>>>>,
     on_event: Box<dyn FnMut(GuiEvent)>,
     on_status: Box<dyn FnMut(ConnStatus)>,
 ) -> Rc<Conn> {
@@ -114,7 +110,6 @@ pub fn connect(
             on_event,
             on_status,
         }),
-        subscriptions,
     });
     conn.start_ping_timer();
     conn.open();
@@ -295,10 +290,9 @@ impl Conn {
         self.send(&GuiRequest::Attach {
             selected_workspace: None,
             focused_pane: None,
-            // The persisted active list (localStorage `seance_active`), or
-            // None on a virgin client — the daemon then subscribes to every
-            // circle and the first State seeds the list.
-            subscriptions: self.subscriptions.borrow().clone(),
+            // None = every circle. The browser client has no blank-window
+            // mode, so it always wants the lot.
+            subscriptions: None,
         });
         // Queued requests replay only after the re-attach above.
         let queued: Vec<String> = {

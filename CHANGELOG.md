@@ -15,6 +15,112 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [0.26.0] — 2026-09-10
+
+### Added
+
+- **Paste on the phone.** The keyboard accessory bar has a `paste` key, stacked
+  above `done`. It reads the clipboard and bracketed-pastes it into the focused
+  pane through the same `seance_mobile_text` seam typing uses. iOS only lets a
+  long-press Paste menu target a visible editable element and the catcher is
+  1px behind the bar, so there was no reachable paste at all before this.
+  Anything that refuses `navigator.clipboard.readText()` — an http origin, a
+  denied permission, Firefox — falls through to a sheet with a real textarea
+  you can long-press into, so there is always a path.
+
+### Fixed
+
+- **A working agent reads as working again.** `title_looks_busy` matched only
+  the braille spinner, but Claude Code emits circle quadrants now — sampled
+  live, working panes alternated `◐`/`◑` while idle ones sat on `✳`. So the
+  daemon reported "not busy" for every working circle: none of them entered
+  the working band, they all fell into the idle band, and their rows churned
+  against the activity clock — two circles visibly trading places while both
+  worked. Both quadrant frames plus the rest of that rotation now count as
+  busy; `✳` still does not. **Needs the DAEMON replaced, not just the GUI** —
+  the daemon is the authority on busy and broadcasts the verdict.
+
+- **A quicklaunch circle stays pinned.** Quicklaunch pins the instant you
+  click, but the spawn is a round trip, so any `State` composed in that window
+  carried no such circle and `prune` took the pin with it — it pinned, then
+  silently unpinned. Pins on unconfirmed circles are now shielded from `prune`
+  until the circle shows up, or for 15s if it never does.
+
+- **Pins stick, and clicking a circle no longer moves it.** One bug wearing two
+  faces. `push_rail_to_daemon` spawned a thread per call, so two quick actions
+  raced and whichever thread won landed last — pin-then-unpin could persist as
+  unpin-then-pin. Worse, the daemon broadcasts every write back to *every*
+  window including the sender, and the sender adopted it wholesale: a window
+  would overwrite fresh local state with an older copy of its own. That is a
+  pin undoing itself.
+
+  It also explains the jumping rows. Selecting a circle writes the arrangement
+  (it marks the circle seen, to clear `needs`), so a click round-tripped
+  through the same path and could adopt a different `pinned` set, which
+  re-partitions the rail — the clicked circle appeared to leap up the list.
+
+  Writes now go through one long-lived, newest-wins writer, so the last thing
+  you did is the last thing the daemon sees. Inbound `RailPrefs` is ignored
+  while a write of ours is queued or in flight, and ignored when it matches
+  what we last sent; a genuine change from another window still lands.
+
+- **ctrl+click opens the link you clicked.** It ignored the click position
+  outright — `pos`, `cell_w` and `line_h` were all discarded — and opened the
+  first OSC-8 link on screen, falling back to the first bare URL anywhere in
+  the visible grid. In a pane whose scrollback held a PR reference above a
+  plat URL, clicking the plat URL opened the PR. It now maps the click to a
+  cell (the same `cell_at` drag-select already used) and resolves the link
+  covering that cell, or nothing. Column is a char offset, not a byte one, so
+  a wide glyph left of the URL doesn't slide the hit box.
+
+### Changed
+
+- **The rail is two bands with no headers.** Was four (pinned / active /
+  sleeping / parked), then three; now pinned rows sit above a full-width rule
+  and everything else sits below it. Nothing else is chrome. A slept circle
+  keeps its place in the sort and says so with its own row styling instead of
+  being relegated to a band, which is what you actually want when the sleep
+  was the daemon's idea rather than yours. The rule only draws when something
+  is pinned.
+
+  Bands are no longer foldable — their headers were the only affordance — so
+  `collapsed` holds prefix-cluster keys only, and `prune_collapsed` sweeps the
+  bare band keys older blobs carry (`parked`, `sleeping`, `active`). Cluster
+  folds are untouched, and still scoped per band.
+
+- **The selected circle is legible.** `selected_row_fill()` was `border()`
+  (L19) against an L10 rail — nine points of lightness, easy to lose down a
+  long list. Now a lifted warm charcoal at L28, with the web client's `--sel`
+  matching it (it had been on `--surface`, which was worse).
+
+### Removed
+
+- **Parking is gone.** The rail was four bands — pinned, active, sleeping,
+  parked — and the parked one earned its keep back when park meant "hide this
+  from THIS window". Since 0.23 made the arrangement daemon-owned it applied
+  everywhere, which left it a second way to say "get this out of my sight" next
+  to folds, and a worse one: a parked circle kept running where nobody could
+  see it. Three bands now, and every window subscribes to every circle.
+
+  What replaces it: fold a band or a prefix cluster. That already existed, it
+  is per-cluster rather than per-circle, and it does not hide a live process.
+  To actually stop a circle, sleep it.
+
+  Also gone: `GuiRequest::Unsubscribe`, `SubscriptionsPref.active`,
+  `Section::Parked`, the park / add-to-active row menus on both clients, and
+  the `Attach` subscription seed for non-blank windows (blank windows still
+  attach with `Some(vec![])` and stay blank). The `needs` badge survives with a
+  simpler rule — a circle this window has never selected, which is still how a
+  `ctl` spawn announces itself. Older `subscriptions.json` blobs and
+  `localStorage["seance_active"]` blobs carry an `active` key that is now
+  ignored rather than fatal, so pins and folds cross the upgrade intact.
+
+- **Links no longer open in scry.** `localhost` and `ham.xyz` urls went to
+  scry's control socket since 0.22.0; every link now goes to the default
+  browser, same as every other host always did. `src/scrylink.rs` is deleted
+  and `sysopen` is the plain xdg-open/open seam again. Opening still runs off
+  the calling thread — that's the child reap, not the routing.
+
 ## [0.25.7] — 2026-08-28
 
 ### Changed

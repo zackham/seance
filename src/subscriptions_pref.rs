@@ -1,28 +1,28 @@
-//! Active/parked/pinned rail arrangement — the shape of this module, not its
+//! Pinned/seen/folds rail arrangement — the shape of this module, not its
 //! storage. **The daemon owns the arrangement** (`FsOp::SubsLoad/SubsSave`,
 //! beside `layout.json` in its state dir), so the circles you keep in front of
 //! you follow you to any window: desk, mac thin client, browser. Changing it
 //! anywhere pushes [`GuiEvent::RailPrefs`] to every other window.
 //!
 //! `~/.config/seance/subscriptions.json` survives as a **local seed cache**,
-//! not the source of truth. It exists for one reason: the `Attach` seed has to
-//! be readable *before* a daemon connection exists, and attaching with the
-//! arrangement we last saw beats attaching to everything and unsubscribing 40
-//! circles a beat later. The daemon's copy is read straight after connecting
-//! and wins any disagreement.
+//! not the source of truth — the daemon's copy is read straight after
+//! connecting and wins any disagreement.
 //!
-//! Was per-GUI local state through 0.22; see the 0.23 CHANGELOG entry.
+//! Was per-GUI local state through 0.22 (0.23 CHANGELOG). The `active` band
+//! and its park verb were removed in 0.26: every window subscribes to every
+//! circle, so an `active` key in an older blob parses and is discarded.
 //!
-//! Shape: `{ "active": [...], "seen": [...], "pinned": [...],
+//! Shape: `{ "seen": [...], "pinned": [...], "collapsed": [...],
 //! "flipped": "slug" }`.
-//! - `active` — workspaces rendered in the normal sidebar band; everything
-//!   else the daemon knows about lands in the collapsed `parked` group.
-//! - `seen` — every workspace this GUI has ever had in `active`. A workspace
-//!   that appears while parked and was never seen badges `needs` until it is
-//!   first selected ("ctl spawns parked+needs").
-//! - `pinned` — a subset of `active` rendered in its own section at the very
-//!   top of the rail, above a divider. Pinning implies active/subscribed;
-//!   parking unpins first. Same internal sort as every other band.
+//! - `seen` — every workspace this GUI has selected at least once (plus
+//!   everything that already existed on first run). One that appears without
+//!   ever being selected badges `needs` — that's a ctl-spawned circle you
+//!   haven't looked at.
+//! - `pinned` — rendered in its own section at the very top of the rail, above
+//!   a divider. Same internal sort as every other band.
+//! - `collapsed` — folded rail nodes; this is the whole organization story now
+//!   that park is gone. Fold a band or a prefix cluster to get it out of the
+//!   way.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -32,22 +32,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscriptionsPref {
     #[serde(default)]
-    pub active: BTreeSet<String>,
-    #[serde(default)]
     pub seen: BTreeSet<String>,
-    /// Subset of `active` pinned to the top section of the rail. `default` so
-    /// pre-pin files still parse.
+    /// Circles pinned to the top section of the rail. `default` so pre-pin
+    /// files still parse.
     #[serde(default)]
     pub pinned: BTreeSet<String>,
-    /// Collapsed rail nodes: a section (`"active"`) or a prefix group inside
-    /// one (`"active/mtg"`). Collapsing is per-section by design — the `mtg`
-    /// circles you're working in and the ones you've slept are different
-    /// piles, and folding one shouldn't fold the other.
+    /// Folded prefix clusters, keyed `"<band>/<prefix>"`. Scoped per band by
+    /// design: folding the pinned `mtg` cluster leaves the unpinned one open.
     ///
-    /// `None` means never touched, which is not the same as "everything is
-    /// open": the quiet bands start folded. Once the human folds anything the
-    /// set becomes authoritative, so unfolding everything stays unfolded
-    /// instead of springing back to the defaults.
+    /// Bands themselves are no longer foldable — 0.26 dropped the band headers
+    /// that were the only affordance, so a bare key here is dead weight and
+    /// `prune_collapsed` sweeps it. Kept `Option` for the blob shape.
     #[serde(default)]
     pub collapsed: Option<BTreeSet<String>>,
     /// Pane showing its notes face instead of its terminal. Part of the
@@ -107,14 +102,9 @@ pub fn save(pref: &SubscriptionsPref) {
 }
 
 impl SubscriptionsPref {
-    /// Is this rail node folded?
+    /// Is this cluster folded?
     pub fn is_collapsed(&self, key: &str) -> bool {
-        match &self.collapsed {
-            // Never touched: sleeping and parked are piles you open on
-            // purpose; the rest of the rail is what you're working in.
-            None => matches!(key, "sleeping" | "parked"),
-            Some(set) => set.contains(key),
-        }
+        self.collapsed.as_ref().is_some_and(|s| s.contains(key))
     }
 
     /// Unfold `key` if it is folded. Reports whether anything changed, so the
@@ -132,86 +122,46 @@ impl SubscriptionsPref {
 
     /// Fold / unfold. Always reports `true` — the caller persists.
     pub fn toggle_collapsed(&mut self, key: &str) -> bool {
-        let set = self.collapsed.get_or_insert_with(|| {
-            // Materialise the defaults on first touch so they are a starting
-            // point rather than a rule that keeps reasserting itself.
-            ["sleeping", "parked"]
-                .iter()
-                .map(|k| k.to_string())
-                .collect()
-        });
+        let set = self.collapsed.get_or_insert_with(BTreeSet::new);
         if !set.remove(key) {
             set.insert(key.to_string());
         }
         true
     }
 
-    /// Drop group keys whose prefix no longer exists in that section, so a
-    /// cluster you renamed away doesn't leave a fold behind that surprises you
-    /// when the name comes back. Section keys are never pruned.
+    /// Drop folds for clusters that no longer exist, so a cluster you renamed
+    /// away doesn't leave a fold behind that surprises you when the name comes
+    /// back. Bare band keys (`active`, and `parked`/`sleeping` from older
+    /// blobs) name nothing foldable now and go the same way.
     pub fn prune_collapsed(&mut self, live_groups: &BTreeSet<String>) -> bool {
         let Some(set) = self.collapsed.as_mut() else {
             return false;
         };
         let before = set.len();
-        set.retain(|k| !k.contains('/') || live_groups.contains(k));
+        set.retain(|k| live_groups.contains(k));
         before != set.len()
     }
-    /// First `State` after a migration Attach: adopt the daemon's seed as the
-    /// active list, and treat everything currently known as already seen (a
-    /// pre-existing circle isn't "new since you last looked").
-    pub fn seed_from_daemon(&mut self, subscriptions: &[String], known: &BTreeSet<String>) {
-        self.active = subscriptions.iter().cloned().collect();
+    /// First run: everything that already exists counts as looked-at, so an
+    /// upgrade doesn't badge the whole rail `needs`.
+    pub fn seed_seen(&mut self, known: &BTreeSet<String>) {
         self.seen.extend(known.iter().cloned());
     }
 
-    /// Fold the daemon's subscription set into the active list. The daemon
-    /// auto-subscribes on select / spawn / create / fork from *this* window,
-    /// so "the daemon subscribed it" is exactly the auto-add rule — except for
-    /// workspaces we just parked, whose `Unsubscribe` may not have been
-    /// processed when this `State` was composed.
-    ///
-    /// Returns true when the persisted set changed.
-    pub fn adopt_daemon_subscriptions(
-        &mut self,
-        subscriptions: &[String],
-        park_pending: &BTreeSet<String>,
-    ) -> bool {
-        let mut changed = false;
-        for ws in subscriptions {
-            if park_pending.contains(ws) {
-                continue;
-            }
-            changed |= self.activate(ws);
-        }
-        changed
+    /// Record that the human has looked at this circle. Returns true when
+    /// something changed.
+    pub fn mark_seen(&mut self, ws: &str) -> bool {
+        self.seen.insert(ws.to_string())
     }
 
-    /// Add to active (and mark seen). Returns true when something changed.
-    pub fn activate(&mut self, ws: &str) -> bool {
-        let mut changed = self.active.insert(ws.to_string());
-        changed |= self.seen.insert(ws.to_string());
-        changed
-    }
-
-    /// Remove from active, unpinning first — parked is below the divider by
-    /// definition. Stays in `seen`: you've looked at it before, so it must not
-    /// badge `needs` merely for being parked.
-    pub fn park(&mut self, ws: &str) -> bool {
-        let mut changed = self.pinned.remove(ws);
-        changed |= self.active.remove(ws);
-        changed
-    }
-
-    /// Pin to the top section. Pinning implies active + seen (a pinned circle
-    /// the human can't see would be a lie), so a parked circle activates here.
+    /// Pin to the top section. Implies seen — you can't pin what you haven't
+    /// looked at.
     pub fn pin(&mut self, ws: &str) -> bool {
-        let mut changed = self.activate(ws);
+        let mut changed = self.mark_seen(ws);
         changed |= self.pinned.insert(ws.to_string());
         changed
     }
 
-    /// Unpin. The circle stays active — it just falls back below the divider.
+    /// Unpin. The circle falls back below the divider into its lifecycle band.
     pub fn unpin(&mut self, ws: &str) -> bool {
         self.pinned.remove(ws)
     }
@@ -220,41 +170,22 @@ impl SubscriptionsPref {
         self.pinned.contains(ws)
     }
 
+
     /// Drop names the daemon no longer knows about (killed / renamed circles),
     /// so the file doesn't accrete forever. Returns true when it changed.
     pub fn prune(&mut self, known: &BTreeSet<String>) -> bool {
-        let before = (self.active.len(), self.seen.len(), self.pinned.len());
-        self.active.retain(|w| known.contains(w));
+        let before = (self.seen.len(), self.pinned.len());
         self.seen.retain(|w| known.contains(w));
         self.pinned.retain(|w| known.contains(w));
-        before != (self.active.len(), self.seen.len(), self.pinned.len())
+        before != (self.seen.len(), self.pinned.len())
     }
 
-    /// A parked workspace this GUI has never had in its active list — badge
-    /// `needs` until first selected.
+    /// Never selected in this GUI — badge `needs` until it is.
     pub fn never_seen(&self, ws: &str) -> bool {
         !self.seen.contains(ws)
     }
 }
 
-/// Split a display-ordered workspace list into (active, parked), preserving
-/// the caller's sort in both bands.
-pub fn partition(ordered: &[String], active: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
-    let mut act = Vec::new();
-    let mut parked = Vec::new();
-    for ws in ordered {
-        if active.contains(ws) {
-            act.push(ws.clone());
-        } else {
-            parked.push(ws.clone());
-        }
-    }
-    (act, parked)
-}
-
-/// Split a display-ordered workspace list into (pinned, active-unpinned,
-/// parked), preserving the caller's sort inside every band. Pinning implies
-/// active, so a pinned name is claimed by the first band regardless of what
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,23 +197,22 @@ mod tests {
     #[test]
     fn pref_roundtrips_as_arrays() {
         let mut pref = SubscriptionsPref::default();
-        pref.activate("lab");
-        pref.activate("cadence");
+        pref.mark_seen("lab");
+        pref.mark_seen("cadence");
         let json = serde_json::to_string(&pref).unwrap();
-        assert!(json.contains(r#""active":["cadence","lab"]"#), "{json}");
+        assert!(json.contains(r#""seen":["cadence","lab"]"#), "{json}");
         let back: SubscriptionsPref = serde_json::from_str(&json).unwrap();
         assert_eq!(back, pref);
     }
 
     /// The wire codec the daemon hands back over `SubsLoad` / `RailPrefs`.
     /// Every band has to survive the trip — a pin that arrives as an ordinary
-    /// active circle is the bug this guards.
+    /// circle is the bug this guards.
     #[test]
     fn daemon_blob_roundtrips_every_band() {
         let mut pref = SubscriptionsPref::default();
         pref.pin("growth");
-        pref.activate("lab");
-        pref.park("old");
+        pref.mark_seen("lab");
         pref.toggle_collapsed("active/mtg");
         let back = parse(&encode(&pref).unwrap()).unwrap();
         assert_eq!(back, pref);
@@ -300,20 +230,20 @@ mod tests {
         assert!(parse("[1,2,3]").is_none());
     }
 
-    /// A daemon that predates the move sends nothing; the arrangement a
-    /// window already cached locally has to remain usable as the seed.
+    /// A pre-0.26 blob still carries `active`. Serde drops the unknown key, so
+    /// upgrading reads the pins and folds and quietly forgets the band — the
+    /// alternative (a parse failure) would blank the rail on first launch.
     #[test]
-    fn pre_move_local_cache_still_parses_as_a_daemon_blob() {
-        let blob = r#"{"active":["lab"],"seen":["lab"],"pinned":["lab"]}"#;
+    fn a_pre_park_removal_blob_drops_the_active_key() {
+        let blob = r#"{"active":["lab"],"seen":["lab","old"],"pinned":["lab"]}"#;
         let back = parse(blob).unwrap();
-        assert_eq!(back.active, set(&["lab"]));
+        assert_eq!(back.seen, set(&["lab", "old"]));
         assert!(back.is_pinned("lab"));
     }
 
     #[test]
     fn missing_fields_default_empty() {
         let back: SubscriptionsPref = serde_json::from_str("{}").unwrap();
-        assert!(back.active.is_empty());
         assert!(back.seen.is_empty());
         assert!(back.pinned.is_empty());
         assert!(back.flipped.is_none());
@@ -324,7 +254,7 @@ mod tests {
     #[test]
     fn the_notes_face_survives_the_daemon_blob() {
         let mut pref = SubscriptionsPref::default();
-        pref.activate("lab");
+        pref.mark_seen("lab");
         pref.flipped = Some("claude-7".into());
         let back = parse(&encode(&pref).unwrap()).unwrap();
         assert_eq!(back, pref);
@@ -335,8 +265,8 @@ mod tests {
     /// a parse failure that would blank the whole rail.
     #[test]
     fn a_pre_flip_blob_still_parses() {
-        let back = parse(r#"{"active":["lab"],"seen":["lab"],"pinned":[]}"#).unwrap();
-        assert_eq!(back.active, set(&["lab"]));
+        let back = parse(r#"{"seen":["lab"],"pinned":[]}"#).unwrap();
+        assert_eq!(back.seen, set(&["lab"]));
         assert!(back.flipped.is_none());
     }
 
@@ -345,8 +275,7 @@ mod tests {
     #[test]
     fn pre_pin_file_parses_with_empty_pinned() {
         let back: SubscriptionsPref =
-            serde_json::from_str(r#"{"active":["lab"],"seen":["lab","old"]}"#).unwrap();
-        assert_eq!(back.active, set(&["lab"]));
+            serde_json::from_str(r#"{"seen":["lab","old"]}"#).unwrap();
         assert_eq!(back.seen, set(&["lab", "old"]));
         assert!(back.pinned.is_empty());
         assert!(!back.is_pinned("lab"));
@@ -362,38 +291,23 @@ mod tests {
         assert_eq!(back, pref);
     }
 
-    /// Pinning a parked circle also activates it (and marks it seen) — a
-    /// pinned row is always rendered, so it must be subscribed.
     #[test]
-    fn pin_implies_active_and_seen() {
+    fn pin_implies_seen() {
         let mut pref = SubscriptionsPref::default();
         assert!(pref.pin("lab"));
         assert!(pref.is_pinned("lab"));
-        assert!(pref.active.contains("lab"));
         assert!(!pref.never_seen("lab"));
         assert!(!pref.pin("lab"), "re-pinning is a no-op");
     }
 
     #[test]
-    fn unpin_keeps_it_active() {
+    fn unpin_keeps_it_seen() {
         let mut pref = SubscriptionsPref::default();
         pref.pin("lab");
         assert!(pref.unpin("lab"));
         assert!(!pref.is_pinned("lab"));
-        assert!(pref.active.contains("lab"));
-        assert!(!pref.unpin("lab"));
-    }
-
-    /// Parking a pinned circle unpins it first — nothing below the divider is
-    /// allowed to stay in the pinned section.
-    #[test]
-    fn park_unpins() {
-        let mut pref = SubscriptionsPref::default();
-        pref.pin("lab");
-        assert!(pref.park("lab"));
-        assert!(!pref.is_pinned("lab"));
-        assert!(!pref.active.contains("lab"));
         assert!(!pref.never_seen("lab"));
+        assert!(!pref.unpin("lab"));
     }
 
     #[test]
@@ -403,27 +317,21 @@ mod tests {
         pref.pin("gone");
         assert!(pref.prune(&set(&["lab"])));
         assert_eq!(pref.pinned, set(&["lab"]));
-        assert_eq!(pref.active, set(&["lab"]));
+        assert_eq!(pref.seen, set(&["lab"]));
         assert!(!pref.prune(&set(&["lab"])));
     }
 
-    /// Collapse defaults: untouched means the quiet bands are folded, and the
-    /// first fold makes the set authoritative so unfolding everything stays
-    /// unfolded instead of springing back.
+    /// Nothing is folded until the human folds it — there are no band
+    /// defaults left to spring back to.
     #[test]
-    fn collapse_defaults_then_become_authoritative() {
+    fn nothing_is_folded_by_default() {
         let mut pref = SubscriptionsPref::default();
-        assert!(!pref.is_collapsed("active"));
-        assert!(pref.is_collapsed("sleeping"));
-        assert!(pref.is_collapsed("parked"));
-
-        pref.toggle_collapsed("parked");
-        assert!(!pref.is_collapsed("parked"), "unfolded on purpose");
-        assert!(pref.is_collapsed("sleeping"), "the other default survived");
-
-        pref.toggle_collapsed("sleeping");
-        assert!(!pref.is_collapsed("sleeping"));
-        assert!(!pref.is_collapsed("parked"), "does not spring back");
+        let k = group_key("active", "mtg");
+        assert!(!pref.is_collapsed(&k));
+        pref.toggle_collapsed(&k);
+        assert!(pref.is_collapsed(&k));
+        pref.toggle_collapsed(&k);
+        assert!(!pref.is_collapsed(&k));
     }
 
     /// A cluster fold is per section: folding `mtg` under active leaves the
@@ -439,57 +347,43 @@ mod tests {
         assert_eq!(s, "sleeping/mtg", "prefix key is case-insensitive");
     }
 
-    /// A cluster that no longer exists takes its fold with it; band folds stay.
     #[test]
-    fn prune_drops_dead_group_folds_only() {
+    fn prune_drops_dead_group_folds() {
         let mut pref = SubscriptionsPref::default();
-        pref.toggle_collapsed("active");
         pref.toggle_collapsed(&group_key("active", "mtg"));
         pref.toggle_collapsed(&group_key("active", "gone"));
         assert!(pref.prune_collapsed(&set(&["active/mtg"])));
         assert!(pref.is_collapsed("active/mtg"));
         assert!(!pref.is_collapsed("active/gone"));
-        assert!(pref.is_collapsed("active"), "band folds are never pruned");
     }
 
-    /// First run: no file → daemon subscribes everything → adopt it, and
-    /// nothing badges `needs` because everything is marked seen.
+    /// Older blobs carry bare band keys (`parked`, `sleeping`, `active`) that
+    /// name nothing foldable now — sweep them instead of carrying them.
     #[test]
-    fn seed_adopts_daemon_set_and_marks_everything_seen() {
+    fn prune_sweeps_bare_band_folds() {
+        let mut pref = parse(r#"{"collapsed":["parked","sleeping","active/mtg"]}"#).unwrap();
+        assert!(pref.prune_collapsed(&set(&["active/mtg"])));
+        assert!(!pref.is_collapsed("parked"));
+        assert!(!pref.is_collapsed("sleeping"));
+        assert!(pref.is_collapsed("active/mtg"), "live clusters survive");
+    }
+
+    /// First run: everything that already exists counts as looked-at, so an
+    /// upgrade doesn't badge the whole rail.
+    #[test]
+    fn seed_marks_everything_known_seen() {
         let known = set(&["lab", "cadence", "notes"]);
         let mut pref = SubscriptionsPref::default();
-        pref.seed_from_daemon(&["lab".into(), "cadence".into(), "notes".into()], &known);
-        assert_eq!(pref.active, known);
+        pref.seed_seen(&known);
         assert!(!pref.never_seen("notes"));
     }
 
+    /// `needs` is now purely "never selected here" — the ctl-spawned circle
+    /// you haven't looked at yet.
     #[test]
-    fn partition_preserves_sort_in_both_bands() {
-        let ordered: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
-        let (act, parked) = partition(&ordered, &set(&["c", "a"]));
-        assert_eq!(act, vec!["a".to_string(), "c".to_string()]);
-        assert_eq!(parked, vec!["b".to_string(), "d".to_string()]);
-    }
-
-    #[test]
-    fn daemon_subscriptions_auto_add_except_just_parked() {
+    fn unselected_circle_is_the_ctl_spawn_case() {
         let mut pref = SubscriptionsPref::default();
-        pref.activate("lab");
-        pref.park("lab");
-        // Daemon still lists `lab` (Unsubscribe in flight) plus a fresh spawn.
-        let changed =
-            pref.adopt_daemon_subscriptions(&["lab".into(), "spawned".into()], &set(&["lab"]));
-        assert!(changed);
-        assert_eq!(pref.active, set(&["spawned"]));
-    }
-
-    /// Parking is not forgetting: a parked circle must not re-badge `needs`.
-    #[test]
-    fn park_keeps_seen() {
-        let mut pref = SubscriptionsPref::default();
-        pref.activate("lab");
-        pref.park("lab");
-        assert!(!pref.active.contains("lab"));
+        pref.mark_seen("lab");
         assert!(!pref.never_seen("lab"));
         assert!(pref.never_seen("ctl-spawned"));
     }
@@ -497,10 +391,9 @@ mod tests {
     #[test]
     fn prune_drops_dead_workspaces() {
         let mut pref = SubscriptionsPref::default();
-        pref.activate("lab");
-        pref.activate("gone");
+        pref.mark_seen("lab");
+        pref.mark_seen("gone");
         assert!(pref.prune(&set(&["lab"])));
-        assert_eq!(pref.active, set(&["lab"]));
         assert_eq!(pref.seen, set(&["lab"]));
         assert!(!pref.prune(&set(&["lab"])));
     }

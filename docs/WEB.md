@@ -47,14 +47,12 @@ browser (wasm)                      native
 - **Renderer**: glyph-atlas WebGL2, two draw calls per frame (bg pass + glyph
   pass), damage-driven repaints, DPR-exact metrics. Steady-state allocates
   nothing per frame.
-- **Windows**: a web attach is a normal second GUI window. Nothing is owned —
-  each connection carries its own subscription set (`GuiRequest::Subscribe` /
-  `Unsubscribe`), so the same circle can be live in the browser and on the
-  desktop at once. Subscribed circles are **active** in the sidebar;
-  everything else sits in the collapsed **parked** group, and selecting a
-  parked row subscribes it. The active set persists in
-  `localStorage["seance_active"]` (`{active, seen}`) and is replayed on
-  attach; no stored set = subscribe everything.
+- **Windows**: a web attach is a normal second GUI window. Nothing is owned,
+  and the browser subscribes to every circle, so the same circle can be live in
+  the browser and on the desktop at once. The rail arrangement — pins, folds,
+  which circles this browser has looked at — persists in
+  `localStorage["seance_active"]` (`{seen, pinned, collapsed}`), with the
+  daemon's copy winning on connect.
 - **PR chips**: `#topbar` carries `#pr-chips` (`div.pr-chips`, horizontal
   scroll) — one `button.pr-chip[.needs|.done]` per scraped PR of the selected
   circle, most recent first (that chip keeps `id="pr-chip"`). Click opens the
@@ -105,7 +103,7 @@ error (by design).
 
 The native chrome is replicated sincerely: auto-sorted workspace lister
 (working band + touch recency, attention badges, inline rename, banish ×,
-active/parked accordion with park / add-to-active row menus),
+pinned rows above a rule with pin / unpin row menus),
 ◈+ create-workspace, quicklaunch strip (daemon-side json via the fs bridge,
 chips, editor modal, right-click), the claude-accounts host strip, footer
 (+ summon / ≋ activity / ? grimoire), per-row and per-tile context menus,
@@ -115,12 +113,25 @@ both spellings; web ctrl+shift+p/alt+p = probe). Deliberate divergences:
 CSS pulse instead of the braille spinner, context-menu moves instead of
 drag-and-drop, no "send to new window".
 
+## Phone chrome
+
+Everything under `@media (max-width: 820px)` is plain JS in `www/index.html`,
+appended to `<body>` — `ui.rs` clears `#topbar`/`#sidebar` on every re-render
+and would eat anything parented there. It reaches the websocket only through
+the four `seance_mobile_*` exports (`lib.rs`): drawer, circle menu, swipe
+between circles, touch scrollback, voice→prompt, and the keyboard surface —
+a 1px focused `#m-catch` input that raises the system keyboard, plus a
+two-row accessory bar of modifiers / control codes / arrows with `paste` and
+`done` in a right-hand column. Paste goes through `navigator.clipboard`
+(hence https, i.e. the tunnel, not the raw tailnet http URL) and falls back to
+a long-press textarea sheet when the browser refuses.
+
 ## Not yet (honest gaps)
 
 - Scratchpad/file panes, overview mode, prompt/jump palettes, notes flip,
   popout (native-only; listed in the grimoire).
 - Double-click word select; IME composition untested.
-- Touch/mobile keyboard (iOS Safari needs a hidden-input shim) — the intended
-  base for the future native iOS client is `seance-core`, same as this client.
+- The intended base for a future native iOS client is `seance-core`, same as
+  this client.
 - Bridge serves plain HTTP; TLS is delegated to tailscale (`tailscale serve`
   works in front of it).

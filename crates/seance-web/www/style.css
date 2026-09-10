@@ -5,8 +5,9 @@
    Layout mirrors the native GPUI chrome (src/app/sidebar.rs): a 232px
    bg-elevated rail with a 44px brand header, full-bleed selected rows, the
    quicklaunch chip strip, the host-accounts strip and the summon footer.
-   `selected_row_fill()` is `border` in the native palette — so a selected row
-   is var(--border), not a tint.
+   `selected_row_fill()` is `--sel` in the native palette — a lifted warm
+   charcoal, deliberately well clear of --bg-elevated so the selected circle
+   is findable at a glance down a long rail.
 
    Self-contained: no external fonts, images, or stylesheets. */
 
@@ -15,7 +16,9 @@
   --bg-elevated: #1c1718;
   --surface: #211c1d;
   --border: #352c2e;
-  --border-lit: #3f3436; /* border.lighten(0.04) — selected-row hover */
+  --border-lit: #3f3436;
+  --sel: #513d42; /* selected row — mirrors native selected_row_fill() */
+  --sel-lit: #5d464c; /* sel.lighten(0.04) — selected-row hover */
   --text: #ebe3db;
   --text-dim: #a69a91;
   --text-faint: #69605d;
@@ -544,8 +547,11 @@ input:focus {
   background: var(--surface);
 }
 .ws-row.selected .ws-main {
-  background: var(--surface);
+  background: var(--sel);
   border-left-color: var(--flame);
+}
+.ws-row.selected:hover .ws-main {
+  background: var(--sel-lit);
 }
 .ws-row.asleep .ws-main {
   opacity: 0.62;
@@ -672,37 +678,27 @@ input:focus {
 }
 
 /* ── folding bands + prefix clusters ────────────────────────────────── */
-/* Four bands (pinned / active / sleeping / parked), each folding, and inside
-   each a cluster per shared name prefix. Same accordion idiom one level in. */
-.sect-head,
+/* Two bands (pinned, then everything else) with no headers — the pinned band
+   is separated by a full-width rule, drawn only when something is pinned.
+   Inside each band, a folding cluster per shared name prefix. */
+.pin-rule {
+  flex: 0 0 auto;
+  height: 1px;
+  width: 100%;
+  margin: 6px 0;
+  background: var(--border);
+}
+/* A cluster header reads like a row, because conceptually it is one. */
 .grp-head {
   display: flex;
   align-items: center;
   gap: 6px;
   cursor: pointer;
-  font-size: var(--fs-xs);
-}
-.sect-head {
-  height: 18px;
-  padding: 0 8px 0 5px;
-  margin: 12px 0 2px;
-  color: var(--text-faint);
-  /* A landmark you navigate by, not a line you read. */
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-weight: 500;
-}
-.sect-head:first-child {
-  margin-top: 2px;
-}
-/* A cluster header reads like a row, because conceptually it is one. */
-.grp-head {
   height: 28px;
   padding: 0 8px 0 5px;
   font-size: var(--fs-row);
   color: var(--text-dim);
 }
-.sect-head:hover,
 .grp-head:hover {
   background: var(--surface);
 }
@@ -1795,6 +1791,52 @@ input:focus {
   opacity: 0.5;
 }
 
+/* ── manual paste sheet ─────────────────────────────────────────────────── */
+/* Only ever shown when the Clipboard API refuses. A real textarea, because
+   the long-press Paste menu is the one paste path no permission can block. */
+#m-paste {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
+  background: var(--bg);
+}
+#m-paste[hidden] {
+  display: none;
+}
+#m-paste-head {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+#m-paste-hint {
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.4;
+}
+#m-paste-text {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px; /* < 16px makes iOS zoom the viewport on focus */
+  line-height: 1.45;
+}
+#m-paste-bar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: auto;
+}
+
 #m-toast {
   position: fixed;
   z-index: 95;
@@ -1862,7 +1904,9 @@ input:focus {
 .m-acc-right {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
 }
 .m-acc-key {
   flex: 0 0 auto;
@@ -1879,8 +1923,11 @@ input:focus {
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
 }
+/* Stacked in .m-acc-right: split its height so the pair lines up with the
+   two key rows beside them. */
 .m-acc-key.wide {
-  height: 100%;
+  flex: 1 1 0;
+  height: auto;
   min-width: 58px;
 }
 .m-acc-key:active {

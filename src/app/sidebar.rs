@@ -483,81 +483,6 @@ impl SeanceApp {
     /// uppercase, letterspaced, quiet — a landmark you navigate by, not a line
     /// you read. Its caret sits in the same column as every row's glyph, so
     /// the rail has ONE left axis instead of three.
-    fn render_section_header(
-        &self,
-        section: Section,
-        rows: &[String],
-        first: bool,
-        cx: &Context<Self>,
-    ) -> gpui::AnyElement {
-        let key = section.key();
-        let collapsed = self.subs_pref.is_collapsed(key);
-        let count = rows.len();
-        let att = if collapsed {
-            rows.iter()
-                .filter_map(|ws| self.workspace_attention_cx(ws))
-                .max_by_key(|a| a.priority())
-        } else {
-            None
-        };
-        let title = section.title().to_uppercase();
-        div()
-            .id(SharedString::from(format!("section-{key}")))
-            // Air above, tight below: a header belongs to what follows it.
-            .when(!first, |d| d.mt(px(12.)))
-            .mb(px(2.))
-            .pl(px(5.))
-            .pr_2()
-            .h(px(18.))
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .cursor_pointer()
-            .hover(|s| s.bg(SeancePalette::surface()))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.subs_pref.toggle_collapsed(key);
-                this.save_subscriptions();
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(GLYPH_W))
-                    .text_xs()
-                    .text_color(SeancePalette::text_faint())
-                    .child(if collapsed { "\u{25b8}" } else { "\u{25be}" }),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(SeancePalette::text_faint())
-                    .child(title),
-            )
-            .children(att.map(|a| {
-                div().flex_none().text_xs().text_color(a.color()).child(
-                    if matches!(a, WorkspaceAttention::Working) {
-                        working_spinner_glyph()
-                    } else {
-                        "\u{25cf}"
-                    },
-                )
-            }))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(TIME_W))
-                    .text_xs()
-                    .text_right()
-                    .text_color(SeancePalette::text_faint())
-                    .child(count.to_string()),
-            )
-            .into_any_element()
-    }
-
     /// A cluster header. Reads like a row, not like a band — same size and
     /// axis as the circles it holds, because conceptually it is one of them.
     fn render_group_header(
@@ -592,7 +517,7 @@ impl SeanceApp {
             .hover(|s| s.bg(SeancePalette::surface()))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.subs_pref.toggle_collapsed(&toggle_key);
-                this.save_subscriptions();
+                this.save_arrangement();
                 cx.notify();
             }))
             .child(
@@ -633,28 +558,36 @@ impl SeanceApp {
             .into_any_element()
     }
 
-    /// One band, fully rendered: header, then its rows — loose circles at the
-    /// band's indent, clustered ones under their prefix header.
+    /// One band, fully rendered — loose circles at the band's indent,
+    /// clustered ones under their prefix header. Bands carry no header of
+    /// their own: `rule_above` draws the only thing separating them, and only
+    /// under a pinned band that actually has rows.
     fn render_section(
         &self,
         section: Section,
         circles: Vec<String>,
-        first: bool,
+        rule_above: bool,
         cx: &Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let mut out: Vec<gpui::AnyElement> = Vec::new();
         if circles.is_empty() {
             return out;
         }
-        let parked = matches!(section, Section::Parked);
-        out.push(self.render_section_header(section, &circles, first, cx));
-        if self.subs_pref.is_collapsed(section.key()) {
-            return out;
+        if rule_above {
+            out.push(
+                div()
+                    .flex_none()
+                    .my(px(6.))
+                    .h(px(1.))
+                    .w_full()
+                    .bg(SeancePalette::border())
+                    .into_any_element(),
+            );
         }
         for row in self.section_rows(&circles) {
             match row {
                 SectionRow::Circle(ws) => {
-                    out.push(self.render_workspace_group(ws, parked, cx));
+                    out.push(self.render_workspace_group(ws, cx));
                 }
                 SectionRow::Group { prefix, members } => {
                     out.push(self.render_group_header(section, &prefix, &members, cx));
@@ -671,7 +604,7 @@ impl SeanceApp {
                                 .ml(px(CLUSTER_INDENT))
                                 .border_l_1()
                                 .border_color(SeancePalette::border())
-                                .child(self.render_workspace_row(ws, parked, true, cx))
+                                .child(self.render_workspace_row(ws, true, cx))
                                 .into_any_element(),
                         );
                     }
@@ -681,22 +614,15 @@ impl SeanceApp {
         out
     }
 
-    /// One sidebar workspace group. Parked rows use the same builder, sort and
-    /// badges as active ones — only muted, and with a different menu verb.
-    fn render_workspace_group(
-        &self,
-        workspace: String,
-        parked: bool,
-        cx: &Context<Self>,
-    ) -> gpui::AnyElement {
-        self.render_workspace_row(workspace, parked, false, cx)
+    /// One sidebar workspace group.
+    fn render_workspace_group(&self, workspace: String, cx: &Context<Self>) -> gpui::AnyElement {
+        self.render_workspace_row(workspace, false, cx)
     }
 
     /// `in_cluster` dims the shared prefix — see the name column below.
     fn render_workspace_row(
         &self,
         workspace: String,
-        parked: bool,
         in_cluster: bool,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
@@ -717,12 +643,8 @@ impl SeanceApp {
         // circle can be put back exactly (it checks the filesystem, we can't).
         let asleep = self.workspace_asleep(&workspace);
         let sleepable = !asleep && self.workspace_sleepable(&workspace);
-        // Attention: parked rows additionally badge `needs` until first looked at.
-        let attention = if parked {
-            self.parked_attention(&workspace)
-        } else {
-            self.workspace_attention_cx(&workspace)
-        };
+        // Live attention, or `needs` until this window has selected it once.
+        let attention = self.row_attention(&workspace);
         let header: gpui::AnyElement = if renaming_this_ws {
             div()
                 .px_2()
@@ -785,7 +707,6 @@ impl SeanceApp {
                                 cx,
                             );
                         } else {
-                            // Selecting a parked circle promotes it to active.
                             this.select_workspace(&ws_for_click, window, cx);
                         }
                     }),
@@ -799,7 +720,6 @@ impl SeanceApp {
                         let m = if pinned {
                             menu.menu("unpin", Box::new(ActUnpinWorkspace(ws_m.clone())))
                         } else {
-                            // Pinning a parked circle activates it too.
                             menu.menu("pin to top", Box::new(ActPinWorkspace(ws_m.clone())))
                         };
                         let m = m
@@ -808,14 +728,6 @@ impl SeanceApp {
                                 Box::new(ActRenameWorkspace(ws_m.clone())),
                             )
                             .menu("share replay…", Box::new(ActShareReplay(ws_m.clone())));
-                        let m = if parked {
-                            m.menu(
-                                "add to active",
-                                Box::new(ActActivateWorkspace(ws_m.clone())),
-                            )
-                        } else {
-                            m.menu("park circle", Box::new(ActParkWorkspace(ws_m.clone())))
-                        };
                         let m = if asleep {
                             m.menu("awaken circle", Box::new(ActWakeWorkspace(ws_m.clone())))
                         } else if sleepable {
@@ -1003,8 +915,6 @@ impl SeanceApp {
             .flex_col()
             .gap_0p5()
             .mb_0p5()
-            // Parked rows read as a quieter band without a second palette.
-            .when(parked, |d| d.opacity(0.72))
             .drag_over::<DraggedPane>(|style, _, _, _| style.bg(SeancePalette::surface()))
             .on_drop(cx.listener(move |this, drag: &DraggedPane, _, cx| {
                 ui_debug(&format!(
@@ -1023,17 +933,19 @@ impl SeanceApp {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         // Ordered groups, INCLUDING empty workspaces (they render with 0 panes).
-        // State is global now: the active band renders as it always did, and
-        // everything else lands in the collapsed parked group below it.
-        // Pinned circles get their own section at the very top, separated by a
-        // hairline rule; each band carries the same sort.
-        // Four folding bands — pinned, active, sleeping, parked — each
-        // grouping its own circles by name prefix, independently.
-        let section_rows: Vec<gpui::AnyElement> = self
-            .workspace_sections()
+        // Two bands — pinned, then everything else — each grouping its own
+        // circles by name prefix, independently. The only chrome between them
+        // is a rule, and only when something is actually pinned.
+        let bands = self.workspace_sections();
+        let has_pinned = bands
+            .iter()
+            .any(|(s, c)| *s == Section::Pinned && !c.is_empty());
+        let section_rows: Vec<gpui::AnyElement> = bands
             .into_iter()
-            .enumerate()
-            .flat_map(|(i, (section, circles))| self.render_section(section, circles, i == 0, cx))
+            .flat_map(|(section, circles)| {
+                let rule = section == Section::Active && has_pinned;
+                self.render_section(section, circles, rule, cx)
+            })
             .collect();
 
         let _ = window_active; // focus chrome reserved for future empty-window dimming
@@ -1117,9 +1029,6 @@ impl SeanceApp {
                     .flex_col()
                     .gap_1()
                     .children(section_rows)
-                    // Flex filler below the rows. The parked/subscribe menu
-                    // that used to live here (pull / collect) went with the
-                    // ownership model; phase 2 puts the parked group here.
                     .child(div().id("sidebar-empty-hit").flex_1().min_h(px(48.)).w_full())
             })
             // `PRs (N)` sweep button — sits just above the quicklaunch strip so

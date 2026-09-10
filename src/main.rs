@@ -25,7 +25,6 @@ mod remote_term_view;
 mod replayexport;
 mod runtime;
 mod scratchpad;
-mod scrylink;
 mod state;
 mod subscriptions_pref;
 mod sysopen;

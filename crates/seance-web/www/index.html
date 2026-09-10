@@ -301,6 +301,14 @@
           });
           accRows.appendChild(r);
         });
+        var accPaste = mk('button', 'm-acc-paste', 'm-acc-key wide', 'paste');
+        accPaste.type = 'button';
+        accPaste.setAttribute('aria-label', 'paste from clipboard');
+        accPaste.addEventListener('pointerdown', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          doPaste();
+        });
         var accDone = mk('button', 'm-acc-done', 'm-acc-key wide', 'done');
         accDone.type = 'button';
         accDone.addEventListener('pointerdown', function (e) {
@@ -308,6 +316,7 @@
           closeKb();
         });
         var accRight = mk('div', null, 'm-acc-right');
+        accRight.appendChild(accPaste);
         accRight.appendChild(accDone);
         acc.appendChild(accRows);
         acc.appendChild(accRight);
@@ -337,6 +346,116 @@
           e.preventDefault();
           if (kbOpen()) closeKb();
           else openKb();
+        });
+
+        // ── paste ─────────────────────────────────────────────────────────────
+        // The catcher is 1px behind the bar, so iOS's long-press Paste menu
+        // is unreachable — hence a button. readText() needs a secure context
+        // AND a live user gesture, which is why it is called straight out of
+        // pointerdown rather than after any await. Everything that can refuse
+        // it (http origin, denied permission, Firefox) lands on the manual
+        // sheet, which is a real textarea you CAN long-press into.
+        function sendPaste(v) {
+          if (!v) {
+            toast('clipboard is empty');
+            return false;
+          }
+          if (!window.seanceMobile || !window.seanceMobile.text(v, false)) {
+            toast('no pane focused — tap a terminal first');
+            return false;
+          }
+          clearMods();
+          return true;
+        }
+        // Safari's paste-confirm callout steals focus off the catcher, and the
+        // blur handler reads that as "keyboard dismissed" and tears the whole
+        // surface down mid-paste. Hold it off for the round trip.
+        var pasting = false;
+        function endPaste(refocus) {
+          pasting = false;
+          if (refocus && kbOpen() && document.activeElement !== catcher) catcher.focus();
+        }
+        function doPaste() {
+          var cb = navigator.clipboard;
+          if (!cb || !cb.readText) {
+            openPasteSheet(
+              window.isSecureContext
+                ? 'this browser will not hand over the clipboard'
+                : 'clipboard needs https — use the seance.ham.xyz url'
+            );
+            return;
+          }
+          var p;
+          try {
+            pasting = true;
+            p = cb.readText();
+          } catch (e) {
+            endPaste(false);
+            openPasteSheet('clipboard read refused');
+            return;
+          }
+          // A promise that never settles would strand the blur guard.
+          setTimeout(function () {
+            if (pasting) endPaste(true);
+          }, 30000);
+          p.then(function (v) {
+            endPaste(true);
+            sendPaste(v);
+          }).catch(function (err) {
+            endPaste(false);
+            openPasteSheet('clipboard read refused (' + ((err && err.name) || err) + ')');
+          });
+        }
+
+        var pasteSheet = mk('div', 'm-paste');
+        pasteSheet.hidden = true;
+        var pasteHead = mk('div', 'm-paste-head', null, 'paste');
+        var pasteHint = mk('div', 'm-paste-hint', null, '');
+        var pasteTa = mk('textarea', 'm-paste-text');
+        pasteTa.setAttribute('rows', '6');
+        pasteTa.setAttribute('autocapitalize', 'none');
+        pasteTa.setAttribute('autocorrect', 'off');
+        pasteTa.setAttribute('spellcheck', 'false');
+        pasteTa.setAttribute('placeholder', 'long-press here → Paste');
+        // lib.rs listens for `paste` on the document and pushes it at the
+        // focused pane; without this the drop never reaches the textarea and
+        // the sheet looks broken while the text is already gone.
+        pasteTa.addEventListener('paste', function (e) {
+          e.stopPropagation();
+        });
+        var pasteBar = mk('div', 'm-paste-bar');
+        var pasteCancel = mk('button', 'm-paste-cancel', 'm-sheet-btn', 'cancel');
+        pasteCancel.type = 'button';
+        var pasteSend = mk('button', 'm-paste-send', 'm-sheet-btn primary', 'send');
+        pasteSend.type = 'button';
+        pasteBar.appendChild(pasteCancel);
+        pasteBar.appendChild(pasteSend);
+        [pasteHead, pasteHint, pasteTa, pasteBar].forEach(function (el) {
+          pasteSheet.appendChild(el);
+        });
+        body.appendChild(pasteSheet);
+
+        function openPasteSheet(why) {
+          closeKb();
+          pasteHint.textContent = why + ' — long-press the box, tap Paste, then send.';
+          pasteTa.value = '';
+          pasteSheet.hidden = false;
+          body.classList.add('m-paste-open');
+          pasteTa.focus();
+        }
+        function closePasteSheet() {
+          pasteSheet.hidden = true;
+          body.classList.remove('m-paste-open');
+          pasteTa.value = '';
+          pasteTa.blur();
+        }
+        pasteCancel.addEventListener('click', function (e) {
+          e.preventDefault();
+          closePasteSheet();
+        });
+        pasteSend.addEventListener('click', function (e) {
+          e.preventDefault();
+          if (sendPaste(pasteTa.value)) closePasteSheet();
         });
 
         // Typed characters. iOS software keyboards don't produce reliable
@@ -382,6 +501,7 @@
         // iOS can dismiss the keyboard without telling us (swipe-down, form
         // bar "Done"); the blur is the only signal, so mirror our state to it.
         catcher.addEventListener('blur', function () {
+          if (pasting) return;
           if (kbOpen()) setTimeout(function () {
             if (document.activeElement !== catcher && kbOpen()) closeKb();
           }, 60);
@@ -846,6 +966,7 @@
         document.addEventListener('keydown', function (e) {
           if (e.key !== 'Escape') return;
           if (document.activeElement === catcher) return;
+          if (!pasteSheet.hidden) closePasteSheet();
           if (!sheet.hidden) closeSheet();
           setNav(false);
         });

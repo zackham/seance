@@ -105,10 +105,10 @@ way as Linux (`scripts/bootstrap-deps.sh` symlinks `deps/zed`, then
 ## Workspaces on a second machine
 
 A thin-client window follows the normal multi-window model: nothing is owned,
-each window subscribes to the circles it wants (0.12). **The arrangement
-itself — active/parked, pins, folds — is daemon-owned as of 0.23**, so a mac
+and every window subscribes to every circle (0.26 — the park verb is gone).
+**The arrangement itself — pins, folds — is daemon-owned as of 0.23**, so a mac
 window opens on the same rail as the desk, in the same order, with the same
-circles pinned. Park something here and it parks there; the daemon pushes the
+circles pinned. Pin something here and it pins there; the daemon pushes the
 change to every attached window (`~/.local/share/seance/subscriptions.json`
 on the daemon host, beside `layout.json`).
 

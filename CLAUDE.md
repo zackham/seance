@@ -61,7 +61,8 @@ src/app/               the GPUI app, split by surface:
   chrome.rs            render_pane, help overlay, asks/activity/stage strips
   pads.rs              scratchpad drawer + phone spine
   overview.rs          ctrl+shift+space live map
-  sidebar.rs           left rail: active/parked workspace rows, context menus, host list
+  sidebar.rs           left rail: pinned rows above a rule, everything else below,
+                       context menus, host list
   tiles.rs             tile grid + sashes + zoom
   palette.rs           command palette
   quicklaunch.rs       launch strip: quicklaunch chips + create/edit modal
@@ -70,7 +71,7 @@ src/app/               the GPUI app, split by surface:
                        that runs `list_cmd` on click, drops a picker, runs
                        `select_cmd` on choice. On-demand twin of the polled
                        host widgets — see docs/HOST.md
-  workspaces.rs        workspace state ops + WorkspaceAttention + active/parked
+  workspaces.rs        workspace state ops + WorkspaceAttention + band
                        partition + NavHistory (mouse back/forward visit path,
                        kept by watching the selection each render)
   prlinks.rs           PR header chip + all-links popover + pr_attention helper
@@ -98,17 +99,16 @@ src/mdfold.rs          markdown section folding — a PURE model over the source
                        (path-keyed folds, `seance-h` fences the pane renders
                        itself). Deliberately not a fork of gpui-component's
                        markdown stack; see docs/FILE-PANES.md
-src/subscriptions_pref.rs  rail arrangement (active/parked/pinned/folds) — DAEMON-owned
+src/subscriptions_pref.rs  rail arrangement (pins/seen/folds) — DAEMON-owned
                        since 0.23 via FsOp::SubsLoad/SubsSave; the local
                        ~/.config/seance/subscriptions.json is only the Attach
                        seed cache. Changes broadcast as GuiEvent::RailPrefs
 src/launch.rs          launch preference (local vs remote host, persisted)
 src/picker.rs          startup picker window (choose daemon location)
 src/sysopen.rs         portability helpers + THE link-open seam (open_detached
-                       / open_blocking; every click that opens a url)
-src/scrylink.rs        route our own hosts (localhost, ham.xyz) to scry's
-                       control socket, workspace `general`; fails to the
-                       default browser on anything unexpected
+                       / open_blocking; every click that opens a url). Every
+                       link goes to the default browser — the scry routing
+                       that lived here (0.22–0.25.7) is gone, don't re-add it
 src/runtime/outqueue.rs per-connection send queue; grid frames COALESCE (one
                        pending frame per pane, damage row-sets unioned against
                        the newest snapshot). Semantic events stay strict FIFO.
@@ -209,7 +209,7 @@ to synchronize.
 A circle has a **slug** (minted once at creation, never rewritten) and a
 **label** (free text, what a rename changes). Same split panes have. Everything
 is keyed by the slug: panes, activity clocks, PR links + dismissals,
-selections, subscriptions, client pin/park prefs, and `$SEANCE_WORKSPACE` in
+selections, subscriptions, client rail prefs, and `$SEANCE_WORKSPACE` in
 every running pane's environment — which is the case that forced the change,
 since nothing can write into the environment of a process already running.
 **Do not reintroduce rename migrations**; if you find yourself carrying state

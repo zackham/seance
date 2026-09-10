@@ -120,7 +120,7 @@ same idiom as the host-widget poller), merges verdicts onto URLs it already
 scraped — never adding new ones — and pushes state when something actually
 changed. Malformed entries are dropped individually, so a poller bug can't
 blank every chip. `attention: "needs"` folds into the normal workspace
-attention machinery (a parked circle lights its dot); `done` reads as
+attention machinery (a folded-away circle lights its band dot); `done` reads as
 resolved. Config seam, quicklaunch-style: swap the poller, keep the daemon.
 
 ## Layout on disk

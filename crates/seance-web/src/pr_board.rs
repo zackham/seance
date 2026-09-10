@@ -87,7 +87,6 @@ pub struct BoardSection {
     pub circle: String,
     /// What to show. Falls back to the slug when the circle has no label.
     pub label: String,
-    pub parked: bool,
     /// Any row wants a human — sorts this section to the top.
     pub needs: bool,
     /// Most recent PR activity in this circle (unix ms), the secondary sort.
@@ -179,7 +178,6 @@ impl Board {
             board.sections.push(BoardSection {
                 circle: ws.clone(),
                 label: state.workspace_label(ws),
-                parked: !state.subs.is_active(ws),
                 needs,
                 last_ms,
                 rows,
@@ -374,7 +372,7 @@ pub fn board_html(board: &Board) -> String {
             out.push_str(r#"<span class="prb-circle-needs">needs</span>"#);
         }
         out.push_str(r#"<span class="prb-circle-state">"#);
-        out.push_str(if sec.parked { "parked" } else { "active" });
+        out.push_str("active");
         out.push_str("</span></div>");
         for row in &sec.rows {
             out.push_str(&row_html(row, &sec.circle));
@@ -667,7 +665,6 @@ mod tests {
         for (ws, ls) in links {
             st.workspace_order.push((*ws).to_string());
             st.workspace_pr_links.insert((*ws).to_string(), ls.clone());
-            st.subs.activate(ws);
         }
         st
     }
@@ -839,17 +836,6 @@ mod tests {
                 sec.circle
             );
         }
-    }
-
-    #[test]
-    fn parked_circles_are_marked_and_included() {
-        let mut st = state_with(&[(
-            "raid",
-            vec![link("https://github.com/o/r/pull/1", open_pr(1.0))],
-        )]);
-        st.subs.park("raid");
-        let b = Board::build(&st, NOW);
-        assert!(b.sections[0].parked);
     }
 
     #[test]

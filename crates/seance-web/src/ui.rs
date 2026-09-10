@@ -22,8 +22,8 @@
 //!   working, `needs`/`done` text badges in their colors, hover `×` banish,
 //!   pane count, full-bleed selected fill, double-click inline rename, per-row
 //!   context menu: touch / rename / fork ⑂ / share replay / pin (or "unpin" on
-//!   a pinned row) / park (or "add to active" on a parked row) / banish),
-//!   the pinned section + `.pinned-divider` on top, the collapsed parked group,
+//!   a pinned row) / banish),
+//!   the pinned section + `.pinned-divider` on top,
 //!   quicklaunch chip strip, host-accounts strip, footer (`+ summon` flex-1
 //!   flame · activity `≋` · help `?` violet).
 //! * **quicklaunch** — daemon-side `~/.config/seance/quicklaunch.json` over the
@@ -47,10 +47,9 @@
 //!    to the same list op).
 //! 3. **No window-targeted workspace moves.** Workspaces are global
 //!    subscriptions (0.12) — nothing is "sent" anywhere; the ✦ census popover
-//!    is the roster. The sidebar splits into the active list plus a collapsed
-//!    `parked (N)` group, with a pinned subset hoisted into its own section
-//!    above both (row menus: "pin"/"unpin", "park"/"add to active"), persisted
-//!    per browser in `localStorage["seance_active"]`.
+//!    is the roster. The sidebar renders every circle, with a pinned subset
+//!    hoisted into its own section above the rest (row menu "pin"/"unpin"),
+//!    persisted per browser in `localStorage["seance_active"]`.
 //! 4. **Topbar.** Native has no topbar; the web client needs a permanent
 //!    connection indicator (native is always local) and the latency probe
 //!    toggle, so a slim `#topbar` carries those plus the selected circle's name.
@@ -573,7 +572,7 @@ impl Chrome {
         let doc = self.doc.clone();
         self.sidebar.set_inner_html("");
 
-        // `◈+` / quicklaunch uniquify against EVERY known circle, parked too.
+        // `◈+` / quicklaunch uniquify against EVERY known circle.
         let all: Vec<String> = sections.iter().flat_map(|(_, c)| c.clone()).collect();
         self.build_brand(state, &all)?;
 
@@ -592,9 +591,15 @@ impl Chrome {
             list.append_child(&empty)?;
         }
 
-        // Four folding bands, each grouping its own circles by name prefix.
+        // Two bands — pinned, then everything else — each grouping its own
+        // circles by name prefix. The only chrome between them is a rule, and
+        // only when something is actually pinned.
+        let has_pinned = sections
+            .iter()
+            .any(|(s, c)| *s == Section::Pinned && !c.is_empty());
         for (section, circles) in &sections {
-            self.build_section(&list, state, *section, circles, selected)?;
+            let rule = *section == Section::Active && has_pinned;
+            self.build_section(&list, state, *section, circles, selected, rule)?;
         }
 
         // Flex filler below the rows.
@@ -699,11 +704,10 @@ impl Chrome {
         state: &ClientState,
         ws: &str,
         selected: Option<&str>,
-        parked: bool,
         in_cluster: bool,
     ) -> Result<(), JsValue> {
         let doc = self.doc.clone();
-        let is_selected = Some(ws) == selected && !parked;
+        let is_selected = Some(ws) == selected;
         let pinned = state.subs.is_pinned(ws);
         let activity = state.activity_label(ws, self.now_ms());
         let att = state.row_attention(ws);
@@ -714,9 +718,6 @@ impl Chrome {
             let mut c = String::from("ws-row");
             if is_selected {
                 c.push_str(" selected");
-            }
-            if parked {
-                c.push_str(" parked");
             }
             if asleep_pre {
                 c.push_str(" asleep");
@@ -853,15 +854,6 @@ impl Chrome {
                     }));
                 }
                 entries.push(MenuEntry::Separator);
-                {
-                    let a = actions.clone();
-                    let w = ws.clone();
-                    entries.push(if parked {
-                        MenuEntry::item("add to active", move || a.activate_workspace(&w))
-                    } else {
-                        MenuEntry::item("park", move || a.park_workspace(&w))
-                    });
-                }
                 if row_asleep {
                     let a = actions.clone();
                     let w = ws.clone();
@@ -920,12 +912,9 @@ impl Chrome {
         Ok(())
     }
 
-    /// The parked group: a collapsed accordion under the active rows. Header
-    /// `parked (N)` + caret; collapsed it carries the highest-priority
-    /// attention dot among its rows, so a `ctl` spawn or a finished agent still
-    /// pulls the eye. Expanded state is session-local (never persisted).
-    /// One band: a folding header, then its rows — loose circles at the band
-    /// indent, clustered ones under their prefix header.
+    /// One band's rows — loose circles at the band indent, clustered ones
+    /// under their prefix header. Bands carry no header of their own;
+    /// `rule_above` draws the only thing separating them.
     fn build_section(
         &mut self,
         list: &Element,
@@ -933,40 +922,22 @@ impl Chrome {
         section: Section,
         circles: &[String],
         selected: Option<&str>,
+        rule_above: bool,
     ) -> Result<(), JsValue> {
         if circles.is_empty() {
             return Ok(());
         }
         let doc = self.doc.clone();
         let key = section.key().to_string();
-        let open = !state.subs.is_collapsed(&key);
-        let parked = matches!(section, Section::Parked);
-
-        let att = if open {
-            None
-        } else {
-            circles
-                .iter()
-                .filter_map(|w| state.row_attention(w))
-                .max_by_key(|a| a.priority())
-        };
-        let head = self.build_fold_head(
-            &format!("sect-{key}"),
-            "sect-head",
-            open,
-            &format!("{} {}", section.title(), circles.len()),
-            att,
-            &key,
-        )?;
-        list.append_child(&head)?;
-        if !open {
-            return Ok(());
+        if rule_above {
+            let rule = mk(&doc, "div", "pin-rule")?;
+            list.append_child(&rule)?;
         }
 
         for row in state.section_rows(circles) {
             match row {
                 SectionRow::Circle(ws) => {
-                    self.build_ws_row(list, state, &ws, selected, parked, false)?;
+                    self.build_ws_row(list, state, &ws, selected, false)?;
                 }
                 SectionRow::Group { prefix, members } => {
                     let gkey = group_key(&key, &prefix);
@@ -994,7 +965,7 @@ impl Chrome {
                     let nest = mk(&doc, "div", "grp-rows")?;
                     list.append_child(&nest)?;
                     for ws in &members {
-                        self.build_ws_row(&nest, state, ws, selected, parked, true)?;
+                        self.build_ws_row(&nest, state, ws, selected, true)?;
                     }
                 }
             }

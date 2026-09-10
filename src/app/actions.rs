@@ -45,12 +45,6 @@ pub struct ActTogglePopout(pub String);
 #[action(namespace = seance, no_json)]
 pub struct ActKillWorkspace(pub String);
 
-/// Move a circle out of this GUI's active band into the parked group
-/// (`Unsubscribe`) — nothing happens to any other GUI.
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActParkWorkspace(pub String);
-
 /// Sleep a circle: every pane's process exits, the last frame stays readable,
 /// and it wakes back onto the same conversations. Daemon-side and global.
 #[derive(Action, Clone, PartialEq, Deserialize)]
@@ -62,17 +56,12 @@ pub struct ActSleepWorkspace(pub String);
 #[action(namespace = seance, no_json)]
 pub struct ActWakeWorkspace(pub String);
 
-/// The inverse: parked → active (`Subscribe`), without selecting it.
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = seance, no_json)]
-pub struct ActActivateWorkspace(pub String);
-
-/// Pin a circle into the sidebar's top section (implies active/`Subscribe`).
+/// Pin a circle into the sidebar's top section.
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]
 pub struct ActPinWorkspace(pub String);
 
-/// The inverse: back down into the normal active band, still subscribed.
+/// The inverse: back down into the normal band.
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = seance, no_json)]
 pub struct ActUnpinWorkspace(pub String);

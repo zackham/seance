@@ -48,18 +48,13 @@ pub trait Actions {
     /// (uniquified against all known workspaces), single pane,
     /// no rename prompt.
     fn quicklaunch(&self, name: &str, cwd: Option<String>, command: Option<String>);
-    /// Sidebar row menu "park": drop a circle out of the active list (and out
-    /// of the daemon subscription) into the parked group.
-    fn park_workspace(&self, ws: &str);
-    /// Parked row menu "add to active": subscribe + promote, without selecting.
-    fn activate_workspace(&self, ws: &str);
     /// Sidebar row menu "pin": move a circle into the pinned section at the top
-    /// of the rail. Pinning a parked circle activates it first.
+    /// of the rail.
     fn pin_workspace(&self, ws: &str);
-    /// Pinned row menu "unpin": back to the normal active band.
+    /// Pinned row menu "unpin": back to the normal band.
     fn unpin_workspace(&self, ws: &str);
     /// Repaint chrome on the next frame (client-only view state changed —
-    /// e.g. the parked accordion opened).
+    /// e.g. a band unfolded).
     fn request_rebuild(&self);
     /// Fold / unfold a rail band or prefix cluster, and persist it.
     fn toggle_collapsed(&self, key: &str);

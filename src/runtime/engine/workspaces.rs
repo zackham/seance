@@ -4,7 +4,7 @@
 //! what you read — and it is why renaming a pane costs nothing. Circles did
 //! not: the display name *was* the key, so a rename rewrote the identity and
 //! every structure keyed by it had to be migrated by hand. Eight of them in
-//! the daemon, six more plus the pin/park prefs in the native GUI, the same
+//! the daemon, six more plus the rail prefs in the native GUI, the same
 //! again in the web client — and one that no migration can ever reach, the
 //! `SEANCE_WORKSPACE` already baked into a running pane's environment. That
 //! last one is unfixable under the old model: you cannot write into the
@@ -116,7 +116,7 @@ impl Engine {
 
     /// Rename = set the label. The slug does not move, so nothing keyed by it
     /// needs migrating: panes, activity clocks, PR links, dismissals,
-    /// subscriptions, selections, client pin/park prefs and every running
+    /// subscriptions, selections, client rail prefs and every running
     /// pane's `SEANCE_WORKSPACE` all keep pointing at the same circle.
     ///
     /// Returns the resolved slug, or `None` when `key` names nothing.

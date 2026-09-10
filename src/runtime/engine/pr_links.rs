@@ -4,7 +4,7 @@
 //! `runtime/pr_scrape.rs`). Their **statuses** come from an external poller
 //! that writes `<state_dir>/pr_watch.json`; the daemon re-reads it on mtime
 //! change (`daemon/prwatch.rs`) and merges the verdicts in. Clients then fold
-//! `attention` into the existing workspace attention machinery, so a parked
+//! `attention` into the existing workspace attention machinery, so a folded-away
 //! circle with a red PR resurfaces exactly like an agent asking for help.
 
 use std::collections::HashMap;
