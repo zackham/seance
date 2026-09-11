@@ -14,6 +14,27 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 3. Update any version-pinned contracts in `CLAUDE.md` if behavior changed
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
+## [Unreleased]
+
+### Fixed
+
+- **A blank window's pins are real pins.** `save_arrangement` no-opped on a
+  blank window, on the theory that a window owning no arrangement must not
+  clobber the shared one. The effect was worse than the thing it guarded: a pin
+  clicked in a blank window rendered as pinned and was stored nowhere, so it
+  evaporated on the next restart — the UI said pinned and nothing was. Blank
+  windows now adopt the arrangement at boot (skipping that left them showing an
+  empty pinned band, which reads as "my pins are gone") and persist deliberate
+  changes. Incidental bookkeeping stays local for every window alike, which is
+  what actually protects the shared copy.
+
+- **`restart-gui` stops manufacturing blank windows.** It sent SIGTERM and
+  relaunched immediately — but `kill` returns when `kill(1)` exits, not when
+  the target does, and a GUI takes a moment to tear down its GPU context. The
+  new process saw the old one still in `pgrep` and came up as a BLANK second
+  window, which (see above) then silently discarded everything you pinned in
+  it. It now waits for the killed pids to actually leave `/proc`, with a 5s
+  deadline and a SIGKILL for stragglers.
 
 ## [0.26.0] — 2026-09-10
 

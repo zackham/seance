@@ -149,6 +149,7 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("restart-gui") {
         let self_pid = std::process::id();
         let mut killed = 0u32;
+        let mut dying: Vec<u32> = Vec::new();
         if let Ok(out) = std::process::Command::new("pgrep")
             .args(["-x", "seance"])
             .output()
@@ -164,8 +165,30 @@ fn main() {
                     continue;
                 }
                 let _ = std::process::Command::new("kill").arg(pid_s).status();
+                dying.push(pid);
                 killed += 1;
             }
+        }
+        // WAIT for them to actually go. `kill` returns when kill(1) exits, not
+        // when the target does, and a GUI takes a moment to tear down its GPU
+        // context. Relaunching into that window meant the new process saw the
+        // old one in pgrep and came up as a BLANK second window — which used to
+        // silently discard every pin you placed in it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            dying.retain(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
+            if dying.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        for pid in &dying {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
+        }
+        if !dying.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
         eprintln!("[seance] stopped {killed} gui process(es); daemon left running");
         // Relaunch GUI in this process by falling through — but we're still

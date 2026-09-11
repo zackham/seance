@@ -273,10 +273,15 @@ impl SeanceApp {
     /// Persist a DELIBERATE arrangement change — pin, unpin, a fold you
     /// clicked, the notes face — locally and to the daemon, which shares it
     /// with every other window.
+    ///
+    /// Blank windows persist too. They used to no-op here on the theory that a
+    /// window owning no arrangement must not clobber one, but that made a pin
+    /// placed in a blank window render and then evaporate on restart — the UI
+    /// said pinned and nothing was stored. A blank window is only blank in
+    /// what it ATTACHES to; a pin you click in it is still something you asked
+    /// for. Incidental bookkeeping stays local for every window alike, which
+    /// is what actually protects the shared copy.
     pub(super) fn save_arrangement(&self) {
-        if self.empty_window {
-            return;
-        }
         crate::subscriptions_pref::save(&self.subs_pref);
         self.push_rail_to_daemon();
     }
@@ -290,9 +295,6 @@ impl SeanceApp {
     /// would broadcast the pin away. Nothing here is worth another window's
     /// attention; the next real change carries it along.
     pub(super) fn save_arrangement_local(&self) {
-        if self.empty_window {
-            return;
-        }
         crate::subscriptions_pref::save(&self.subs_pref);
     }
 

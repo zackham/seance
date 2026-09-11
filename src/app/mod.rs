@@ -529,7 +529,10 @@ impl SeanceApp {
         // The rail arrangement is daemon-owned too (0.23). Whatever the daemon
         // holds wins over the local cache, and a window that disagrees is the
         // one that's wrong. Same blocking-call-at-boot shape as the layout above.
-        if !app.empty_window {
+        //
+        // Blank windows adopt it too — skipping this left one showing an empty
+        // pinned band, which reads as "your pins are gone".
+        {
             match app.client.subs_load() {
                 Ok(Some(json)) => {
                     if let Some(pref) = crate::subscriptions_pref::parse(&json) {
