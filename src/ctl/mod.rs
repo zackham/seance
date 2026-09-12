@@ -6,6 +6,7 @@
 mod parse;
 mod phone;
 mod print;
+mod remote;
 mod wait;
 
 use std::io::{BufRead, BufReader, Write};
@@ -127,6 +128,17 @@ Exit → tombstone + status idle until `kill`.
 "#;
 
 pub fn run_ctl(args: Vec<String>) -> i32 {
+    if args.first().is_some_and(|a| a == "--local") {
+        return run_local(args[1..].to_vec());
+    }
+    if let Err(e) = remote::dispatch(&args) {
+        eprintln!("seance ctl: {e:#}");
+        return 2;
+    }
+    run_local(args)
+}
+
+fn run_local(args: Vec<String>) -> i32 {
     // Global flags may appear anywhere; pull them out first so subcommand
     // parsers don't have to each account for them.
     //   --json       raw JSON output

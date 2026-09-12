@@ -330,6 +330,7 @@ seance ctl — engage the shared human+agent space from the command line
 
 USAGE:
     seance ctl <command> [args] [--json] [--all|--scope WS]
+    seance ctl --local <command> [args]   bypass the saved remote host
 
 COMMANDS:
     list                          list panes (name, state, workspace, command)
@@ -346,7 +347,7 @@ COMMANDS:
     select|focus PANE             select the pane in every attached GUI window
          pad PANE --cat           print pad body
     note [PANE] TEXT...           append attributed pad note
-         --file PATH  --replace
+         --file PATH | --stdin  --replace
     finish [PANE]                 pad body + status-set (worker bridge)
          --file PATH | --stdin  --status done  --note N  --empty-ok  --replace
     timeline [--since 10m]        attributed event log
@@ -376,6 +377,8 @@ COMMANDS:
     help
 
 GLOBAL: --json  --all  --scope WS
+CONNECTION: follows the app's saved host; SEANCE_SOCKET / SEANCE_SESSION override it.
+FILES: send/note/finish --file is local; new --cwd/--file and wait --artifact are host paths.
 
 EXAMPLES:
     seance ctl new --name w --agent claude --wait-ready

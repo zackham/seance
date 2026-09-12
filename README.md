@@ -87,6 +87,10 @@ command: it wraps the binary in `/Applications/Seance.app` so it launches from
 Finder, Spotlight and the Dock. `--user` installs to `~/Applications`,
 `--no-build` bundles what's already built. The bundle holds a *copy* of the
 binary, so re-run the script rather than a bare `cargo build --release`.
+It also installs `~/.local/bin/seance`, pointing into the app. The CLI follows
+the same saved remote host as the GUI, even when the GUI is closed.
+Add `--with-skills` to install the `seance-control` skill for local ChatGPT
+Work, Codex, and Claude. See [remote CLI setup](docs/REMOTE.md#cli-files).
 
 ```bash
 seance ctl skill                 # agent-facing protocol (⚡ arm / paste)

@@ -36,10 +36,32 @@ seance --local          # back to the local daemon
   auth fails, the error includes a copy-pasteable `autossh` stopgap you can
   run in a terminal (type the password once, leave it up) and pick
   remote again.
-- `seance ctl` on any machine targets a specific daemon via
-  `SEANCE_SOCKET=/path/to/forwarded.sock` (env override in
-  `control::socket_path`). The daemon always binds its own local path
-  (`bind_socket_path`) — a stray env var can't split-brain a bind.
+- `seance ctl …` follows the same saved remote host, including when the GUI
+  is closed. It runs the host's CLI over SSH internally, so agent profiles,
+  scratchpads, and completion checks use the daemon's filesystem. There is
+  no separate CLI host configuration or dependency on the GUI's tunnel.
+- `SEANCE_SOCKET` and in-pane `SEANCE_SESSION` take precedence over the saved
+  host. `seance ctl --local …` bypasses the preference explicitly. Remote
+  failures never fall back to a local daemon or retry an uncertain mutation.
+  SSH transport failures exit 255; daemon/CLI exit codes pass through.
+
+### CLI files
+
+`send`, `note`, and `finish --file PATH` read the file on the **client** and
+stream its contents to the host. `--stdin` works too. `new --cwd`,
+`new --file` (a live document viewer), and `wait --artifact` use **host** paths.
+`pad --cat` and `wait --cat` return the host's scratchpad contents.
+
+The mac bundle installer links `~/.local/bin/seance` to the installed app,
+and updates the legacy `~/.cargo/bin/seance` link if it points at this repo's
+build. Use `--cli-dir DIR` to choose a different CLI directory. Add that
+directory to PATH if your shell doesn't include it.
+
+`./scripts/bundle-macos.sh --with-skills` also installs the bundled
+`seance-control` skill into `~/.agents/skills` (ChatGPT desktop/Codex) and
+`~/.claude/skills`. Use **work locally** in ChatGPT and start a new task to
+pick up the skill. The skill uses the local CLI; the saved host stays an
+implementation detail.
 
 ## Version gate
 
@@ -100,7 +122,9 @@ way as Linux (`scripts/bootstrap-deps.sh` symlinks `deps/zed`, then
   `ctrl+pgup`/`pgdn` (cycle circles) and `cmd+shift+up`/`down` for the pane
   cycle (0.25.6). Spatial pane nav therefore stays on `ctrl+shift+arrows` —
   cmd+shift+left/right still reach it too.
-- known limitation: `seance ctl new -a <agent>` resolves the agent binary on the machine running ctl, not the daemon; use quicklaunch/GUI spawns (daemon-side) for cross-machine agent panes.
+- `seance ctl new --agent <agent>` uses the host's agent profile when routed
+  through the saved connection. An explicit `SEANCE_SOCKET` bypasses that
+  routing and retains direct-socket CLI behavior, including local profile lookup.
 
 ## Workspaces on a second machine
 

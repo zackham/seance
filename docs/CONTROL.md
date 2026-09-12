@@ -24,6 +24,13 @@ Two surfaces expose the same protocol:
 
 ## Transport
 
+Outside a pane, `seance ctl` follows the app's saved remote host automatically.
+Explicit `SEANCE_SOCKET` or in-pane `SEANCE_SESSION` keeps the direct-socket
+path; `seance ctl --local …` bypasses the preference. The proxy runs the host
+CLI so scratchpads and agent profiles resolve there. Prompt `--file` inputs
+are read on the client; viewer/cwd/artifact paths refer to the host.
+See [REMOTE.md](REMOTE.md#cli-files).
+
 - **Socket:** `$XDG_RUNTIME_DIR/seance.sock`, falling back to
   `/tmp/seance-$UID.sock` when `XDG_RUNTIME_DIR` is unset. `$SEANCE_SOCKET`
   overrides both (it is exported into every pane).

@@ -513,6 +513,7 @@ pub(crate) fn parse_note(args: Vec<String>) -> Result<ControlRequest, String> {
     let mut pane = None;
     let mut append = true;
     let mut file = None;
+    let mut stdin = false;
     let mut words: Vec<String> = Vec::new();
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -520,6 +521,7 @@ pub(crate) fn parse_note(args: Vec<String>) -> Result<ControlRequest, String> {
             "--pane" => pane = Some(it.next().ok_or("note: --pane needs value")?),
             "--replace" => append = false,
             "--file" => file = Some(it.next().ok_or("note: --file needs PATH")?),
+            "--stdin" => stdin = true,
             other
                 if pane.is_none()
                     && !other.starts_with('-')
@@ -551,11 +553,18 @@ pub(crate) fn parse_note(args: Vec<String>) -> Result<ControlRequest, String> {
     }
     let text = if let Some(path) = file {
         std::fs::read_to_string(&path).map_err(|e| format!("note: {e}"))?
+    } else if stdin {
+        use std::io::Read;
+        let mut body = String::new();
+        std::io::stdin()
+            .read_to_string(&mut body)
+            .map_err(|e| format!("note: stdin: {e}"))?;
+        body
     } else {
         words.join(" ")
     };
     if text.is_empty() {
-        return Err("note: expected TEXT or --file PATH".into());
+        return Err("note: expected TEXT, --file PATH, or --stdin".into());
     }
     Ok(ControlRequest::Note {
         pane,

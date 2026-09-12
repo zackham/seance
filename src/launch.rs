@@ -35,8 +35,15 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn load() -> Option<LaunchPref> {
-    let bytes = std::fs::read_to_string(config_path()).ok()?;
-    serde_json::from_str(&bytes).ok()
+    try_load().ok().flatten()
+}
+
+pub fn try_load() -> anyhow::Result<Option<LaunchPref>> {
+    match std::fs::read_to_string(config_path()) {
+        Ok(bytes) => Ok(Some(serde_json::from_str(&bytes)?)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn save(pref: &LaunchPref) {

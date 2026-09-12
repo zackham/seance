@@ -91,6 +91,8 @@ src/runtime/           protocol.rs (re-exports seance-core wire types + the
                        recorder.rs, pr_scrape.rs (PR URLs out of raw PTY
                        output: ANSI-strip + chunk-split carry)
 src/ctl/               the CLI client: mod.rs, parse.rs, wait.rs, print.rs, phone.rs
+                       remote.rs follows the GUI's saved host via ssh; payload
+                       files stay local, other filesystem operations run on host
 src/control.rs         control-plane wire types + serde
 src/gui_client.rs      GUI→daemon request client + fs-bridge fs_call plumbing
 src/tunnel.rs          thin-client ssh -N -L forward supervisor (docs/REMOTE.md)

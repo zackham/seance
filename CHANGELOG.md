@@ -15,6 +15,15 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
+## [Unreleased]
+
+### Added
+
+- **The mac CLI follows the app's saved host**, including while the GUI is
+  closed. Local prompt files and stdin travel with the request; `ctl --local`
+  bypasses remote routing. The mac installer links the bundled CLI and can
+  install the `seance-control` skill for ChatGPT/Codex and Claude.
+
 ## [0.26.1] — 2026-09-12
 
 ### Fixed

@@ -6,6 +6,8 @@
 #   ./scripts/bundle-macos.sh --user       # install to ~/Applications instead
 #   ./scripts/bundle-macos.sh --no-build   # bundle whatever is in target/release
 #   ./scripts/bundle-macos.sh --dest DIR   # install somewhere else entirely
+#   ./scripts/bundle-macos.sh --cli-dir DIR # CLI link (default ~/.local/bin)
+#   ./scripts/bundle-macos.sh --with-skills # install ChatGPT/Codex + Claude skill
 #
 # This is the mac build command: the bundle holds a *copy* of the binary, so a
 # bare `cargo build --release` leaves the app stale. Re-run this instead — with
@@ -32,11 +34,15 @@ ICON_SRC="$ROOT/assets/icons/seance-macos-1024.png"
 
 DO_BUILD=1
 DEST="/Applications"
+CLI_DIR="$HOME/.local/bin"
+INSTALL_SKILLS=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-build) DO_BUILD=0; shift ;;
     --user)     DEST="$HOME/Applications"; shift ;;
     --dest)     DEST="${2:?--dest needs a directory}"; shift 2 ;;
+    --cli-dir)  CLI_DIR="${2:?--cli-dir needs a directory}"; shift 2 ;;
+    --with-skills) INSTALL_SKILLS=1; shift ;;
     -h|--help)  sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
@@ -83,6 +89,8 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/seance.icns"
 
 cp "$BIN" "$APP/Contents/MacOS/seance"
+mkdir -p "$APP/Contents/Resources/skills"
+cp -R "$ROOT/skills/seance-control" "$APP/Contents/Resources/skills/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -129,6 +137,29 @@ cp -R "$APP" "$TARGET"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -f "$TARGET" || true
 
+install_link() {
+  local source="$1" link="$2"
+  if [[ -e "$link" && ! -L "$link" ]]; then
+    echo "not replacing existing file/directory: $link" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$link")"
+  ln -sfn "$source" "$link"
+}
+
+install_link "$TARGET/Contents/MacOS/seance" "$CLI_DIR/seance"
+# Retarget the earlier cargo-build link so an existing PATH doesn't keep using it.
+if [[ -L "$HOME/.cargo/bin/seance" ]] && \
+   [[ "$(readlink "$HOME/.cargo/bin/seance")" == "$ROOT/target/release/seance" ]]; then
+  install_link "$TARGET/Contents/MacOS/seance" "$HOME/.cargo/bin/seance"
+fi
+if [[ $INSTALL_SKILLS -eq 1 ]]; then
+  for skill_root in "$HOME/.agents/skills" "$HOME/.claude/skills"; do
+    install_link "$TARGET/Contents/Resources/skills/seance-control" "$skill_root/seance-control"
+  done
+fi
+
 echo
 echo "installed $TARGET ($VERSION)"
+echo "cli: $CLI_DIR/seance (uses the app's saved connection, even with the GUI closed)"
 echo "launch: open -a $APP_NAME   ·   or Spotlight → \"$APP_NAME\""
