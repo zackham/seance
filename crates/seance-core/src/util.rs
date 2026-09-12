@@ -53,6 +53,33 @@ pub fn title_looks_busy(title: &str) -> bool {
     )
 }
 
+
+/// Age bucketed for ORDERING circles in the rail — coarser than the label the
+/// row displays, on purpose.
+///
+/// Everything inside the last TEN MINUTES ties. An agent TUI repaints on its
+/// own timer and then pauses, so its age sweeps up and back down across any
+/// edge you pick; each crossing reshuffles the list. Measured on the live
+/// rail: per-second ranking reordered 4x in 24s, per-minute still reordered
+/// because circles kept sweeping the 60s edge. The bucket has to be far wider
+/// than the jitter, and "roughly how long ago" at ten-minute resolution is all
+/// an ordering needs — `rel_label` keeps showing the precise age, which is a
+/// fine thing to READ and a terrible thing to sort on.
+///
+/// Ties fall back to name, so a tied group renders in a fixed order. Monotonic:
+/// fresher always ranks first.
+///
+/// Shared so the native and web rails cannot drift, same as `title_looks_busy`.
+pub fn recency_rank(age_ms: u64) -> u64 {
+    let s = age_ms / 1000;
+    match s {
+        0..=599 => 0,
+        600..=3599 => 1 + s / 600,
+        3600..=86_399 => 10 + s / 3600,
+        _ => 100 + s / 86_400,
+    }
+}
+
 /// Slugify `name`, then disambiguate against already-taken slugs.
 ///
 /// On collision, appends `-2`, `-3`, ... until the result is unused. `taken` is

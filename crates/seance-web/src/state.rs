@@ -79,6 +79,11 @@ pub struct ClientState {
     pub workspace_unread: HashMap<String, Attention>,
     /// Workspaces observed live-working last check (finish detection).
     pub workspace_was_working: std::collections::HashSet<String>,
+    /// Frame clock (perf-now domain), refreshed by `sync_working_touches` once
+    /// per frame. The sort runs after that call and needs a `now` to age the
+    /// output clocks against; threading one through the comparator isn't
+    /// worth it.
+    pub frame_now_ms: f64,
     /// Client-local zoomed pane (fills the tile area; esc restores).
     pub zoomed: Option<String>,
     /// Recent activity (Touch/status/spawn/kill/ask), newest last, capped.
@@ -197,6 +202,7 @@ pub fn pr_number(url: &str) -> Option<u64> {
 /// One detector, shared with the daemon — which is the only party that sees
 /// every pane's title (see [`ClientState::pane_is_live_working`]).
 pub use seance_core::util::title_looks_busy;
+use seance_core::util::recency_rank;
 
 impl ClientState {
     /// All workspaces in sidebar display order — the native auto-sort:
@@ -231,23 +237,25 @@ impl ClientState {
                 } else {
                     1
                 };
-                // Working band: no clock — alphabetical, so a row you're
-                // reading doesn't move as agents start and finish around it.
-                // Idle band: the displayed clock (last output; touch floor).
-                let at = if band == 0 {
-                    0.0
+                // Idle band ranks by the age the row DISPLAYS, not the raw
+                // clock — see native `recency_rank`. A TUI repainting on a
+                // timer otherwise reorders the list forever.
+                let rank = if band == 0 {
+                    0
                 } else {
-                    self.workspace_activity
+                    let at = self
+                        .workspace_activity
                         .get(ws)
                         .copied()
                         .unwrap_or(f64::MIN)
-                        .max(self.workspace_touch.get(ws).copied().unwrap_or(f64::MIN))
+                        .max(self.workspace_touch.get(ws).copied().unwrap_or(f64::MIN));
+                    if at <= f64::MIN {
+                        u64::MAX
+                    } else {
+                        recency_rank((self.frame_now_ms - at).max(0.0) as u64)
+                    }
                 };
-                (
-                    band,
-                    std::cmp::Reverse(at.clamp(0.0, u64::MAX as f64) as u64),
-                    ws.to_lowercase(),
-                )
+                (band, rank, ws.to_lowercase())
             };
             key(a).cmp(&key(b)).then_with(|| a.cmp(b))
         });
@@ -306,6 +314,10 @@ impl ClientState {
         }
     }
 
+    /// ONLY the title spinner, which in practice means claude. Output recency
+    /// is not a substitute: codex repaints on a timer so its clock never goes
+    /// stale, and it puts no working state in its title. Mirrors native
+    /// `workspace_has_working_agent`.
     pub fn workspace_has_working_agent(&self, workspace: &str) -> bool {
         self.panes
             .iter()
@@ -466,13 +478,14 @@ impl ClientState {
     /// at the top of the idle band (freshly finished work is what you want
     /// next). Call once per frame; cheap.
     pub fn sync_working_touches(&mut self, now_ms: f64) {
+        // Also the frame clock the idle-band ranking ages against.
+        self.frame_now_ms = now_ms;
         let names = self.workspaces();
         for ws in names {
             let now_working = self.workspace_has_working_agent(&ws);
-            let was = self.workspace_was_working.contains(&ws);
-            if was && !now_working {
-                self.touch_workspace(&ws, now_ms);
-            }
+            // No touch bump on the falling edge — working is keyed off output
+            // recency now, so a circle that just went quiet already holds the
+            // freshest clock in the idle band and lands at the top by itself.
             if now_working {
                 self.workspace_was_working.insert(ws);
             } else {
@@ -1158,16 +1171,21 @@ mod tests {
         assert_eq!(ring, active);
     }
 
+    /// Touches minutes apart still order. Sub-second ones deliberately do not
+    /// — that jitter is what made repainting circles trade places.
     #[test]
     fn pinned_subset_keeps_the_working_idle_sort_internally() {
         let mut st = ClientState::default();
         st.apply_event(pr_state_event("needs"), 0.0);
         st.subs.pin("lab");
         st.subs.pin("raid");
-        st.touch_workspace("lab", 100.0);
-        st.touch_workspace("raid", 200.0);
+        // Half an hour apart — inside ten minutes everything deliberately ties.
+        st.touch_workspace("lab", 600_000.0);
+        st.touch_workspace("raid", 2_400_000.0);
+        st.sync_working_touches(3_000_000.0);
         assert_eq!(st.pinned_workspaces(), vec!["raid", "lab"]);
-        st.touch_workspace("lab", 300.0);
+        st.touch_workspace("lab", 3_000_000.0);
+        st.sync_working_touches(3_000_000.0);
         assert_eq!(st.pinned_workspaces(), vec!["lab", "raid"]);
     }
 
@@ -1407,10 +1425,16 @@ mod tests {
         );
         assert!(!st.workspace_has_working_agent("lab"));
 
-        // And the finish-touch floats it to the top of the idle band —
-        // freshly-finished work is what you want next.
-        st.sync_working_touches(1_000.0);
-        assert_eq!(st.workspace_touch.get("lab"), Some(&1_000.0));
+        // Freshly-finished work still lands at the top of the idle band, but
+        // on its OWN output clock — there is no finish-touch any more. A
+        // circle that just stopped working is by definition the one that
+        // produced output most recently.
+        st.workspace_activity.insert("lab".into(), 3_595_000.0);
+        st.workspace_activity.insert("cadence".into(), 100.0);
+        st.sync_working_touches(3_600_000.0);
+        assert_eq!(st.workspace_touch.get("lab"), None, "no finish-touch");
+        // lab 5s stale, cadence an hour — a real gap, so a real ordering.
+        // (Anything inside the same ten minutes ties; see recency_rank.)
         assert_eq!(st.workspaces(), vec!["lab", "cadence"]);
 
         // A repeat of the same verdict is not a structural change.

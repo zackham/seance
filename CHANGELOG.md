@@ -14,19 +14,54 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 3. Update any version-pinned contracts in `CLAUDE.md` if behavior changed
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
-## [Unreleased]
+
+## [0.26.1] — 2026-09-12
 
 ### Fixed
 
-- **A blank window's pins are real pins.** `save_arrangement` no-opped on a
-  blank window, on the theory that a window owning no arrangement must not
-  clobber the shared one. The effect was worse than the thing it guarded: a pin
-  clicked in a blank window rendered as pinned and was stored nowhere, so it
-  evaporated on the next restart — the UI said pinned and nothing was. Blank
-  windows now adopt the arrangement at boot (skipping that left them showing an
-  empty pinned band, which reads as "my pins are gone") and persist deliberate
-  changes. Incidental bookkeeping stays local for every window alike, which is
-  what actually protects the shared copy.
+- **Circles stop trading places, without pretending to know who is working.**
+  The rail ranked idle circles by their raw output clock. Any TUI that repaints
+  on a timer therefore reordered the list on every repaint — codex does exactly
+  that, so its circles churned for as long as they were open.
+
+  The idle band now ranks by a TEN-MINUTE bucket of the age, not the clock.
+  Everything inside ten minutes ties and falls back to name order. The bucket
+  has to be far wider than the jitter: an agent TUI repaints then pauses, so
+  its age sweeps up and back across whatever edge you pick. Measured on the
+  live rail — per-second ranking reordered 4x in 24s, per-minute still
+  reordered as circles swept the 60s edge, ten-minute produced 0 reorders in
+  40s. `rel_label` still shows the precise age; that is a fine thing to read
+  and a terrible thing to sort on. `recency_rank` lives in `seance-core` beside
+  `title_looks_busy` so the native and web rails cannot drift.
+
+  The working band stays gated on the title spinner, which in practice means
+  claude. An interim fix had counted recent output as working, on the theory
+  that output is the one signal every agent emits — it is not a signal of
+  WORK. Sampled over 20s, codex's output clock advanced by the full elapsed
+  time on three idle circles, so every codex circle read as permanently
+  working. Codex puts no working state in its title either (14 samples: `vita`,
+  `<task> | vita`, static), so for a non-spinner agent the honest answer is
+  "unknown" — and the ranking above means unknown circles sit still rather than
+  churn.
+
+  The finish-touch is gone: bumping a circle's clock when it left the working
+  band was a second reorder on top of the one its own output clock already
+  produced, and it fired for circles whose edge nobody observed.
+
+- **A blank window's pins are real pins.** The blank-window gate lived in
+  THREE places on the arrangement path and removing two of them fixed nothing:
+  the local cache was written, `push_rail_to_daemon` still bailed, and boot
+  loads the daemon's copy over the local one — so a pin placed in a blank
+  window rendered, persisted nowhere boot reads, and was gone on restart. The
+  daemon's copy had not been written in two days while pins were being placed
+  daily.
+
+  `empty_window` no longer gates anything on the arrangement path at all.
+  Blank-ness is about what a window ATTACHES to, not about whether your choices
+  count; what protects the shared copy is the deliberate/incidental split, not
+  the window's blank-ness. Blank windows also adopt the arrangement at boot —
+  skipping that left one showing an empty pinned band, which reads the same as
+  losing your pins.
 
 - **`restart-gui` stops manufacturing blank windows.** It sent SIGTERM and
   relaunched immediately — but `kill` returns when `kill(1)` exits, not when

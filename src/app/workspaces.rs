@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use gpui::{Context, Window};
 
 use super::util::now_ms;
+use seance_core::util::recency_rank;
 use seance_core::grouping::{Section, SectionRow};
 
 /// How long the sidebar banish × stays armed after a first click. Matches the
@@ -74,6 +75,18 @@ pub(super) fn rel_label(delta_ms: u64) -> String {
     }
 }
 use super::{RenameTarget, SeanceApp};
+
+/// One circle's rail position: working band first, then by the clock the row
+/// displays, name as the tiebreak.
+///
+/// A working circle drops its clock on purpose — that is what keeps the band
+/// still while agents pour out output. Rank a working circle by a live clock
+/// and every row reorders on every frame.
+pub(super) fn sort_key(working: bool, age_ms: u64, ws: &str) -> (u8, u64, String) {
+    let band = if working { 0 } else { 1 };
+    let rank = if working { 0 } else { recency_rank(age_ms) };
+    (band, rank, ws.to_lowercase())
+}
 
 /// How long the arrangement may reference a circle the daemon hasn't mentioned
 /// before `prune` drops it.
@@ -274,13 +287,14 @@ impl SeanceApp {
     /// clicked, the notes face — locally and to the daemon, which shares it
     /// with every other window.
     ///
-    /// Blank windows persist too. They used to no-op here on the theory that a
-    /// window owning no arrangement must not clobber one, but that made a pin
-    /// placed in a blank window render and then evaporate on restart — the UI
-    /// said pinned and nothing was stored. A blank window is only blank in
-    /// what it ATTACHES to; a pin you click in it is still something you asked
-    /// for. Incidental bookkeeping stays local for every window alike, which
-    /// is what actually protects the shared copy.
+    /// **`empty_window` must never gate anything on this path.** Blank-ness is
+    /// about what a window ATTACHES to, not about whether your choices count.
+    /// The gate lived in three places and removing two of them fixed nothing:
+    /// the local cache was written, `push_rail_to_daemon` still bailed, and
+    /// boot loads the DAEMON's copy over the local one — so every pin placed in
+    /// a blank window rendered, persisted nowhere that boot reads, and was gone
+    /// on restart. What protects the shared copy is the deliberate/incidental
+    /// split below, not the window's blank-ness.
     pub(super) fn save_arrangement(&self) {
         crate::subscriptions_pref::save(&self.subs_pref);
         self.push_rail_to_daemon();
@@ -311,9 +325,6 @@ impl SeanceApp {
     /// undid itself. The queue also coalesces: only the newest arrangement is
     /// worth writing.
     pub(super) fn push_rail_to_daemon(&self) {
-        if self.empty_window {
-            return;
-        }
         let Some(json) = crate::subscriptions_pref::encode(&self.subs_pref) else {
             return;
         };
@@ -510,29 +521,31 @@ impl SeanceApp {
         out
     }
 
-    fn workspace_sort_key(&self, ws: &str) -> (u8, std::cmp::Reverse<u64>, String) {
-        // 0 = has a live-working agent, 1 = everyone else.
-        let band = if self.workspace_has_working_agent(ws) {
-            0
+    fn workspace_sort_key(&self, ws: &str) -> (u8, u64, String) {
+        let at = self
+            .workspace_activity
+            .get(ws)
+            .copied()
+            .max(self.workspace_touch.get(ws).copied())
+            .unwrap_or(0);
+        // Never observed sorts last, not first.
+        let age = if at == 0 {
+            u64::MAX
         } else {
-            1
+            now_ms().saturating_sub(at)
         };
-        // Working band: no clock at all — the name is the whole key, so the
-        // list is stable while a dozen agents start and finish. Idle band: by
-        // the clock the row displays (last real output; human touch as floor).
-        let at = if band == 0 {
-            0
-        } else {
-            self.workspace_activity
-                .get(ws)
-                .copied()
-                .max(self.workspace_touch.get(ws).copied())
-                .unwrap_or(0)
-        };
-        (band, std::cmp::Reverse(at), ws.to_lowercase())
+        sort_key(self.workspace_has_working_agent(ws), age, ws)
     }
 
-    /// Any pane in this circle currently shows agent work in progress.
+    /// Is an agent working in this circle right now?
+    ///
+    /// ONLY the title spinner, which in practice means claude. Output recency
+    /// looks like a universal signal and is not: codex repaints its TUI on a
+    /// timer, so its output clock never goes stale and every codex circle read
+    /// as permanently working. codex puts no working state in its title
+    /// either, so for a non-spinner agent the honest answer is "unknown" —
+    /// which is why the idle band is ranked so that an unknown circle sits
+    /// still instead of churning (see [`recency_rank`]).
     fn workspace_has_working_agent(&self, workspace: &str) -> bool {
         self.panes
             .iter()
@@ -631,12 +644,12 @@ impl SeanceApp {
     pub(super) fn sync_workspace_working_touches(&mut self) {
         let names: Vec<String> = self.known_workspace_names().into_iter().collect();
         for ws in names {
-            let now = self.workspace_has_working_agent(&ws);
-            let was = self.workspace_was_working.contains(&ws);
-            if was && !now {
-                self.touch_workspace(&ws);
-            }
-            if now {
+            // No touch bump on the falling edge any more. Working is keyed off
+            // output recency now, so a circle that just went quiet already
+            // holds the freshest clock in the idle band and lands at the top
+            // on its own — bumping it was a second, redundant reorder, and it
+            // fired for circles whose edge nobody observed.
+            if self.workspace_has_working_agent(&ws) {
                 self.workspace_was_working.insert(ws);
             } else {
                 self.workspace_was_working.remove(&ws);
@@ -1299,5 +1312,64 @@ mod tests {
         let p = settle_absent(&mut absent, ["ws"].into_iter(), &known(&[]), 3_000);
         assert!(p.contains("ws"));
         assert_eq!(absent.get("ws"), Some(&3_000));
+    }
+
+    /// THE bug: codex repaints on a timer, so its output clock never goes
+    /// stale. Ranked on the raw clock, two such circles swap places on every
+    /// repaint, forever. Quantized to the label they display, they tie and
+    /// fall back to name order.
+    /// THE bug: codex repaints on its own timer, so its age jitters by seconds
+    /// and never settles. Any per-second ranking reshuffles the list forever;
+    /// everything inside a minute has to tie and fall back to name.
+    #[test]
+    fn circles_repainting_on_a_timer_hold_still() {
+        // Sampled live: these three sat at 1.7s / 1.8s / 1.9s, then 2.6 / 2.7 /
+        // 2.7, drifting across the old 5s edge and reshuffling every pass.
+        for (a_age, b_age) in [(300u64, 2_900u64), (3_100, 120), (6_000, 45_000), (75_000, 8_000)] {
+            assert!(
+                sort_key(false, a_age, "cadence-perf") < sort_key(false, b_age, "onboarding"),
+                "name order must survive {a_age}ms vs {b_age}ms of jitter"
+            );
+        }
+    }
+
+    /// Real staleness still orders, at minute granularity and coarser.
+    #[test]
+    fn genuinely_older_circles_sort_lower() {
+        assert!(sort_key(false, 30_000, "b") < sort_key(false, 20 * 60_000, "a"));
+        assert!(sort_key(false, 20 * 60_000, "b") < sort_key(false, 4 * 3_600_000, "a"));
+        assert!(sort_key(false, 4 * 3_600_000, "b") < sort_key(false, 3 * 86_400_000, "a"));
+    }
+
+    /// Working outranks idle no matter how fresh the idle one is.
+    #[test]
+    fn working_outranks_idle() {
+        assert!(sort_key(true, u64::MAX, "zzz") < sort_key(false, 0, "aaa"));
+    }
+
+    /// A circle nobody ever observed sorts last, not first.
+    #[test]
+    fn never_observed_sorts_last() {
+        assert!(sort_key(false, 5_000, "a") < sort_key(false, u64::MAX, "a"));
+    }
+
+    /// Monotonic across every boundary — a non-monotonic rank would reorder
+    /// rows as they age.
+    #[test]
+    fn recency_rank_is_monotonic_across_bucket_edges() {
+        let edges = [
+            0,
+            599_999,
+            600_000,
+            3_599_999,
+            3_600_000,
+            86_399_999,
+            86_400_000,
+        ];
+        let ranks: Vec<u64> = edges.iter().map(|ms| recency_rank(*ms)).collect();
+        assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "{ranks:?}");
+        assert_eq!(recency_rank(0), recency_rank(599_999), "under 10m all ties");
+        assert!(recency_rank(599_999) < recency_rank(600_000), "9m < 10m");
+        assert!(recency_rank(3_599_999) < recency_rank(3_600_000), "59m < 1h");
     }
 }
