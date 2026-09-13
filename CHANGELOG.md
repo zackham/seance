@@ -15,7 +15,7 @@ When shipping a versioned commit (`seance 0.9.N — …`):
 
 Unreleased work can sit under `## [Unreleased]` until the version bump.
 
-## [Unreleased]
+## [0.26.2] — 2026-09-13
 
 ### Added
 
