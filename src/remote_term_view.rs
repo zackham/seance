@@ -553,7 +553,7 @@ impl RemoteTerminalView {
         let Some(cell) = self.cell_at(pos, cx) else {
             return;
         };
-        if let Some(uri) = url_at_cell(&snap, cell.row, cell.col) {
+        if let Some(uri) = seance_core::links::url_at_cell(&snap, cell.row, cell.col) {
             open_uri(&uri);
             cx.stop_propagation();
         }
@@ -957,67 +957,6 @@ fn selection_key(
 /// ctrl+click / middle-click on a link in a terminal.
 fn open_uri(uri: &str) {
     crate::sysopen::open_detached(uri);
-}
-
-/// The link under one cell: an OSC-8 span covering it, else a bare http(s) URL
-/// on that row whose extent covers that column.
-///
-/// Cell-targeted on purpose. This used to open the first link anywhere on
-/// screen and ignore `pos` entirely, so ctrl+clicking a URL in a pane that
-/// also had a PR reference higher up opened the PR.
-fn url_at_cell(
-    snap: &crate::runtime::snapshot::GridSnapshot,
-    row: u16,
-    col: u16,
-) -> Option<String> {
-    if let Some(h) = snap
-        .hyperlinks
-        .iter()
-        .find(|h| h.row == row && col >= h.col_start && col < h.col_end)
-    {
-        return Some(h.uri.clone());
-    }
-    let cols = snap.cols as usize;
-    if cols == 0 || snap.cells.is_empty() {
-        return None;
-    }
-    let r = row as usize;
-    if (r + 1) * cols > snap.cells.len() {
-        return None;
-    }
-    let line: String = (0..cols).map(|c| snap.cells[r * cols + c].c).collect();
-    http_url_at(&line, col as usize)
-}
-
-/// The http(s) URL in `line` whose character range covers `col`.
-///
-/// Indexes by CHAR, not byte: a row of terminal cells is one char per column,
-/// so a non-ASCII glyph anywhere left of the URL would slide every byte offset
-/// off by one.
-fn http_url_at(line: &str, col: usize) -> Option<String> {
-    let chars: Vec<char> = line.chars().collect();
-    let is_url_char = |c: char| c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&\'()*+,;=%".contains(c);
-    let starts_at = |i: usize| {
-        chars[i..].starts_with(&['h', 't', 't', 'p', 's', ':', '/', '/'])
-            || chars[i..].starts_with(&['h', 't', 't', 'p', ':', '/', '/'])
-    };
-    let mut i = 0;
-    while i < chars.len() {
-        if !starts_at(i) {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < chars.len() && is_url_char(chars[i]) {
-            i += 1;
-        }
-        let url: String = chars[start..i].iter().collect();
-        let url = url.trim_end_matches(['.', ',', ')', ']', ';', ':']);
-        if url.len() > 10 && col >= start && col < start + url.chars().count() {
-            return Some(url.to_string());
-        }
-    }
-    None
 }
 
 fn shaped_paint_caches() -> &'static Mutex<HashMap<String, ShapedPaintCache>> {
@@ -1610,87 +1549,5 @@ mod tests {
         // gesture was explicit, so the length doesn't get a vote.
         assert!(copies_on_release(SelectKind::Word, 1));
         assert!(copies_on_release(SelectKind::Lines, 1));
-    }
-
-    /// A grid holding one line of text per row, 80 cols wide.
-    fn grid_of(lines: &[&str]) -> crate::runtime::snapshot::GridSnapshot {
-        use crate::runtime::snapshot::{CellSnap, GridSnapshot};
-        let cols = 80usize;
-        let mut snap = GridSnapshot::empty("t-1");
-        snap.cols = cols as u16;
-        snap.rows = lines.len() as u16;
-        snap.cells = Vec::with_capacity(cols * lines.len());
-        for line in lines {
-            let mut chars: Vec<char> = line.chars().collect();
-            chars.resize(cols, ' ');
-            for c in chars {
-                let mut cell = CellSnap::blank();
-                cell.c = c;
-                snap.cells.push(cell);
-            }
-        }
-        snap
-    }
-
-    /// The regression: ctrl+click used to ignore where you clicked and open
-    /// the first link on screen, so clicking a plat URL under a PR reference
-    /// opened the PR.
-    #[test]
-    fn ctrl_click_opens_the_url_under_the_cursor_not_the_first_on_screen() {
-        let snap = grid_of(&[
-            "see https://github.com/o/r/pull/6807 for the CI run",
-            "plat https://cadence.ham.xyz/plats/86ff368c-92db for the numbers",
-        ]);
-        // Column 10 on row 1 is inside the cadence URL (starts at col 5).
-        assert_eq!(
-            url_at_cell(&snap, 1, 10).as_deref(),
-            Some("https://cadence.ham.xyz/plats/86ff368c-92db")
-        );
-        // And row 0 still resolves to its own link.
-        assert_eq!(
-            url_at_cell(&snap, 0, 10).as_deref(),
-            Some("https://github.com/o/r/pull/6807")
-        );
-    }
-
-    /// Clicking off any link opens nothing — better than opening something
-    /// arbitrary from elsewhere on screen.
-    #[test]
-    fn a_click_on_plain_text_opens_nothing() {
-        let snap = grid_of(&["plat https://cadence.ham.xyz/x for the numbers"]);
-        assert_eq!(url_at_cell(&snap, 0, 0), None);
-        assert_eq!(url_at_cell(&snap, 0, 40), None);
-    }
-
-    /// An OSC-8 span wins over bare text, but only on the cells it covers.
-    #[test]
-    fn an_osc8_span_only_claims_its_own_cells() {
-        let mut snap = grid_of(&["#6807 and https://cadence.ham.xyz/plats/abc"]);
-        snap.hyperlinks.push(crate::runtime::snapshot::HyperlinkSpan {
-            row: 0,
-            col_start: 0,
-            col_end: 5,
-            uri: "https://github.com/o/r/pull/6807".into(),
-        });
-        assert_eq!(
-            url_at_cell(&snap, 0, 2).as_deref(),
-            Some("https://github.com/o/r/pull/6807")
-        );
-        assert_eq!(
-            url_at_cell(&snap, 0, 20).as_deref(),
-            Some("https://cadence.ham.xyz/plats/abc")
-        );
-    }
-
-    /// Column is a CHAR offset, not a byte one — a wide glyph left of the URL
-    /// would otherwise slide the hit box.
-    #[test]
-    fn a_non_ascii_glyph_does_not_shift_the_hit_box() {
-        let snap = grid_of(&["✦ ✦ https://cadence.ham.xyz/plats/abc"]);
-        assert_eq!(
-            url_at_cell(&snap, 0, 4).as_deref(),
-            Some("https://cadence.ham.xyz/plats/abc")
-        );
-        assert_eq!(url_at_cell(&snap, 0, 3), None);
     }
 }

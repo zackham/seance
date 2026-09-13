@@ -24,6 +24,72 @@ Unreleased work can sit under `## [Unreleased]` until the version bump.
   bypasses remote routing. The mac installer links the bundled CLI and can
   install the `seance-control` skill for ChatGPT/Codex and Claude.
 
+- **The phone can rename a circle.** The desktop offers two spellings —
+  double-click a rail row, or its right-click menu — and a finger reaches
+  neither, so a circle created from the phone kept whatever the launcher
+  called it. The circle menu (tap the topbar title, where the PR list already
+  lives) now carries a `name` field above the PRs. It commits the same
+  `RenameWorkspace` request the rail does, so it moves the LABEL and not the
+  slug: panes, PR links, `$SEANCE_WORKSPACE` and the rail's pins all stay put.
+
+- **The phone can pin and unpin a circle, and a pin now lasts.** Same circle
+  menu as rename, under `rail`. The desktop's spelling is a right-click on a
+  rail row, which a finger doesn't have — so circles launched from the phone
+  (launch buttons open their circle pinned) could never be put back once they
+  slipped.
+
+- **A jump-to-the-bottom button on the phone.** Fourth in the floating
+  cluster, right of the record button, and only there while a pane on screen
+  is actually scrolled back — at the tail it is gone entirely. The daemon owns
+  the scroll position and never puts it on the wire, so the client counts the
+  rows it asked for and drops the count on anything that returns the pane to
+  the tail (every keystroke does, daemon-side). That can leave the button up
+  when something else scrolled you down — one tap clears it — but it cannot
+  leave you in history with no way out, which is the direction that matters.
+
+- **Banish a circle from the phone.** Bottom of the circle menu, under
+  `danger`: first tap arms, second banishes, same two-step as the rail row's
+  `×`. That × is on the phone too, but it is a hover-sized target inside a row
+  whose tap selects the circle — not something to aim a thumb at when it kills
+  every pane in the circle.
+
+- **Tap a URL in a pane to open it.** Native ctrl+click has opened the link
+  under the cursor for a while; the browser client had no spelling of it at
+  all, on a phone or on a desktop. Both now do: ctrl+click on the desktop,
+  and on a phone a tap raises `#m-link`, a bottom sheet showing the URL with
+  `copy` and `open`. Deliberately a sheet rather than a jump — tapping a
+  terminal is also how you focus a pane, and a mis-hit that threw you out to
+  Safari mid-session would be worse than no feature.
+
+  The detector moved to `seance_core::links` so the two clients cannot drift,
+  and it learned to stitch hard-wrapped rows back together. That is not a
+  nicety on a phone: a pane is ~45 columns there, so a PR URL is always in two
+  or three pieces, and per-row detection hands back a fragment that opens
+  nothing. A row that runs to its last column is the only wrap signal a
+  snapshot carries (no WRAPPED flag on the wire), capped at six rows.
+
+### Fixed
+
+- **Web pins stop evaporating.** Two causes, both twins of desktop bugs.
+
+  `reconcile` pruned the arrangement straight against the circles the daemon
+  had named, and quicklaunch pins the instant you press the button — so the
+  `State` crossing that spawn on the wire carried no such circle and took the
+  pin with it. It pinned, then silently unpinned. Pins on unconfirmed circles
+  are now shielded until the circle shows up (`settle_absent`, which moved to
+  `seance_core::util` so the two clients cannot drift again — native got this
+  fix in 0.26.0 and the browser never did).
+
+  And a pin made in the browser never reached the daemon at all: this client
+  wrote localStorage only, while `load_rail_prefs` adopts the daemon's copy on
+  every connect. So a pin survived until the next reload and was never visible
+  at the desk. Deliberate changes (pin / unpin, including the launch pin) now
+  go through `FsOp::SubsSave` like native; incidental churn — marking a circle
+  seen, a prune — stays local, as it does there. The push PATCHES the daemon's
+  own blob rather than serializing this client's narrower shape over it, so
+  native's folds and flipped-pane face survive a pin made on the phone, and
+  our own broadcast echo is ignored (`rail_prefs_is_foreign`, also now shared).
+
 ## [0.26.1] — 2026-09-12
 
 ### Fixed

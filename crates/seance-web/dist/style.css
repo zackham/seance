@@ -1705,6 +1705,23 @@ input:focus {
     display: none;
   }
 
+  /* Jump to the live tail. Absent unless the focused pane is actually
+     scrolled back — `data-scrolled` is set once per frame by the wasm
+     (`sync_scroll_chip`), which is the only side that knows. The attribute
+     beats the id selector, and both beat `.m-btn`. */
+  #m-bottom {
+    display: none;
+  }
+  body[data-scrolled] #m-bottom {
+    display: flex;
+  }
+  /* The drawer covers the pane, so the jump has nothing to jump in. Needs to
+     outrank the rule above on its own — same weight would just lose to source
+     order. */
+  body.m-nav-open[data-scrolled] #m-bottom {
+    display: none;
+  }
+
   /* Hand the reclaimed width to the terminals. */
   #tiles {
     gap: 4px;
@@ -1835,6 +1852,54 @@ input:focus {
   justify-content: space-between;
   gap: 12px;
   margin-top: auto;
+}
+
+/* ── link sheet ─────────────────────────────────────────────────────────── */
+/* Raised by a tap on a URL inside a pane. A bottom card rather than a
+   full-screen takeover: the line you tapped stays visible above it, which is
+   how you tell a mis-hit from the link you wanted. */
+#m-link {
+  position: fixed;
+  inset: 0;
+  z-index: 92;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: rgba(0, 0, 0, 0.45);
+}
+#m-link[hidden] {
+  display: none;
+}
+#m-link-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 12px calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+#m-link-head {
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+#m-link-url {
+  color: var(--text);
+  font-family: var(--mono, monospace);
+  font-size: 14px;
+  line-height: 1.4;
+  word-break: break-all;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+#m-link-bar {
+  display: flex;
+  gap: 8px;
+}
+#m-link-bar .m-sheet-btn {
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 #m-toast {
@@ -2021,7 +2086,8 @@ body.m-kb-open #tiles .tile:not(.focused) {
   /* Recording must not lock the pane — reading the thing you're replying to
      is half the point, so the sheet stays closed until you stop. */
   body.m-rec #m-nav,
-  body.m-rec #m-kb-btn {
+  body.m-rec #m-kb-btn,
+  body[data-scrolled].m-rec #m-bottom {
     display: none;
   }
 }
@@ -2191,6 +2257,44 @@ body.m-kb-open #tiles .tile:not(.focused) {
 #m-menu-conn.bad {
   color: var(--danger);
 }
+#m-menu-name {
+  display: flex;
+  gap: 8px;
+}
+#m-menu-name-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 48px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px; /* < 16px makes iOS zoom the viewport on focus */
+}
+#m-menu-rename {
+  flex: 0 0 auto;
+  min-width: 96px;
+}
+#m-menu-pin {
+  width: 100%;
+}
+#m-menu-pin.on {
+  border-color: var(--flame-dim);
+  color: var(--flame-dim);
+}
+
+#m-menu-banish {
+  width: 100%;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+#m-menu-banish.armed {
+  background: var(--danger);
+  color: var(--bg);
+}
+
 #m-menu-close {
   margin-top: auto;
   width: 100%;

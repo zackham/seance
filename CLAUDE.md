@@ -39,7 +39,13 @@ is in `README.md` and `seance ctl skill` — not "Claude wrapper."
 crates/seance-core/    sans-io shared crate — MUST compile native AND wasm32:
                        protocol.rs (wire types), snapshot.rs (SCG3 codec),
                        input.rs (key encoding), control.rs, auth.rs,
-                       replay.rs (SRR1 format), util.rs (slugify)
+                       replay.rs (SRR1 format), util.rs (slugify),
+                       links.rs (the URL under a cell — OSC-8 span, else a
+                       bare http(s) run stitched across hard wraps; native
+                       ctrl+click and the web's tap/ctrl+click share it).
+                       util.rs also holds the rail's shared rules:
+                       settle_absent (pins for circles the daemon hasn't
+                       confirmed) + rail_prefs_is_foreign (own-echo guard)
 crates/seance-web/     the wasm browser client: lib.rs (app core, rAF loop),
                        renderer.rs (WebGL2 atlas), conn.rs / state.rs / input.rs,
                        ui.rs + menus.rs + keymap.rs + help.rs (chrome),

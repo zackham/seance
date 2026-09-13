@@ -170,7 +170,6 @@ impl SubscriptionsPref {
         self.pinned.contains(ws)
     }
 
-
     /// Drop names the daemon no longer knows about (killed / renamed circles),
     /// so the file doesn't accrete forever. Returns true when it changed.
     pub fn prune(&mut self, known: &BTreeSet<String>) -> bool {
@@ -274,8 +273,7 @@ mod tests {
     /// empty pinned set (nothing jumps to the top on upgrade).
     #[test]
     fn pre_pin_file_parses_with_empty_pinned() {
-        let back: SubscriptionsPref =
-            serde_json::from_str(r#"{"seen":["lab","old"]}"#).unwrap();
+        let back: SubscriptionsPref = serde_json::from_str(r#"{"seen":["lab","old"]}"#).unwrap();
         assert_eq!(back.seen, set(&["lab", "old"]));
         assert!(back.pinned.is_empty());
         assert!(!back.is_pinned("lab"));

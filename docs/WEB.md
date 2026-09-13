@@ -52,7 +52,15 @@ browser (wasm)                      native
   the browser and on the desktop at once. The rail arrangement — pins, folds,
   which circles this browser has looked at — persists in
   `localStorage["seance_active"]` (`{seen, pinned, collapsed}`), with the
-  daemon's copy winning on connect.
+  daemon's copy winning on connect. Membership (`seen` / `pinned`) is written
+  back through `FsOp::SubsSave` on a deliberate change, exactly like native, so
+  a pin made on the phone reaches the desk; incidental churn (a prune, marking
+  a circle seen) stays local until a deliberate change carries it. The push
+  PATCHES the daemon's own blob rather than serializing this client's narrower
+  shape over it — native keeps its folds and flipped-pane face in the same
+  file. The echo guard is `seance_core::util::rail_prefs_is_foreign`; pins for
+  circles the daemon hasn't minted yet are shielded by `settle_absent` (the
+  quicklaunch race, same fix native got in 0.26.0).
 - **PR chips**: `#topbar` carries `#pr-chips` (`div.pr-chips`, horizontal
   scroll) — one `button.pr-chip[.needs|.done]` per scraped PR of the selected
   circle, most recent first (that chip keeps `id="pr-chip"`). Click opens the
@@ -118,13 +126,41 @@ drag-and-drop, no "send to new window".
 Everything under `@media (max-width: 820px)` is plain JS in `www/index.html`,
 appended to `<body>` — `ui.rs` clears `#topbar`/`#sidebar` on every re-render
 and would eat anything parented there. It reaches the websocket only through
-the four `seance_mobile_*` exports (`lib.rs`): drawer, circle menu, swipe
+the `seance_mobile_*` exports (`lib.rs`): drawer, circle menu, swipe
 between circles, touch scrollback, voice→prompt, and the keyboard surface —
 a 1px focused `#m-catch` input that raises the system keyboard, plus a
 two-row accessory bar of modifiers / control codes / arrows with `paste` and
 `done` in a right-hand column. Paste goes through `navigator.clipboard`
 (hence https, i.e. the tunnel, not the raw tailnet http URL) and falls back to
 a long-press textarea sheet when the browser refuses.
+
+Two things the desktop reaches with a modifier or a second click, and a
+finger cannot:
+
+- **Rename** — the circle menu (tap the topbar title) carries a `name` field
+  above the PR list, committing through `seance_mobile_rename_workspace` into
+  the same `RenameWorkspace` request the rail's double-click sends. Label
+  only; the slug is the circle.
+- **Pin / unpin** — same menu, under `rail`
+  (`seance_mobile_is_pinned` / `seance_mobile_set_pinned`). The desktop's is a
+  right-click on a rail row, which a finger has no spelling for.
+- **Banish** — bottom of the same menu, under `danger`
+  (`seance_mobile_banish_workspace`), arming on the first tap and firing on
+  the second like the rail row's `×`. The row's × is on the phone too, but it
+  is a hover-sized target inside a row whose tap selects the circle.
+- **Jump to the live tail** — `#m-bottom`, a fourth button in the floating
+  cluster, present only while a pane on screen is scrolled back. The daemon
+  owns the scroll position and never puts it on the wire, so the client counts
+  the `Scroll` rows it asked for (`App::scroll_back`), zeroes on anything that
+  scrolls the pane down daemon-side (any keystroke does), and stamps
+  `data-scrolled` on `<body>` once per frame for the CSS to key off. It can
+  over-count and leave the button up at the tail; it cannot fail to show one.
+- **Links** — a tap on a pane asks `seance_mobile_url_at` what is under the
+  finger (`seance_core::links`, the same detector native ctrl+click uses) and
+  raises `#m-link`, a bottom sheet with `copy` / `open`. It is a sheet, not a
+  jump: tapping a terminal is also how you focus a pane, so a mis-hit must not
+  throw you out to the browser. The detector stitches hard-wrapped rows back
+  together — at ~45 columns every URL worth tapping is in pieces.
 
 ## Not yet (honest gaps)
 

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use gpui::{Context, Window};
 
 use super::util::now_ms;
-use seance_core::util::recency_rank;
 use seance_core::grouping::{Section, SectionRow};
+use seance_core::util::{rail_prefs_is_foreign, recency_rank, settle_absent};
 
 /// How long the sidebar banish × stays armed after a first click. Matches the
 /// web client's `KILL_CONFIRM_MS` so both clients feel the same.
@@ -22,45 +22,6 @@ pub(super) const BANISH_ARM: Duration = Duration::from_millis(2000);
 /// two-click window is testable without leaning on a real clock.
 pub(super) fn banish_arm_live(armed: Option<&(String, Instant)>, ws: &str, now: Instant) -> bool {
     armed.is_some_and(|(w, at)| w == ws && now.duration_since(*at) < BANISH_ARM)
-}
-
-/// Is a broadcast rail arrangement someone else's, or our own echo?
-///
-/// `pending > 0` means a write of ours is queued or in flight, so nothing the
-/// daemon is broadcasting right now can reflect our newest state. Otherwise it
-/// is ours exactly when it matches what we last sent.
-pub(super) fn rail_prefs_is_foreign(pending: usize, last_sent: Option<&str>, json: &str) -> bool {
-    pending == 0 && last_sent != Some(json)
-}
-
-/// Track how long each name the arrangement references has been missing from
-/// the daemon's world, and return the set `prune` may keep: what the daemon
-/// knows, plus anything missing for less than [`ABSENT_GRACE_MS`].
-///
-/// Pruning straight against `known` is destructive on a view that merely lags:
-/// a quicklaunch pin placed before its spawn lands, or a circle another window
-/// created a moment ago, both look identical to "killed" for one `State`.
-pub(super) fn settle_absent<'a>(
-    absent: &mut std::collections::HashMap<String, u64>,
-    referenced: impl Iterator<Item = &'a str>,
-    known: &std::collections::BTreeSet<String>,
-    now: u64,
-) -> std::collections::BTreeSet<String> {
-    for name in referenced {
-        if !known.contains(name) {
-            absent.entry(name.to_string()).or_insert(now);
-        }
-    }
-    // Back in the world → forget it ever went missing.
-    absent.retain(|name, _| !known.contains(name));
-    let mut protected = known.clone();
-    protected.extend(
-        absent
-            .iter()
-            .filter(|(_, since)| now.saturating_sub(**since) < ABSENT_GRACE_MS)
-            .map(|(name, _)| name.clone()),
-    );
-    protected
 }
 
 /// Coarse one-unit relative time for sidebar labels.
@@ -87,16 +48,6 @@ pub(super) fn sort_key(working: bool, age_ms: u64, ws: &str) -> (u8, u64, String
     let rank = if working { 0 } else { recency_rank(age_ms) };
     (band, rank, ws.to_lowercase())
 }
-
-/// How long the arrangement may reference a circle the daemon hasn't mentioned
-/// before `prune` drops it.
-///
-/// The asymmetry is the whole point: keeping a dead name costs one string in a
-/// json file, dropping a live one destroys something he asked for. Two ways a
-/// name goes briefly missing — a quicklaunch pin lands before its spawn round
-/// trip completes, and any window's `State` can lag another window's fresh
-/// circle. Both resolve in well under a minute.
-const ABSENT_GRACE_MS: u64 = 60_000;
 
 /// How many circles back the mouse can walk. A long day of cycling shouldn't
 /// grow a list forever, and nobody navigates back past a few dozen hops.
@@ -353,7 +304,7 @@ impl SeanceApp {
 
     /// Pin a circle to the top section (context menu "pin to top", and every
     /// quicklaunch click, which pins before the spawn round trip returns —
-    /// see [`ABSENT_GRACE_MS`]).
+    /// see [`seance_core::util::ABSENT_GRACE_MS`]).
     pub(super) fn pin_workspace(&mut self, ws: &str) {
         if self.subs_pref.pin(ws) {
             self.save_arrangement();
@@ -1233,87 +1184,6 @@ mod tests {
         assert!(!banish_arm_live(None, "circle-7", now));
     }
 
-    /// The daemon echoes every write back to its sender. Adopting that echo is
-    /// how a pin undid itself: the window replaced fresh local state with an
-    /// older copy of it.
-    #[test]
-    fn our_own_echo_is_never_adopted() {
-        let mine = r#"{"pinned":["lab"]}"#;
-        assert!(!rail_prefs_is_foreign(0, Some(mine), mine));
-    }
-
-    /// A real change from another window still lands.
-    #[test]
-    fn another_windows_arrangement_is_adopted() {
-        assert!(rail_prefs_is_foreign(
-            0,
-            Some(r#"{"pinned":["lab"]}"#),
-            r#"{"pinned":["lab","raid"]}"#
-        ));
-        // Nothing sent yet — anything inbound is foreign by definition.
-        assert!(rail_prefs_is_foreign(0, None, r#"{"pinned":[]}"#));
-    }
-
-    /// While a write of ours is queued or in flight, ANY broadcast is stale by
-    /// construction — including one that happens to differ from what we sent.
-    #[test]
-    fn nothing_is_adopted_while_our_write_is_in_flight() {
-        assert!(!rail_prefs_is_foreign(1, Some("a"), "b"));
-        assert!(!rail_prefs_is_foreign(3, None, "b"));
-    }
-
-    fn known(items: &[&str]) -> std::collections::BTreeSet<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// The quicklaunch bug: the pin lands before the spawn round trip does, so
-    /// the next `State` carries no such circle.
-    #[test]
-    fn a_name_the_daemon_has_not_mentioned_yet_survives() {
-        let mut absent = std::collections::HashMap::new();
-        let p = settle_absent(&mut absent, ["staff-report"].into_iter(), &known(&["lab"]), 1_000);
-        assert!(p.contains("staff-report"), "a fresh pin must not be pruned");
-        assert_eq!(absent.get("staff-report"), Some(&1_000));
-    }
-
-    /// Still missing a full grace period later — now it really is gone.
-    #[test]
-    fn a_name_missing_past_the_grace_is_dropped() {
-        let mut absent = std::collections::HashMap::new();
-        settle_absent(&mut absent, ["gone"].into_iter(), &known(&["lab"]), 1_000);
-        let p = settle_absent(
-            &mut absent,
-            ["gone"].into_iter(),
-            &known(&["lab"]),
-            1_000 + ABSENT_GRACE_MS,
-        );
-        assert!(!p.contains("gone"));
-    }
-
-    /// The clock starts at FIRST absence and doesn't restart on every `State`,
-    /// or a killed circle would be shielded forever.
-    #[test]
-    fn the_absence_clock_does_not_restart_each_state() {
-        let mut absent = std::collections::HashMap::new();
-        for t in [1_000, 2_000, 3_000] {
-            settle_absent(&mut absent, ["gone"].into_iter(), &known(&[]), t);
-        }
-        assert_eq!(absent.get("gone"), Some(&1_000), "first sighting wins");
-    }
-
-    /// A circle that shows up resets: a later disappearance gets its own full
-    /// grace rather than inheriting a stale clock.
-    #[test]
-    fn reappearing_clears_the_absence() {
-        let mut absent = std::collections::HashMap::new();
-        settle_absent(&mut absent, ["ws"].into_iter(), &known(&[]), 1_000);
-        settle_absent(&mut absent, ["ws"].into_iter(), &known(&["ws"]), 2_000);
-        assert!(absent.is_empty(), "back in the world");
-        let p = settle_absent(&mut absent, ["ws"].into_iter(), &known(&[]), 3_000);
-        assert!(p.contains("ws"));
-        assert_eq!(absent.get("ws"), Some(&3_000));
-    }
-
     /// THE bug: codex repaints on a timer, so its output clock never goes
     /// stale. Ranked on the raw clock, two such circles swap places on every
     /// repaint, forever. Quantized to the label they display, they tie and
@@ -1325,7 +1195,12 @@ mod tests {
     fn circles_repainting_on_a_timer_hold_still() {
         // Sampled live: these three sat at 1.7s / 1.8s / 1.9s, then 2.6 / 2.7 /
         // 2.7, drifting across the old 5s edge and reshuffling every pass.
-        for (a_age, b_age) in [(300u64, 2_900u64), (3_100, 120), (6_000, 45_000), (75_000, 8_000)] {
+        for (a_age, b_age) in [
+            (300u64, 2_900u64),
+            (3_100, 120),
+            (6_000, 45_000),
+            (75_000, 8_000),
+        ] {
             assert!(
                 sort_key(false, a_age, "cadence-perf") < sort_key(false, b_age, "onboarding"),
                 "name order must survive {a_age}ms vs {b_age}ms of jitter"
@@ -1358,18 +1233,15 @@ mod tests {
     #[test]
     fn recency_rank_is_monotonic_across_bucket_edges() {
         let edges = [
-            0,
-            599_999,
-            600_000,
-            3_599_999,
-            3_600_000,
-            86_399_999,
-            86_400_000,
+            0, 599_999, 600_000, 3_599_999, 3_600_000, 86_399_999, 86_400_000,
         ];
         let ranks: Vec<u64> = edges.iter().map(|ms| recency_rank(*ms)).collect();
         assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "{ranks:?}");
         assert_eq!(recency_rank(0), recency_rank(599_999), "under 10m all ties");
         assert!(recency_rank(599_999) < recency_rank(600_000), "9m < 10m");
-        assert!(recency_rank(3_599_999) < recency_rank(3_600_000), "59m < 1h");
+        assert!(
+            recency_rank(3_599_999) < recency_rank(3_600_000),
+            "59m < 1h"
+        );
     }
 }

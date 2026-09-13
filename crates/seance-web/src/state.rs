@@ -107,6 +107,11 @@ pub struct ClientState {
     /// ingested daemon stamp is converted with `perf = unix - offset`. Set
     /// once by `lib.rs`; tests leave it at 0 so conversion is identity.
     pub clock_offset_ms: f64,
+    /// When each name the rail arrangement references went missing from the
+    /// daemon's world (perf-now ms). Feeds `settle_absent`, which is what
+    /// keeps a quicklaunch pin alive across the `State` that lands before its
+    /// spawn does.
+    pub absent_since: HashMap<String, u64>,
 }
 
 /// One row of the host-bridge widget strip (native `HostWidgetSnap` shape).
@@ -198,11 +203,11 @@ pub fn pr_number(url: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+use seance_core::util::recency_rank;
 /// Busy TUI title: braille spinner (U+2800..=U+28FF) as first non-space char.
 /// One detector, shared with the daemon — which is the only party that sees
 /// every pane's title (see [`ClientState::pane_is_live_working`]).
 pub use seance_core::util::title_looks_busy;
-use seance_core::util::recency_rank;
 
 impl ClientState {
     /// All workspaces in sidebar display order — the native auto-sort:
@@ -689,7 +694,31 @@ impl ClientState {
                 // looked-at, every State prunes circles that are gone.
                 let known = self.workspaces();
                 if self.subs.seeded {
-                    self.subs_dirty |= self.subs.reconcile(&known);
+                    // Prune against what the daemon knows PLUS anything only
+                    // recently missing: quicklaunch pins the circle the
+                    // instant you press the button, and the `State` that
+                    // crosses the spawn on the wire carries no such circle.
+                    // Pruning straight against `known` there pinned it and
+                    // then silently unpinned it (native twin: `settle_absent`
+                    // in app/workspaces.rs, fixed first in 0.26.0).
+                    let referenced: Vec<String> = self
+                        .subs
+                        .pinned
+                        .iter()
+                        .chain(self.subs.seen.iter())
+                        .cloned()
+                        .collect();
+                    let known_set: std::collections::BTreeSet<String> =
+                        known.iter().cloned().collect();
+                    let protected: Vec<String> = seance_core::util::settle_absent(
+                        &mut self.absent_since,
+                        referenced.iter().map(String::as_str),
+                        &known_set,
+                        now_ms as u64,
+                    )
+                    .into_iter()
+                    .collect();
+                    self.subs_dirty |= self.subs.reconcile(&protected);
                 } else {
                     self.subs.seed(&known);
                     self.subs_dirty = true;
@@ -968,6 +997,23 @@ mod tests {
         assert_eq!(st.workspace_activity.get("lab"), Some(&2_000.0));
     }
 
+    /// `state_event` plus one more circle, for the "the spawn landed" half of
+    /// the quicklaunch race.
+    fn state_event_with_extra(ws: &str) -> GuiEvent {
+        serde_json::from_str(&format!(
+            r#"{{"event":"state","panes":[{{"kind":"term","name":"w","slug":"w-1",
+                "workspace":"lab","command":"bash","cwd":"/","tiled":true,
+                "running":true,"title":null,"scratchpad":"/tmp/p"}},
+                {{"kind":"term","name":"x","slug":"x-1",
+                "workspace":"{ws}","command":"bash","cwd":"/","tiled":true,
+                "running":true,"title":null,"scratchpad":"/tmp/x"}}],
+                "selected_workspace":"lab","focused_pane":"w-1",
+                "extra_workspaces":[],"workspace_order":["lab","{ws}"],
+                "asks":[],"statuses":[]}}"#
+        ))
+        .unwrap()
+    }
+
     fn state_event_with_meta(out_ms: u64, touch_ms: u64) -> GuiEvent {
         serde_json::from_str(&format!(
             r#"{{"event":"state","panes":[{{"kind":"term","name":"w","slug":"w-1",
@@ -1142,6 +1188,44 @@ mod tests {
             st.displayed_active_ring(),
             vec!["lab".to_string(), "raid".to_string()]
         );
+    }
+
+    /// THE quicklaunch bug, web side: the launch button pins the circle the
+    /// instant you press it, and the `State` crossing that spawn on the wire
+    /// still knows nothing about it. Pruning straight against `known` pinned
+    /// it and then silently unpinned it, which is exactly how circles started
+    /// from the phone lost their pins.
+    #[test]
+    fn a_pin_placed_before_the_spawn_lands_survives_the_next_state() {
+        let mut st = ClientState::default();
+        st.apply_event(state_event(), 0.0);
+        // Launch: pin first, spawn is still in flight.
+        st.subs.pin("claude-24");
+        st.apply_event(state_event(), 10.0);
+        assert!(
+            st.subs.is_pinned("claude-24"),
+            "a pin for an unconfirmed circle must not be pruned"
+        );
+
+        // It arrives; the pin is now backed by a real circle.
+        st.apply_event(state_event_with_extra("claude-24"), 20.0);
+        assert!(st.subs.is_pinned("claude-24"));
+    }
+
+    /// The shield is a grace period, not an amnesty: a circle that never turns
+    /// up (or gets killed) still leaves the arrangement.
+    #[test]
+    fn a_pin_for_a_circle_that_never_arrives_is_eventually_pruned() {
+        let mut st = ClientState::default();
+        st.apply_event(state_event(), 0.0);
+        st.subs.pin("ghost");
+        st.apply_event(state_event(), 10.0);
+        assert!(st.subs.is_pinned("ghost"));
+        st.apply_event(
+            state_event(),
+            10.0 + seance_core::util::ABSENT_GRACE_MS as f64,
+        );
+        assert!(!st.subs.is_pinned("ghost"));
     }
 
     #[test]

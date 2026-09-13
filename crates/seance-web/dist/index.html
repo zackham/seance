@@ -48,6 +48,12 @@
         seance_mobile_key,
         seance_mobile_cycle_workspace,
         seance_mobile_scroll,
+        seance_mobile_url_at,
+        seance_mobile_rename_workspace,
+        seance_mobile_is_pinned,
+        seance_mobile_set_pinned,
+        seance_mobile_scroll_bottom,
+        seance_mobile_banish_workspace,
       } from './seance_web.js';
       await init();
       // The phone chrome below is plain JS and can't reach the websocket —
@@ -57,6 +63,12 @@
         key: seance_mobile_key,
         cycle: seance_mobile_cycle_workspace,
         scroll: seance_mobile_scroll,
+        urlAt: seance_mobile_url_at,
+        rename: seance_mobile_rename_workspace,
+        isPinned: seance_mobile_is_pinned,
+        setPinned: seance_mobile_set_pinned,
+        toBottom: seance_mobile_scroll_bottom,
+        banish: seance_mobile_banish_workspace,
       };
       window.dispatchEvent(new Event('seance-ready'));
     </script>
@@ -162,9 +174,23 @@
         var micBtn = mk('button', 'm-mic', 'm-btn', '●');
         micBtn.type = 'button';
         micBtn.setAttribute('aria-label', 'voice prompt');
+        // Jump to the live tail. Present only while the focused pane is
+        // scrolled back: the wasm puts `data-scrolled` on <body> once per
+        // frame (`sync_scroll_chip`) and the CSS does the rest, so there is no
+        // state to keep in here and nothing to poll.
+        var botBtn = mk('button', 'm-bottom', 'm-btn', '↓');
+        botBtn.type = 'button';
+        botBtn.setAttribute('aria-label', 'jump to the bottom');
+        botBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          if (!window.seanceMobile || !window.seanceMobile.toBottom()) {
+            toast('no pane focused — tap a terminal first');
+          }
+        });
         bar.appendChild(navBtn);
         bar.appendChild(kbBtn);
         bar.appendChild(micBtn);
+        bar.appendChild(botBtn);
         body.appendChild(bar);
 
         // ── drawer ────────────────────────────────────────────────────────
@@ -197,16 +223,144 @@
         var menu = mk('div', 'm-menu');
         menu.hidden = true;
         var menuTitle = mk('div', 'm-menu-title', null, '');
+        // Rename lives here because the desktop's two spellings — double-click
+        // a rail row, or its right-click menu — are both unreachable from a
+        // finger. Renaming moves the LABEL only; the slug is the circle.
+        var menuNameHead = mk('div', null, 'm-menu-sec', 'name');
+        var menuName = mk('div', 'm-menu-name');
+        var nameInput = document.createElement('input');
+        nameInput.id = 'm-menu-name-input';
+        nameInput.type = 'text';
+        nameInput.setAttribute('autocomplete', 'off');
+        nameInput.setAttribute('autocorrect', 'off');
+        nameInput.setAttribute('autocapitalize', 'none');
+        nameInput.setAttribute('spellcheck', 'false');
+        nameInput.setAttribute('enterkeyhint', 'done');
+        nameInput.setAttribute('aria-label', 'circle name');
+        var nameSave = mk('button', 'm-menu-rename', 'm-sheet-btn', 'rename');
+        nameSave.type = 'button';
+        menuName.appendChild(nameInput);
+        menuName.appendChild(nameSave);
+        // Pin: the desktop's is a right-click on a rail row, which a finger
+        // has no spelling for — so a circle launched from the phone (they
+        // launch pinned) could never be put back once it slipped.
+        var menuRailHead = mk('div', null, 'm-menu-sec', 'rail');
+        var pinBtn = mk('button', 'm-menu-pin', 'm-sheet-btn', 'pin to top');
+        pinBtn.type = 'button';
         var menuPrsHead = mk('div', null, 'm-menu-sec', 'pull requests');
         var menuPrs = mk('div', 'm-menu-prs');
         var menuConnHead = mk('div', null, 'm-menu-sec', 'connection');
         var menuConn = mk('div', 'm-menu-conn', null, '');
+        // Destructive, so it sits at the bottom, away from the controls you
+        // reach for every day — and it arms before it fires, the same two-tap
+        // the rail row's × uses.
+        var menuDangerHead = mk('div', null, 'm-menu-sec', 'danger');
+        var banishBtn = mk('button', 'm-menu-banish', 'm-sheet-btn', 'banish circle');
+        banishBtn.type = 'button';
         var menuClose = mk('button', 'm-menu-close', 'm-sheet-btn', 'close');
         menuClose.type = 'button';
-        [menuTitle, menuPrsHead, menuPrs, menuConnHead, menuConn, menuClose].forEach(function (el) {
+        [
+          menuTitle,
+          menuNameHead,
+          menuName,
+          menuRailHead,
+          pinBtn,
+          menuPrsHead,
+          menuPrs,
+          menuConnHead,
+          menuConn,
+          menuDangerHead,
+          banishBtn,
+          menuClose,
+        ].forEach(function (el) {
           menu.appendChild(el);
         });
         body.appendChild(menu);
+
+        function commitRename() {
+          var v = nameInput.value.trim();
+          nameInput.blur();
+          if (!v || v === menuTitle.textContent) return;
+          if (!window.seanceMobile || !window.seanceMobile.rename(v)) {
+            toast('no circle selected');
+            return;
+          }
+          // The daemon echoes a fresh state and the topbar repaints from it;
+          // this is just so the sheet you are looking at isn't stale.
+          menuTitle.textContent = v;
+          toast('renamed');
+        }
+        // Two-tap arm. The window is deliberately short: an armed destructive
+        // button you forgot about is the thing to avoid.
+        var banishArm = null;
+        function disarmBanish() {
+          clearTimeout(banishArm);
+          banishArm = null;
+          banishBtn.textContent = 'banish circle';
+          banishBtn.classList.remove('armed');
+        }
+        banishBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          if (!banishArm) {
+            banishBtn.textContent = 'tap again to banish';
+            banishBtn.classList.add('armed');
+            banishArm = setTimeout(disarmBanish, 3000);
+            return;
+          }
+          disarmBanish();
+          var label = window.seanceMobile && window.seanceMobile.banish();
+          if (!label) {
+            toast('no circle selected');
+            return;
+          }
+          closeMenu();
+          toast('banished ' + label);
+        });
+
+        function paintPin() {
+          var on = window.seanceMobile ? window.seanceMobile.isPinned() : undefined;
+          // undefined = no circle selected; leave the control out entirely
+          // rather than showing one that does nothing.
+          pinBtn.hidden = on === undefined;
+          menuRailHead.hidden = on === undefined;
+          pinBtn.textContent = on ? 'unpin' : 'pin to top';
+          pinBtn.classList.toggle('on', !!on);
+        }
+        pinBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          if (!window.seanceMobile) return;
+          var was = window.seanceMobile.isPinned();
+          if (was === undefined) return;
+          var now = window.seanceMobile.setPinned(!was);
+          paintPin();
+          toast(now ? 'pinned to the top' : 'unpinned');
+        });
+        nameSave.addEventListener('click', function (e) {
+          e.preventDefault();
+          commitRename();
+        });
+        // Select-all on focus, like the desktop's inline rename: a rename is
+        // usually a replacement, and re-tapping the field drops the selection
+        // when it isn't. iOS wants it off the focus turn, not in it.
+        nameInput.addEventListener('focus', function () {
+          setTimeout(function () {
+            try {
+              nameInput.select();
+            } catch (e) {}
+          }, 0);
+        });
+        nameInput.addEventListener('keydown', function (e) {
+          // The document keymap and the PTY must never see this typing.
+          e.stopPropagation();
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commitRename();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            nameInput.value = menuTitle.textContent;
+            nameInput.blur();
+          }
+        });
 
         function chipsNode() {
           return document.getElementById('pr-chips');
@@ -214,6 +368,8 @@
         function openMenu() {
           var t = document.querySelector('.tb-title');
           menuTitle.textContent = t ? t.textContent : '';
+          nameInput.value = menuTitle.textContent;
+          paintPin();
           var chips = chipsNode();
           menuPrs.textContent = '';
           if (chips && chips.children.length) {
@@ -229,6 +385,7 @@
           body.classList.add('m-menu-open');
         }
         function closeMenu() {
+          disarmBanish();
           var chips = menuPrs.querySelector('.pr-chips');
           if (chips) {
             // A re-render while we were open will have built a fresh row in
@@ -456,6 +613,96 @@
         pasteSend.addEventListener('click', function (e) {
           e.preventDefault();
           if (sendPaste(pasteTa.value)) closePasteSheet();
+        });
+
+        // ── link sheet ────────────────────────────────────────────────────
+        // A tap on a URL in a pane lands here rather than opening straight
+        // away: taps on a terminal are how you focus a pane, so a mis-hit
+        // would throw you out to the browser mid-session. The sheet is also
+        // where `copy` lives, which on a phone is the more useful half.
+        var linkSheet = mk('div', 'm-link');
+        linkSheet.hidden = true;
+        var linkCard = mk('div', 'm-link-card');
+        var linkHead = mk('div', 'm-link-head', null, 'link');
+        var linkUrl = mk('div', 'm-link-url', null, '');
+        var linkBar = mk('div', 'm-link-bar');
+        var linkCancel = mk('button', 'm-link-cancel', 'm-sheet-btn', 'cancel');
+        linkCancel.type = 'button';
+        var linkCopy = mk('button', 'm-link-copy', 'm-sheet-btn', 'copy');
+        linkCopy.type = 'button';
+        var linkOpen = mk('button', 'm-link-open', 'm-sheet-btn primary', 'open');
+        linkOpen.type = 'button';
+        [linkCancel, linkCopy, linkOpen].forEach(function (b) {
+          linkBar.appendChild(b);
+        });
+        [linkHead, linkUrl, linkBar].forEach(function (el) {
+          linkCard.appendChild(el);
+        });
+        linkSheet.appendChild(linkCard);
+        body.appendChild(linkSheet);
+
+        var linkHref = '';
+        function openLinkSheet(url) {
+          linkHref = url;
+          linkUrl.textContent = url;
+          linkSheet.hidden = false;
+          body.classList.add('m-link-open');
+        }
+        function closeLinkSheet() {
+          linkSheet.hidden = true;
+          body.classList.remove('m-link-open');
+          linkHref = '';
+        }
+        linkSheet.addEventListener('click', function (e) {
+          if (e.target === linkSheet) closeLinkSheet(); // backdrop
+        });
+        linkCancel.addEventListener('click', function (e) {
+          e.preventDefault();
+          closeLinkSheet();
+        });
+        linkCopy.addEventListener('click', function (e) {
+          e.preventDefault();
+          var url = linkHref;
+          closeLinkSheet();
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(
+              function () {
+                toast('copied');
+              },
+              function () {
+                toast('clipboard refused — needs the https url');
+              }
+            );
+          } else {
+            toast('clipboard needs https — use the seance.ham.xyz url');
+          }
+        });
+        linkOpen.addEventListener('click', function (e) {
+          e.preventDefault();
+          var url = linkHref;
+          closeLinkSheet();
+          // Straight out of the tap, so it still counts as a user gesture.
+          // No feature string: passing 'noopener' makes window.open return
+          // null even when it DID open the tab, and the fallback below then
+          // opens a second one. Sever the opener afterwards instead.
+          var w = null;
+          try {
+            w = window.open(url, '_blank');
+          } catch (err) {}
+          if (w) {
+            try {
+              w.opener = null;
+            } catch (err) {}
+            return;
+          }
+          var a = document.createElement('a');
+          a.href = url;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.style.display = 'none';
+          body.appendChild(a);
+          a.click();
+          a.remove();
         });
 
         // Typed characters. iOS software keyboards don't produce reliable
@@ -948,10 +1195,20 @@
             if (!g) return;
             var gesture = g;
             g = null;
-            if (gesture.axis !== 'x') return;
             if (!mobile() || !window.seanceMobile) return;
             var t = e.changedTouches && e.changedTouches[0];
             if (!t) return;
+            // A tap never locked an axis (it never travelled 10px). Ask the
+            // wasm what is under the finger; a URL raises the link sheet and
+            // anything else stays a plain tap on the terminal.
+            if (gesture.axis === null) {
+              if (!gesture.slug || !window.seanceMobile.urlAt) return;
+              if (Date.now() - gesture.t0 > 700) return;
+              var hit = window.seanceMobile.urlAt(gesture.slug, t.clientX, t.clientY);
+              if (hit) openLinkSheet(hit);
+              return;
+            }
+            if (gesture.axis !== 'x') return;
             var dx = t.clientX - gesture.x0;
             if (Date.now() - gesture.t0 > 800) return;
             if (Math.abs(dx) < 60) return;
@@ -967,6 +1224,7 @@
           if (e.key !== 'Escape') return;
           if (document.activeElement === catcher) return;
           if (!pasteSheet.hidden) closePasteSheet();
+          if (!linkSheet.hidden) closeLinkSheet();
           if (!sheet.hidden) closeSheet();
           setNav(false);
         });

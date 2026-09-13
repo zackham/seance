@@ -1,5 +1,7 @@
 //! Small pure helpers shared by daemon and clients.
 
+use std::collections::{BTreeSet, HashMap};
+
 /// Lowercases, keeps ASCII alphanumerics, maps every other run of characters to
 /// a single `-`, trims leading/trailing `-`, and falls back to `"session"` when
 /// nothing usable remains.
@@ -53,7 +55,6 @@ pub fn title_looks_busy(title: &str) -> bool {
     )
 }
 
-
 /// Age bucketed for ORDERING circles in the rail — coarser than the label the
 /// row displays, on purpose.
 ///
@@ -101,6 +102,58 @@ pub fn unique_slug(name: &str, taken: &[&str]) -> String {
     }
 }
 
+/// How long a name the daemon has stopped mentioning is shielded from `prune`
+/// before it is dropped.
+///
+/// The asymmetry is the whole point: keeping a dead name costs one string in a
+/// json file, dropping a live one destroys something he asked for. Two ways a
+/// name goes briefly missing — a quicklaunch pin lands before its spawn round
+/// trip completes, and any window's `State` can lag another window's fresh
+/// circle. Both resolve in well under a minute.
+pub const ABSENT_GRACE_MS: u64 = 60_000;
+
+/// Track how long each name the arrangement references has been missing from
+/// the daemon's world, and return the set `prune` may keep: what the daemon
+/// knows, plus anything missing for less than [`ABSENT_GRACE_MS`].
+///
+/// Pruning straight against `known` is destructive on a view that merely lags:
+/// a quicklaunch pin placed before its spawn lands, or a circle another window
+/// created a moment ago, both look identical to "killed" for one `State`.
+///
+/// Shared by both clients — the web rail hit the identical bug, since the same
+/// pin-then-spawn ordering produces the same one-`State` gap there.
+pub fn settle_absent<'a>(
+    absent: &mut HashMap<String, u64>,
+    referenced: impl Iterator<Item = &'a str>,
+    known: &BTreeSet<String>,
+    now: u64,
+) -> BTreeSet<String> {
+    for name in referenced {
+        if !known.contains(name) {
+            absent.entry(name.to_string()).or_insert(now);
+        }
+    }
+    // Back in the world → forget it ever went missing.
+    absent.retain(|name, _| !known.contains(name));
+    let mut protected = known.clone();
+    protected.extend(
+        absent
+            .iter()
+            .filter(|(_, since)| now.saturating_sub(**since) < ABSENT_GRACE_MS)
+            .map(|(name, _)| name.clone()),
+    );
+    protected
+}
+
+/// Is a broadcast rail arrangement someone else's, or our own echo?
+///
+/// `pending > 0` means a write of ours is queued or in flight, so nothing the
+/// daemon is broadcasting right now can reflect our newest state. Otherwise it
+/// is ours exactly when it matches what we last sent.
+pub fn rail_prefs_is_foreign(pending: usize, last_sent: Option<&str>, json: &str) -> bool {
+    pending == 0 && last_sent != Some(json)
+}
+
 #[cfg(test)]
 mod busy_title_tests {
     use super::title_looks_busy;
@@ -131,5 +184,96 @@ mod busy_title_tests {
         assert!(!title_looks_busy("zsh"));
         assert!(!title_looks_busy(""));
         assert!(!title_looks_busy("~/work/seance"));
+    }
+}
+
+#[cfg(test)]
+mod rail_tests {
+    use super::*;
+
+    fn known(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The quicklaunch bug: the pin lands before the spawn round trip does, so
+    /// the next `State` carries no such circle.
+    #[test]
+    fn a_name_the_daemon_has_not_mentioned_yet_survives() {
+        let mut absent = HashMap::new();
+        let p = settle_absent(
+            &mut absent,
+            ["staff-report"].into_iter(),
+            &known(&["lab"]),
+            1_000,
+        );
+        assert!(p.contains("staff-report"), "a fresh pin must not be pruned");
+        assert_eq!(absent.get("staff-report"), Some(&1_000));
+    }
+
+    /// Still missing a full grace period later — now it really is gone.
+    #[test]
+    fn a_name_missing_past_the_grace_is_dropped() {
+        let mut absent = HashMap::new();
+        settle_absent(&mut absent, ["gone"].into_iter(), &known(&["lab"]), 1_000);
+        let p = settle_absent(
+            &mut absent,
+            ["gone"].into_iter(),
+            &known(&["lab"]),
+            1_000 + ABSENT_GRACE_MS,
+        );
+        assert!(!p.contains("gone"));
+    }
+
+    /// The clock starts at FIRST absence and doesn't restart on every `State`,
+    /// or a killed circle would be shielded forever.
+    #[test]
+    fn the_absence_clock_does_not_restart_each_state() {
+        let mut absent = HashMap::new();
+        for t in [1_000, 2_000, 3_000] {
+            settle_absent(&mut absent, ["gone"].into_iter(), &known(&[]), t);
+        }
+        assert_eq!(absent.get("gone"), Some(&1_000), "first sighting wins");
+    }
+
+    /// A circle that shows up resets: a later disappearance gets its own full
+    /// grace rather than inheriting a stale clock.
+    #[test]
+    fn reappearing_clears_the_absence() {
+        let mut absent = HashMap::new();
+        settle_absent(&mut absent, ["ws"].into_iter(), &known(&[]), 1_000);
+        settle_absent(&mut absent, ["ws"].into_iter(), &known(&["ws"]), 2_000);
+        assert!(absent.is_empty(), "back in the world");
+        let p = settle_absent(&mut absent, ["ws"].into_iter(), &known(&[]), 3_000);
+        assert!(p.contains("ws"));
+        assert_eq!(absent.get("ws"), Some(&3_000));
+    }
+
+    /// The daemon echoes every write back to its sender. Adopting that echo is
+    /// how a pin undid itself: the window replaced fresh local state with an
+    /// older copy of it.
+    #[test]
+    fn our_own_echo_is_never_adopted() {
+        let mine = r#"{"pinned":["lab"]}"#;
+        assert!(!rail_prefs_is_foreign(0, Some(mine), mine));
+    }
+
+    /// A real change from another window still lands.
+    #[test]
+    fn another_windows_arrangement_is_adopted() {
+        assert!(rail_prefs_is_foreign(
+            0,
+            Some(r#"{"pinned":["lab"]}"#),
+            r#"{"pinned":["lab","raid"]}"#
+        ));
+        // Nothing sent yet — anything inbound is foreign by definition.
+        assert!(rail_prefs_is_foreign(0, None, r#"{"pinned":[]}"#));
+    }
+
+    /// While a write of ours is queued or in flight, ANY broadcast is stale by
+    /// construction — including one that happens to differ from what we sent.
+    #[test]
+    fn nothing_is_adopted_while_our_write_is_in_flight() {
+        assert!(!rail_prefs_is_foreign(1, Some("a"), "b"));
+        assert!(!rail_prefs_is_foreign(3, None, "b"));
     }
 }

@@ -1,4 +1,24 @@
 /**
+ * Banish the selected circle — kill every pane in it — and land on a
+ * neighbour. Returns the label of what was banished, for the toast.
+ *
+ * The rail row's `×` is the desktop spelling and it is on the phone too, but
+ * it is a 14px hover-sized target inside a row whose tap selects the circle;
+ * this is the same verb with room to press it. The confirm step lives in the
+ * chrome (arm, then fire), mirroring the row's two-click arm.
+ * @returns {string | undefined}
+ */
+export function seance_mobile_banish_workspace() {
+    const ret = wasm.seance_mobile_banish_workspace();
+    let v1;
+    if (ret[0] !== 0) {
+        v1 = getStringFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    }
+    return v1;
+}
+
+/**
  * Swipe target: step to the previous (-1) / next (+1) circle.
  * @param {number} delta
  * @returns {boolean}
@@ -6,6 +26,16 @@
 export function seance_mobile_cycle_workspace(delta) {
     const ret = wasm.seance_mobile_cycle_workspace(delta);
     return ret !== 0;
+}
+
+/**
+ * Is the selected circle pinned to the top of the rail? `None` = nothing
+ * selected, which is the phone chrome's cue to hide the control.
+ * @returns {boolean | undefined}
+ */
+export function seance_mobile_is_pinned() {
+    const ret = wasm.seance_mobile_is_pinned();
+    return ret === 0xFFFFFF ? undefined : ret !== 0;
 }
 
 /**
@@ -23,6 +53,20 @@ export function seance_mobile_key(key, ctrl, alt, shift) {
     const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.seance_mobile_key(ptr0, len0, ctrl, alt, shift);
+    return ret !== 0;
+}
+
+/**
+ * Rename the selected circle. The slug never moves (circle identity is the
+ * slug, `engine/workspaces.rs`), so this only changes the label the rail and
+ * topbar show — the phone's reach for the desktop's double-click rename.
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function seance_mobile_rename_workspace(name) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.seance_mobile_rename_workspace(ptr0, len0);
     return ret !== 0;
 }
 
@@ -48,6 +92,30 @@ export function seance_mobile_scroll(pane, dy_px) {
 }
 
 /**
+ * Jump the focused pane back to the live tail. The phone's button for it is
+ * raised by the `m-scrolled` body class and hidden again when this lands.
+ * @returns {boolean}
+ */
+export function seance_mobile_scroll_bottom() {
+    const ret = wasm.seance_mobile_scroll_bottom();
+    return ret !== 0;
+}
+
+/**
+ * Pin or unpin the selected circle; returns the state it ended in.
+ *
+ * The desktop reaches this by right-clicking a rail row — a gesture a finger
+ * doesn't have, which is why the circles launched from the phone could never
+ * be put back where he wanted them.
+ * @param {boolean} pinned
+ * @returns {boolean | undefined}
+ */
+export function seance_mobile_set_pinned(pinned) {
+    const ret = wasm.seance_mobile_set_pinned(pinned);
+    return ret === 0xFFFFFF ? undefined : ret !== 0;
+}
+
+/**
  * Type text into the focused pane. `submit` appends a carriage return.
  * Returns false when nothing is focused, so JS can keep the draft.
  * @param {string} text
@@ -59,6 +127,30 @@ export function seance_mobile_text(text, submit) {
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.seance_mobile_text(ptr0, len0, submit);
     return ret !== 0;
+}
+
+/**
+ * The URL under a viewport point in `pane` — the tap twin of native
+ * ctrl+click. `None` means the finger landed on plain text, which is the
+ * phone chrome's signal to leave the tap alone.
+ *
+ * Client coordinates, not offsets: a touch carries no `offsetX`, and the
+ * canvas rect is the only thing that makes the two comparable.
+ * @param {string} pane
+ * @param {number} client_x
+ * @param {number} client_y
+ * @returns {string | undefined}
+ */
+export function seance_mobile_url_at(pane, client_x, client_y) {
+    const ptr0 = passStringToWasm0(pane, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.seance_mobile_url_at(ptr0, len0, client_x, client_y);
+    let v2;
+    if (ret[0] !== 0) {
+        v2 = getStringFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    }
+    return v2;
 }
 
 export function start() {
@@ -940,6 +1032,10 @@ function __wbg_get_imports() {
             const ret = arg0.then(arg1, arg2);
             return ret;
         },
+        __wbg_top_fe120acfa924a430: function(arg0) {
+            const ret = arg0.top;
+            return ret;
+        },
         __wbg_uniform1i_7621f908f78177df: function(arg0, arg1, arg2) {
             arg0.uniform1i(arg1, arg2);
         },
@@ -993,52 +1089,52 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 457, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 431, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c5dab95b9564c094___convert__closures_____invoke___wasm_bindgen_c5dab95b9564c094___JsValue______true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("ClipboardEvent")], shim_idx: 457, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("ClipboardEvent")], shim_idx: 431, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c5dab95b9564c094___convert__closures_____invoke___wasm_bindgen_c5dab95b9564c094___JsValue______true__1);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("CloseEvent")], shim_idx: 457, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("CloseEvent")], shim_idx: 431, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c5dab95b9564c094___convert__closures_____invoke___wasm_bindgen_c5dab95b9564c094___JsValue______true__2);
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 457, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 431, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c5dab95b9564c094___convert__closures_____invoke___wasm_bindgen_c5dab95b9564c094___JsValue______true__3);
             return ret;
         },
         __wbindgen_cast_0000000000000005: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("FocusEvent")], shim_idx: 457, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("FocusEvent")], shim_idx: 431, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c5dab95b9564c094___convert__closures_____invoke___wasm_bindgen_c5dab95b9564c094___JsValue______true__4);
             return ret;
         },
         __wbindgen_cast_0000000000000006: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("KeyboardEvent")], shim_idx: 457, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("KeyboardEvent")], shim_idx: 431, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c5dab95b9564c094___convert__closures_____invoke___wasm_bindgen_c5dab95b9564c094___JsValue______true__5);
             return ret;
         },
         __wbindgen_cast_0000000000000007: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 457, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 431, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c5dab95b9564c094___convert__closures_____invoke___wasm_bindgen_c5dab95b9564c094___JsValue______true__6);
             return ret;
         },
         __wbindgen_cast_0000000000000008: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MouseEvent")], shim_idx: 457, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MouseEvent")], shim_idx: 431, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c5dab95b9564c094___convert__closures_____invoke___wasm_bindgen_c5dab95b9564c094___JsValue______true__7);
             return ret;
         },
         __wbindgen_cast_0000000000000009: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("WheelEvent")], shim_idx: 457, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("WheelEvent")], shim_idx: 431, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c5dab95b9564c094___convert__closures_____invoke___wasm_bindgen_c5dab95b9564c094___JsValue______true__8);
             return ret;
         },
         __wbindgen_cast_000000000000000a: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 467, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 441, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_c5dab95b9564c094___convert__closures_____invoke_______true_);
             return ret;
         },

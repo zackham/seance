@@ -106,6 +106,30 @@ pub struct App {
     /// (native `rename_next_spawn`).
     rename_next_spawn: Cell<bool>,
     session_counter: Cell<u64>,
+    /// The daemon's own arrangement blob, as last seen. A push rewrites only
+    /// the keys this client owns (`seen` / `pinned`) on top of it — native
+    /// puts its per-window folds and the flipped pane face in the same file,
+    /// and re-serializing our narrower shape over the top would drop them.
+    rail_base: RefCell<Option<serde_json::Value>>,
+    /// What we last handed the daemon, and how many of our writes are still in
+    /// flight. Together they tell our own broadcast echo from another window's
+    /// change (`seance_core::util::rail_prefs_is_foreign`).
+    rail_last_sent: RefCell<Option<String>>,
+    rail_pending: Rc<Cell<usize>>,
+    /// Rows each pane is scrolled back by, as far as this client can tell.
+    ///
+    /// The daemon owns the real scroll position (alacritty's display offset)
+    /// and never puts it on the wire — a snapshot is just the visible grid —
+    /// so this counts what we asked for. Both ends clamp at the bottom, which
+    /// is the end this drives, so they agree there. It can over-count — the
+    /// daemon has already hit the oldest line it kept, or something else
+    /// (`ctl send`, another window) scrolled the pane to the tail for us — and
+    /// then the button lingers until one tap clears it. The inverse, a pane
+    /// behind the tail with no button, cannot happen, which is the direction
+    /// that would actually mislead.
+    scroll_back: RefCell<HashMap<String, i32>>,
+    /// Last `m-scrolled` body class we painted (the phone's jump button).
+    scroll_chip_on: Cell<bool>,
 }
 
 /// localStorage-backed [`subs::SubStore`].
@@ -150,6 +174,11 @@ impl App {
             labels_refreshed: Cell::new(0.0),
             rename_next_spawn: Cell::new(false),
             session_counter: Cell::new(0),
+            rail_base: RefCell::new(None),
+            rail_last_sent: RefCell::new(None),
+            rail_pending: Rc::new(Cell::new(0)),
+            scroll_back: RefCell::new(HashMap::new()),
+            scroll_chip_on: Cell::new(false),
         })
     }
 
@@ -264,9 +293,64 @@ impl App {
     }
 
     /// Write the rail arrangement to localStorage.
+    ///
+    /// Incidental bookkeeping only — `seen`, a prune, a fold. These fire on
+    /// selection and on every `State`, and pushing them would race deliberate
+    /// changes from other windows (native `save_arrangement_local`).
     fn persist_subs(&self) {
         let st = self.state.borrow();
         subs::save(&LocalStore, &st.subs);
+    }
+
+    /// A deliberate change (pin / unpin): localStorage AND the daemon.
+    ///
+    /// Without the second half a pin lived in one browser and died at the next
+    /// reload, because `load_rail_prefs` adopts the daemon's copy on connect —
+    /// so the phone could pin a circle and the desk would never hear about it,
+    /// and neither would the phone after a refresh.
+    fn save_arrangement(&self) {
+        self.persist_subs();
+        self.push_rail_to_daemon();
+    }
+
+    /// Hand the arrangement to the daemon, which persists it and broadcasts it
+    /// to every other window.
+    ///
+    /// Only `seen` and `pinned` are ours to write: the same blob carries
+    /// native's folds and flipped-pane face, and this client models neither.
+    /// Patching the daemon's own json is what keeps them intact.
+    fn push_rail_to_daemon(&self) {
+        let mut root = self
+            .rail_base
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !root.is_object() {
+            root = serde_json::json!({});
+        }
+        {
+            let st = self.state.borrow();
+            root["seen"] = serde_json::json!(st.subs.seen);
+            root["pinned"] = serde_json::json!(st.subs.pinned);
+        }
+        let Ok(json) = serde_json::to_string(&root) else {
+            return;
+        };
+        *self.rail_base.borrow_mut() = Some(root);
+        *self.rail_last_sent.borrow_mut() = Some(json.clone());
+        self.rail_pending.set(self.rail_pending.get() + 1);
+        let Some(conn) = self.conn.borrow().as_ref().cloned() else {
+            // Offline: localStorage still holds it, and the next connect
+            // adopts the daemon's copy — the pin is lost, not half-written.
+            self.rail_pending
+                .set(self.rail_pending.get().saturating_sub(1));
+            return;
+        };
+        let app_pending = Rc::clone(&self.rail_pending);
+        let cb: Box<dyn FnOnce(Result<serde_json::Value, String>)> = Box::new(move |_| {
+            app_pending.set(app_pending.get().saturating_sub(1));
+        });
+        conn.fs_call(seance_core::protocol::FsOp::SubsSave { json }, cb);
     }
 
     /// Pull the daemon-owned rail arrangement on (re)connect.
@@ -290,16 +374,32 @@ impl App {
         }
     }
 
-    /// Adopt a shared arrangement blob (active/seen/pinned).
+    /// Adopt a shared arrangement blob (seen/pinned).
     ///
     /// Adopt WITHOUT echoing: `persist_subs` only writes localStorage, so this
     /// never calls `SubsSave` and cannot start the broadcast loop the daemon
     /// warns about. Local fold state (`collapsed`) is deliberately preserved —
-    /// which bands you keep rolled up is per-window, unlike membership.
+    /// which clusters you keep rolled up is per-window, unlike membership.
+    ///
+    /// Our own write comes back here too (the daemon broadcasts to every
+    /// window including the sender). Adopting that echo is how a pin undoes
+    /// itself: fresh local state replaced by an older copy of it.
     fn adopt_rail_prefs(&self, json: &str) {
+        if !seance_core::util::rail_prefs_is_foreign(
+            self.rail_pending.get(),
+            self.rail_last_sent.borrow().as_deref(),
+            json,
+        ) {
+            return;
+        }
         let Some(pref) = subs::SubPrefs::parse(json) else {
             return;
         };
+        // Keep the daemon's own shape around: a later push patches `seen` and
+        // `pinned` into THIS, so keys we don't model survive us.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
+            *self.rail_base.borrow_mut() = Some(v);
+        }
         {
             let mut st = self.state.borrow_mut();
             if st.subs.pinned == pref.pinned && st.subs.seen == pref.seen {
@@ -313,21 +413,21 @@ impl App {
         self.need_rebuild.set(true);
     }
 
-    /// Context menu "pin": into the top section.
+    /// Row menu / circle menu "pin": into the top section.
     pub fn pin_workspace(self: &Rc<Self>, ws: &str) {
         if !self.state.borrow_mut().subs.pin(ws) {
             return;
         }
-        self.persist_subs();
+        self.save_arrangement();
         self.need_rebuild.set(true);
     }
 
-    /// Context menu "unpin": back into the normal band.
+    /// Row menu / circle menu "unpin": back into the normal band.
     pub fn unpin_workspace(self: &Rc<Self>, ws: &str) {
         if !self.state.borrow_mut().subs.unpin(ws) {
             return;
         }
-        self.persist_subs();
+        self.save_arrangement();
         self.need_rebuild.set(true);
     }
 
@@ -552,6 +652,7 @@ impl App {
             pr_board::refresh(&st, now_unix_ms(&st));
         }
         self.sync_sizes();
+        self.sync_scroll_chip();
         self.paint();
         if let Some(c) = self.conn.borrow().as_ref() {
             self.probe.borrow_mut().set_rtt(c.rtt_ms());
@@ -576,8 +677,79 @@ impl App {
             .borrow_mut()
             .insert(pane.to_string(), now_ms());
         self.blink_t0.set(now_ms());
+        // The daemon scrolls a pane to the bottom on every keystroke
+        // (`GuiRequest::Input` → `scroll_to_bottom`), so typing is also how
+        // you leave the scrollback.
+        self.at_bottom(pane);
         if let Some(c) = self.conn.borrow().as_ref() {
             c.input(pane, bytes);
+        }
+    }
+
+    /// Positive `delta` is back in history (the `GuiRequest::Scroll`
+    /// convention), so this is simply how far from the live tail we believe
+    /// the pane is. Never below zero: the daemon won't go past the bottom.
+    fn note_scroll(&self, pane: &str, delta: i32) {
+        let mut back = self.scroll_back.borrow_mut();
+        let v = back.entry(pane.to_string()).or_insert(0);
+        *v = (*v + delta).max(0);
+    }
+
+    fn at_bottom(&self, pane: &str) {
+        self.scroll_back.borrow_mut().remove(pane);
+    }
+
+    fn scrolled_back(&self, pane: &str) -> bool {
+        self.scroll_back.borrow().get(pane).is_some_and(|v| *v > 0)
+    }
+
+    /// The pane the jump-to-bottom button would act on: the focused one when
+    /// it is behind the tail, else any pane on screen that is.
+    ///
+    /// Focus alone is not the right question on a phone. A finger drag scrolls
+    /// whatever is under it (`seance_mobile_scroll` takes the pane, not the
+    /// focus), so a pane you have never tapped can be sitting in history — and
+    /// on a fresh load nothing is focused at all.
+    fn scrolled_back_pane(&self) -> Option<String> {
+        if let Some(pane) = self.focused_pane() {
+            if self.scrolled_back(&pane) {
+                return Some(pane);
+            }
+        }
+        let ws = self.selected_workspace()?;
+        let panes: Vec<String> = {
+            let st = self.state.borrow();
+            st.panes
+                .iter()
+                .filter(|p| p.workspace == ws)
+                .map(|p| p.slug.clone())
+                .collect()
+        };
+        panes.into_iter().find(|slug| self.scrolled_back(slug))
+    }
+
+    /// Raise (or drop) the phone's jump-to-bottom button, via a `<body>`
+    /// attribute its CSS keys off. Once per frame rather than at every
+    /// mutation point: there are six of those and missing one leaves a button
+    /// that lies about where you are.
+    ///
+    /// An attribute and not a class: the phone chrome owns `body.className`
+    /// (drawer, keyboard, sheets) and writing it from here would wipe whatever
+    /// it had up.
+    fn sync_scroll_chip(&self) {
+        let on = self.scrolled_back_pane().is_some();
+        if self.scroll_chip_on.get() == on {
+            return;
+        }
+        self.scroll_chip_on.set(on);
+        let Some(body) = document().body() else {
+            return;
+        };
+        let el: &web_sys::Element = body.unchecked_ref();
+        if on {
+            let _ = el.set_attribute("data-scrolled", "1");
+        } else {
+            let _ = el.remove_attribute("data-scrolled");
         }
     }
 
@@ -761,6 +933,20 @@ impl App {
         let Some((col, row, idx)) = self.cell_at(&pane, &ev) else {
             return;
         };
+        // ctrl+click opens the link under the cursor, same as the native pane.
+        if ev.ctrl_key() {
+            let st = self.state.borrow();
+            let hit = st
+                .grids
+                .get(&pane)
+                .and_then(|s| seance_core::links::url_at_cell(s, row, col));
+            drop(st);
+            if let Some(url) = hit {
+                ui::open_url(&url);
+                ev.prevent_default();
+                return;
+            }
+        }
         let st = self.state.borrow();
         let mouse_mode = st
             .grids
@@ -859,6 +1045,7 @@ impl App {
         match input::wheel_to_action(&ev, &snap_clone, cell_h, col, row, acc) {
             input::WheelAction::Scroll(rows) => {
                 drop(accum);
+                self.note_scroll(&pane, rows);
                 self.send(&GuiRequest::Scroll { pane, delta: rows });
             }
             input::WheelAction::Bytes(bytes) => {
@@ -931,6 +1118,9 @@ impl Actions for AppActions {
         });
     }
     fn inject(&self, pane: &str, text: &str, submit: bool) {
+        // Inject scrolls the pane to the bottom daemon-side, same as a
+        // keystroke.
+        self.0.at_bottom(pane);
         self.0.send(&GuiRequest::Inject {
             pane: pane.into(),
             text: text.into(),
@@ -941,12 +1131,14 @@ impl Actions for AppActions {
         self.0.pty_input(pane, bytes);
     }
     fn scroll(&self, pane: &str, delta: i32) {
+        self.0.note_scroll(pane, delta);
         self.0.send(&GuiRequest::Scroll {
             pane: pane.into(),
             delta,
         });
     }
     fn scroll_bottom(&self, pane: &str) {
+        self.0.at_bottom(pane);
         self.0.send(&GuiRequest::ScrollBottom { pane: pane.into() });
     }
     fn resize(&self, pane: &str, cols: u16, rows: u16) {
@@ -1011,7 +1203,11 @@ impl Actions for AppActions {
             st.subs.pin(&ws);
             st.selected_workspace = Some(ws);
         }
-        self.0.persist_subs();
+        // Through the daemon, like any other pin: a circle launched from the
+        // phone should be pinned at the desk too. The pin references a circle
+        // the daemon hasn't minted yet — `settle_absent` is what stops the
+        // next `State` from pruning it straight back off.
+        self.0.save_arrangement();
         self.0.need_rebuild.set(true);
     }
 
@@ -1284,9 +1480,10 @@ fn initial_token() -> Option<String> {
 }
 
 // ── mobile bridge ───────────────────────────────────────────────────────
-// The phone chrome (mic, key pad, swipe) is plain JS in www/index.html,
-// because none of it needs the renderer — but the websocket lives in here,
-// so JS has no way to reach a pane. These three functions are that seam.
+// The phone chrome (mic, key pad, swipe, circle menu) is plain JS in
+// www/index.html, because none of it needs the renderer — but the websocket
+// (and the grid) lives in here, so JS has no way to reach a pane. These
+// functions are that seam.
 //
 // Deliberately thin: text and keys go through the SAME `key_to_bytes` /
 // `paste_bytes` encoders and the same `pty_input` path a physical keyboard
@@ -1381,6 +1578,7 @@ pub fn seance_mobile_scroll(pane: &str, dy_px: f64) -> bool {
         };
         match input::scroll_action(rows, &snap, 0, 0, true) {
             input::WheelAction::Scroll(r) => {
+                app.note_scroll(pane, r);
                 app.send(&GuiRequest::Scroll {
                     pane: pane.to_string(),
                     delta: r,
@@ -1393,6 +1591,123 @@ pub fn seance_mobile_scroll(pane: &str, dy_px: f64) -> bool {
             }
             input::WheelAction::None => false,
         }
+    })
+    .unwrap_or(false)
+}
+
+/// The URL under a viewport point in `pane` — the tap twin of native
+/// ctrl+click. `None` means the finger landed on plain text, which is the
+/// phone chrome's signal to leave the tap alone.
+///
+/// Client coordinates, not offsets: a touch carries no `offsetX`, and the
+/// canvas rect is the only thing that makes the two comparable.
+#[wasm_bindgen]
+pub fn seance_mobile_url_at(pane: &str, client_x: f64, client_y: f64) -> Option<String> {
+    with_mobile_app(|app| {
+        let canvas = document().get_element_by_id(&format!("canvas-{pane}"))?;
+        let rect = canvas.get_bounding_client_rect();
+        let (x, y) = (client_x - rect.left(), client_y - rect.top());
+        if x < 0.0 || y < 0.0 || x >= rect.width() || y >= rect.height() {
+            return None;
+        }
+        let (cw, ch) = app
+            .views
+            .borrow()
+            .get(pane)
+            .map(|v| v.renderer.cell_size_css())?;
+        if cw <= 0.0 || ch <= 0.0 {
+            return None;
+        }
+        let st = app.state.borrow();
+        let snap = st.grids.get(pane)?;
+        let col = ((x / cw as f64) as i32).clamp(0, snap.cols as i32 - 1) as u16;
+        let row = ((y / ch as f64) as i32).clamp(0, snap.rows as i32 - 1) as u16;
+        seance_core::links::url_at_cell(snap, row, col)
+    })
+    .flatten()
+}
+
+/// Jump the focused pane back to the live tail. The phone's button for it is
+/// raised by the `m-scrolled` body class and hidden again when this lands.
+#[wasm_bindgen]
+pub fn seance_mobile_scroll_bottom() -> bool {
+    with_mobile_app(|app| {
+        let Some(pane) = app.scrolled_back_pane().or_else(|| app.focused_pane_pub()) else {
+            return false;
+        };
+        AppActions(Rc::clone(app)).scroll_bottom(&pane);
+        app.sync_scroll_chip();
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Is the selected circle pinned to the top of the rail? `None` = nothing
+/// selected, which is the phone chrome's cue to hide the control.
+#[wasm_bindgen]
+pub fn seance_mobile_is_pinned() -> Option<bool> {
+    with_mobile_app(|app| {
+        let ws = app.selected_workspace()?;
+        Some(app.state.borrow().subs.is_pinned(&ws))
+    })
+    .flatten()
+}
+
+/// Pin or unpin the selected circle; returns the state it ended in.
+///
+/// The desktop reaches this by right-clicking a rail row — a gesture a finger
+/// doesn't have, which is why the circles launched from the phone could never
+/// be put back where he wanted them.
+#[wasm_bindgen]
+pub fn seance_mobile_set_pinned(pinned: bool) -> Option<bool> {
+    with_mobile_app(|app| {
+        let ws = app.selected_workspace()?;
+        if pinned {
+            app.pin_workspace(&ws);
+        } else {
+            app.unpin_workspace(&ws);
+        }
+        Some(app.state.borrow().subs.is_pinned(&ws))
+    })
+    .flatten()
+}
+
+/// Banish the selected circle — kill every pane in it — and land on a
+/// neighbour. Returns the label of what was banished, for the toast.
+///
+/// The rail row's `×` is the desktop spelling and it is on the phone too, but
+/// it is a 14px hover-sized target inside a row whose tap selects the circle;
+/// this is the same verb with room to press it. The confirm step lives in the
+/// chrome (arm, then fire), mirroring the row's two-click arm.
+#[wasm_bindgen]
+pub fn seance_mobile_banish_workspace() -> Option<String> {
+    with_mobile_app(|app| {
+        let ws = app.selected_workspace()?;
+        let label = app.state.borrow().workspace_label(&ws);
+        app.kill_workspace_selecting_neighbor(&ws);
+        Some(label)
+    })
+    .flatten()
+}
+
+/// Rename the selected circle. The slug never moves (circle identity is the
+/// slug, `engine/workspaces.rs`), so this only changes the label the rail and
+/// topbar show — the phone's reach for the desktop's double-click rename.
+#[wasm_bindgen]
+pub fn seance_mobile_rename_workspace(name: &str) -> bool {
+    with_mobile_app(|app| {
+        let name = name.trim();
+        let Some(ws) = app.selected_workspace() else {
+            return false;
+        };
+        if name.is_empty() {
+            return false;
+        }
+        app.send(&GuiRequest::RenameWorkspace {
+            old: ws,
+            new: name.to_string(),
+        });
+        true
     })
     .unwrap_or(false)
 }
