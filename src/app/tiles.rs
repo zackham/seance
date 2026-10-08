@@ -436,6 +436,10 @@ impl SeanceApp {
                 .flex()
                 .flex_row()
                 .gap_0()
+                // Basis 0 so the weights split the whole height; with the
+                // default auto basis the panes' content sizes eat it and the
+                // sash drag changes nothing.
+                .flex_basis(relative(0.))
                 .flex_grow(row_w);
             for (i, pane) in row_panes.iter().enumerate() {
                 let w = self
@@ -456,6 +460,7 @@ impl SeanceApp {
                         .min_h_0()
                         .overflow_hidden()
                         .flex()
+                        .flex_basis(relative(0.))
                         .flex_grow(w)
                         .child(render_pane(
                             pane,
