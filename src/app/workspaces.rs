@@ -773,6 +773,30 @@ impl SeanceApp {
         cx.notify();
     }
 
+    /// Title-strip drag within a circle: `slug` takes `target`'s spot and
+    /// the panes between shift over one.
+    pub(super) fn move_pane_to_spot(&mut self, slug: &str, target: &str, cx: &mut Context<Self>) {
+        let pos = |s: &str| self.panes.iter().position(|p| p.slug == s);
+        let (Some(from), Some(to)) = (pos(slug), pos(target)) else {
+            return;
+        };
+        let ws = self.panes[to].workspace.clone();
+        if from == to || self.panes[from].workspace != ws {
+            return;
+        }
+        // Moving later: land after the target, i.e. before the next pane in
+        // this circle (or at the end).
+        let before = if from < to {
+            self.panes[to + 1..]
+                .iter()
+                .find(|p| p.workspace == ws)
+                .map(|p| p.slug.clone())
+        } else {
+            Some(target.to_string())
+        };
+        self.reorder_pane(slug, &ws, before.as_deref(), cx);
+    }
+
     pub(super) fn create_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let existing = self.known_workspace_names();
         let mut n = existing.len() + 1;

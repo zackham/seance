@@ -20,7 +20,7 @@ pub(super) fn decode_grid_b64(
     decode_grid_bin_onto(&bytes, base)
 }
 
-/// Payload for dragging a sidebar pane row onto a workspace header.
+/// Payload for dragging a pane by its title strip onto another pane.
 #[derive(Clone)]
 pub(super) struct DraggedPane {
     pub slug: String,
