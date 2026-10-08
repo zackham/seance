@@ -701,6 +701,21 @@ impl SeanceApp {
         }
     }
 
+    /// One pane's glyph for its sidebar row: needs-human, else working.
+    pub(super) fn pane_attention(&self, slug: &str) -> Option<WorkspaceAttention> {
+        let needs = matches!(
+            self.statuses.get(slug).map(|s| s.state.as_str()),
+            Some("needs-human") | Some("blocked") | Some("risky")
+        );
+        if needs {
+            Some(WorkspaceAttention::NeedsHuman)
+        } else if self.pane_is_live_working(slug) {
+            Some(WorkspaceAttention::Working)
+        } else {
+            None
+        }
+    }
+
     /// Live attention with title spinners (needs `&App`) — badges only;
     /// sidebar order uses [`Self::workspace_has_working_agent`].
     pub(super) fn workspace_attention_cx(&self, workspace: &str) -> Option<WorkspaceAttention> {
@@ -816,6 +831,9 @@ impl SeanceApp {
         }
         // Remember which pane was active in the circle we're leaving.
         if changed {
+            // The hovered pane row leaves with its circle, and a row that is
+            // gone never reports the pointer leaving it.
+            self.rail_hover_pane = None;
             if let (Some(old_ws), Some(slug)) =
                 (self.selected_workspace.clone(), self.active_slug.clone())
             {
@@ -1064,6 +1082,40 @@ impl SeanceApp {
                         .is_some_and(|(_, at)| at.elapsed() >= BANISH_ARM)
                     {
                         app.banish_armed = None;
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Sidebar pane-row × click: arms like [`Self::banish_click`], and the
+    /// second click inside `BANISH_ARM` kills the pane (the last pane takes
+    /// its circle with it, as ctrl+shift+w does).
+    pub(super) fn pane_kill_click(
+        &mut self,
+        slug: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if banish_arm_live(self.pane_kill_armed.as_ref(), slug, Instant::now()) {
+            self.pane_kill_armed = None;
+            self.kill_pane(slug, window, cx);
+            return;
+        }
+        self.pane_kill_armed = Some((slug.to_string(), Instant::now()));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BANISH_ARM).await;
+            if let Some(this) = this.upgrade() {
+                this.update(cx, |app: &mut SeanceApp, cx| {
+                    if app
+                        .pane_kill_armed
+                        .as_ref()
+                        .is_some_and(|(_, at)| at.elapsed() >= BANISH_ARM)
+                    {
+                        app.pane_kill_armed = None;
                         cx.notify();
                     }
                 });

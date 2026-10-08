@@ -216,6 +216,7 @@ impl SeanceApp {
                         self.pane_rename_input(&pane.slug),
                         flipped,
                         true, // is_zoomed
+                        self.rail_hover_pane.as_deref() == Some(pane.slug.as_str()),
                         cx,
                     )),
             )
@@ -342,6 +343,7 @@ impl SeanceApp {
                             self.pane_rename_input(&left.slug),
                             flipped_l,
                             false,
+                            self.rail_hover_pane.as_deref() == Some(left.slug.as_str()),
                             cx,
                         )),
                 )
@@ -379,6 +381,7 @@ impl SeanceApp {
                             self.pane_rename_input(&right.slug),
                             flipped_r,
                             false,
+                            self.rail_hover_pane.as_deref() == Some(right.slug.as_str()),
                             cx,
                         )),
                 )
@@ -466,6 +469,7 @@ impl SeanceApp {
                             self.pane_rename_input(&pane.slug),
                             flipped,
                             false,
+                            self.rail_hover_pane.as_deref() == Some(pane.slug.as_str()),
                             cx,
                         )),
                 );

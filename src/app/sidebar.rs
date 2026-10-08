@@ -17,6 +17,8 @@ const ROW_H: f32 = 28.;
 /// Glyph column — fixed so a row with no glyph still starts its name on the
 /// same line as one that has a spinner.
 const GLYPH_W: f32 = 15.;
+/// Pane rows under the selected circle sit a step smaller than circle rows.
+const PANE_ROW_H: f32 = 22.;
 /// Time / count column, right-aligned.
 const TIME_W: f32 = 34.;
 /// How far a cluster's members sit inside their header.
@@ -982,7 +984,135 @@ impl SeanceApp {
                 this.reorder_pane(&drag.slug, &ws_for_group_drop, None, cx);
             }))
             .child(header)
+            .when(selected, |d| {
+                d.children(self.render_pane_rows(&workspace, cx))
+            })
             .into_any_element()
+    }
+
+    /// The selected circle's panes, one row each under its header: glyph,
+    /// name, and a hover × that arms on the first click and kills on the
+    /// second. Hovering a row rings that pane's tile.
+    fn render_pane_rows(&self, workspace: &str, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
+        let active = self.active_slug.as_deref();
+        self.panes
+            .iter()
+            .filter(|p| p.workspace == workspace)
+            .map(|pane| {
+                let slug = pane.slug.clone();
+                let is_active = active == Some(slug.as_str());
+                let grp = SharedString::from(format!("panegrp-{slug}"));
+                let armed = banish_arm_live(
+                    self.pane_kill_armed.as_ref(),
+                    &slug,
+                    std::time::Instant::now(),
+                );
+                let (glyph, color) = match self.pane_attention(&slug) {
+                    Some(WorkspaceAttention::NeedsHuman) => ("●", SeancePalette::violet()),
+                    Some(WorkspaceAttention::Working) => {
+                        (working_spinner_glyph(), SeancePalette::flame())
+                    }
+                    _ => ("", SeancePalette::text_faint()),
+                };
+                div()
+                    .id(SharedString::from(format!("rail-pane-{slug}")))
+                    .group(grp.clone())
+                    .h(px(PANE_ROW_H))
+                    .pr_2()
+                    // Glyph lines up under the circle's name.
+                    .pl(px(3. + 5. + GLYPH_W + 6.))
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(SeancePalette::surface()))
+                    .on_hover(cx.listener({
+                        let slug = slug.clone();
+                        move |this, hovered: &bool, _, cx| {
+                            if *hovered {
+                                if this.rail_hover_pane.as_deref() != Some(slug.as_str()) {
+                                    this.rail_hover_pane = Some(slug.clone());
+                                    cx.notify();
+                                }
+                            } else if this.rail_hover_pane.as_deref() == Some(slug.as_str()) {
+                                this.rail_hover_pane = None;
+                                cx.notify();
+                            }
+                        }
+                    }))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_this, _, window, cx| {
+                            sidebar_press_no_select(window, cx);
+                        }),
+                    )
+                    .on_click(cx.listener({
+                        let slug = slug.clone();
+                        move |this, _, window, cx| {
+                            this.set_active(&slug, window, cx);
+                        }
+                    }))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(GLYPH_W))
+                            .text_xs()
+                            .text_color(color)
+                            .child(glyph),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(if is_active {
+                                SeancePalette::text()
+                            } else {
+                                SeancePalette::text_dim()
+                            })
+                            .child(pane.name.clone()),
+                    )
+                    .child(
+                        // Same × as the circle row's banish: hidden until the
+                        // row is hovered, armed red by a first click.
+                        div()
+                            .id(SharedString::from(format!("rail-pane-kill-{slug}")))
+                            .flex_none()
+                            .px_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .when(!armed, |d| {
+                                d.text_color(gpui::transparent_black())
+                                    .group_hover(grp, |s| s.text_color(SeancePalette::text_faint()))
+                            })
+                            .when(armed, |d| {
+                                d.text_color(SeancePalette::danger())
+                                    .bg(SeancePalette::surface())
+                            })
+                            .hover(|s| {
+                                s.text_color(SeancePalette::danger())
+                                    .bg(SeancePalette::surface())
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener({
+                                let slug = slug.clone();
+                                move |this, _, window, cx| {
+                                    // The row's own click would focus the pane.
+                                    cx.stop_propagation();
+                                    this.pane_kill_click(&slug, window, cx);
+                                }
+                            }))
+                            .tooltip(tip(if armed {
+                                "click again to kill this pane"
+                            } else {
+                                "kill pane"
+                            }))
+                            .child(if armed { "kill?" } else { "×" }),
+                    )
+                    .into_any_element()
+            })
+            .collect()
     }
 
     pub(super) fn render_sidebar(

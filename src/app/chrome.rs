@@ -436,6 +436,7 @@ pub(super) fn render_pane(
     rename: Option<&Entity<InputState>>,
     flipped: Option<&Entity<ScratchpadDrawer>>,
     is_zoomed: bool,
+    rail_hover: bool,
     cx: &Context<SeanceApp>,
 ) -> impl IntoElement {
     let is_active = active == Some(pane.slug.as_str());
@@ -479,7 +480,10 @@ pub(super) fn render_pane(
     // header chip (⌨/⚡). Inactive panes share one quiet border so active is
     // obvious at a glance. Zoom mode uses a loud flame ring only while the
     // OS window is focused (`is_active` is already gated on window_active).
-    let frame_border = if exited {
+    let frame_border = if rail_hover {
+        // Its sidebar row is hovered: show which tile that row means.
+        SeancePalette::violet()
+    } else if exited {
         SeancePalette::danger()
     } else if is_active {
         if is_flipped {
@@ -563,7 +567,9 @@ pub(super) fn render_pane(
         .border_2()
         .border_color(frame_border)
         .bg(SeancePalette::bg())
-        .opacity(if exited {
+        .opacity(if rail_hover {
+            1.0
+        } else if exited {
             0.72
         } else if is_active {
             1.0
@@ -1029,6 +1035,10 @@ pub(super) fn render_help() -> gpui::AnyElement {
         .child(row("click header", "select workspace (tiling region filters to it)"))
         .child(row("double-click", "rename workspace inline"))
         .child(row("drag pane row", "move pane into another workspace / reorder"))
+        .child(row(
+            "pane rows",
+            "selected circle lists its panes: click focuses, hover rings the tile, × twice kills",
+        ))
         .child(row("right-click header", "touch · rename · fork ⑂ · banish"))
         .child(row("+ (footer)", "new empty workspace"))
         .child(p(

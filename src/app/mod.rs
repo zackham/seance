@@ -160,6 +160,11 @@ pub struct SeanceApp {
     /// Sidebar banish ×, armed by a first click: (workspace slug, when). Only a
     /// second click inside `BANISH_ARM`, on the same circle, actually kills.
     banish_armed: Option<(String, std::time::Instant)>,
+    /// Sidebar pane-row ×, armed the same way: (pane slug, when).
+    pane_kill_armed: Option<(String, std::time::Instant)>,
+    /// Pane row the pointer is over in the sidebar; its tile gets a ring so
+    /// you can see which pane a row (and its ×) means.
+    rail_hover_pane: Option<String>,
     /// Active whisper compose bar: (pane slug, input state).
     whisper: Option<(String, Entity<InputState>)>,
     /// Pane currently flipped to its notes face: (slug, scratchpad entity).
@@ -444,6 +449,8 @@ impl SeanceApp {
             owners: std::collections::HashMap::new(),
             touches: std::collections::HashMap::new(),
             banish_armed: None,
+            pane_kill_armed: None,
+            rail_hover_pane: None,
             whisper: None,
             flipped: None,
             active_slug: None,
@@ -1025,6 +1032,10 @@ impl SeanceApp {
                 self.panes.retain(|p| p.slug != slug);
                 self.busy_panes.remove(&slug);
                 self.workspace_focus.retain(|_, s| s != &slug);
+                // A row that vanishes never reports the pointer leaving it.
+                if self.rail_hover_pane.as_deref() == Some(slug.as_str()) {
+                    self.rail_hover_pane = None;
+                }
                 // Never leave a workspace with panes but no active pane.
                 let prev = self.active_slug.clone();
                 self.ensure_active_pane_in_workspace();
@@ -1657,21 +1668,7 @@ impl SeanceApp {
                     // banishes the workspace (two presses for a 2-pane circle).
                     // Empty selected circle (no panes) → banish the shell.
                     if let Some(slug) = self.active_slug.clone() {
-                        let ws = self
-                            .panes
-                            .iter()
-                            .find(|p| p.slug == slug)
-                            .map(|p| p.workspace.clone());
-                        let last_in_ws = ws.as_ref().is_some_and(|w| {
-                            self.panes.iter().filter(|p| p.workspace == *w).count() == 1
-                        });
-                        if last_in_ws {
-                            if let Some(w) = ws {
-                                self.kill_workspace(&w, window, cx);
-                            }
-                        } else {
-                            self.kill_active_pane(cx);
-                        }
+                        self.kill_pane(&slug, window, cx);
                     } else if let Some(ws) = self.selected_workspace.clone() {
                         if !self.panes.iter().any(|p| p.workspace == ws) {
                             self.kill_workspace(&ws, window, cx);
@@ -2259,10 +2256,22 @@ impl SeanceApp {
         cx.notify();
     }
 
-    /// Banish the focused pane (hotkey).
-    fn kill_active_pane(&mut self, cx: &mut Context<Self>) {
-        if let Some(slug) = self.active_slug.clone() {
-            self.kill_session(&slug, cx);
+    /// Kill one pane; the last pane in a circle banishes the circle with it.
+    fn kill_pane(&mut self, slug: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let ws = self
+            .panes
+            .iter()
+            .find(|p| p.slug == slug)
+            .map(|p| p.workspace.clone());
+        let last_in_ws = ws
+            .as_ref()
+            .is_some_and(|w| self.panes.iter().filter(|p| p.workspace == *w).count() == 1);
+        if last_in_ws {
+            if let Some(w) = ws {
+                self.kill_workspace(&w, window, cx);
+            }
+        } else {
+            self.kill_session(slug, cx);
         }
     }
 
