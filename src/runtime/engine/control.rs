@@ -891,6 +891,21 @@ impl Engine {
                 }
                 // Throttle-persist cmdlog so export-from-disk sees recent cmds.
                 self.persist();
+                // Clients apply their own notify-on-command-finish rule.
+                let alert = closed
+                    .then(|| self.cmd_log.last(&pane, false))
+                    .flatten()
+                    .map(|rec| GuiEvent::PaneAlert {
+                        pane: pane.clone(),
+                        kind: "command".into(),
+                        title: String::new(),
+                        body: rec.command.clone(),
+                        duration_ms: rec.duration_ms().unwrap_or(0),
+                        exit_code: Some(exit),
+                    });
+                if let Some(alert) = alert {
+                    self.broadcast(alert);
+                }
                 let (detail, span) = match self.cmd_log.last(&pane, false) {
                     Some(rec) => (
                         format!(
@@ -1111,6 +1126,37 @@ impl Engine {
                     format!("cleared {removed} link(s)"),
                 );
                 ok(json!({"workspace": ws, "removed": removed}))
+            }
+            RenamePane {
+                name,
+                pane,
+                scope,
+                from,
+            } => {
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    return err("rename-pane: the new name is empty".into());
+                }
+                let Some(key) = pane.or_else(|| from.clone()) else {
+                    return err("rename-pane: outside a pane, give PANE NEW-NAME".into());
+                };
+                match find(self, &key, &scope) {
+                    Ok(idx) => {
+                        let slug = self.panes[idx].slug.clone();
+                        self.panes[idx].name = name.clone();
+                        self.persist();
+                        self.push_state_to_all();
+                        events::log(
+                            &actor(&from),
+                            Some(&self.panes[idx].workspace.clone()),
+                            Some(&slug),
+                            "pane_renamed",
+                            format!("name -> '{name}'"),
+                        );
+                        ok(json!({"pane": slug, "name": name}))
+                    }
+                    Err(e) => err(e),
+                }
             }
             RenameCircle {
                 name,

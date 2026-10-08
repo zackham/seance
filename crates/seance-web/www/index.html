@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#131111" />
     <title>seance</title>
@@ -115,42 +115,37 @@
         }
 
         // ── accessory bar layout ──────────────────────────────────────────
-        // Two rows, scrollable, data-driven. Adding a key is one entry:
+        // One row, data-driven. Adding a key is one entry:
         //   {k:'F5'}                     → named key (map_key_name names)
         //   {k:'c', label:'^C', ctrl:1}  → one-shot combo
         //   {mod:'ctrl'}                 → sticky modifier
         // The encoder already understands every name map_key_name accepts, so
-        // nothing below needs a Rust change.
-        var ROW1 = [
-          { mod: 'ctrl', label: 'ctrl' },
-          { mod: 'alt', label: 'alt' },
-          { k: 'Escape', label: 'esc' },
-          { k: 'Tab', label: 'tab' },
-          { k: 'c', ctrl: 1, label: '^C' },
-          { k: 'd', ctrl: 1, label: '^D' },
-          { k: 'r', ctrl: 1, label: '^R' },
-          { k: 'l', ctrl: 1, label: '^L' },
-        ];
-        var ROW2 = [
-          { k: 'ArrowLeft', label: '←' },
-          { k: 'ArrowDown', label: '↓' },
-          { k: 'ArrowUp', label: '↑' },
-          { k: 'ArrowRight', label: '→' },
-          { k: 'Home', label: 'home' },
-          { k: 'End', label: 'end' },
-          { k: 'PageUp', label: 'pgup' },
-          { k: 'PageDown', label: 'pgdn' },
+        // nothing below needs a Rust change. Shift+enter is a newline that
+        // does not submit (agent prompts). Stop is esc, which interrupts an
+        // agent; keep:1 leaves the typed line unsent. nav:1 drops the
+        // keyboard and opens the circle list, since the ☰ button hides with
+        // the keyboard up.
+        var ROWS = [
+          [
+            { nav: 1, label: '☰' },
+            { k: 'Escape', label: '■ stop', keep: 1 },
+            { k: 'ArrowLeft', label: '←' },
+            { k: 'ArrowDown', label: '↓' },
+            { k: 'ArrowUp', label: '↑' },
+            { k: 'ArrowRight', label: '→' },
+            { k: 'Enter', shift: 1, label: '⇧⏎' },
+          ],
         ];
 
         var mods = { ctrl: false, alt: false, shift: false };
 
-        function sendKey(name, extraCtrl, extraAlt) {
+        function sendKey(name, extraCtrl, extraAlt, extraShift) {
           if (!window.seanceMobile) return false;
           var ok = window.seanceMobile.key(
             name,
             !!(mods.ctrl || extraCtrl),
             !!(mods.alt || extraAlt),
-            !!mods.shift
+            !!(mods.shift || extraShift)
           );
           if (!ok) toast('no pane focused — tap a terminal first');
           clearMods();
@@ -445,9 +440,11 @@
         });
 
         // ── keyboard surface ──────────────────────────────────────────────
-        // iOS only raises the system keyboard for a focused, VISIBLE, editable
-        // element — display:none or visibility:hidden won't do it. So the
-        // catcher is a real 1px input parked behind the accessory bar.
+        // The catcher is a visible line on top of the accessory bar. Typed
+        // text stays in it until Enter, so the phone keyboard's own word
+        // composition, touch selection and delete all work, then the whole
+        // line goes to the pane. With the line empty, Enter and Backspace go
+        // straight to the pane.
         //
         // ui.rs's on_keydown bails when the active element is an INPUT or
         // TEXTAREA, so while this is focused the wasm ignores the keyboard
@@ -464,6 +461,37 @@
         catcher.setAttribute('spellcheck', 'false');
         catcher.setAttribute('enterkeyhint', 'send');
         catcher.setAttribute('aria-label', 'terminal input');
+        catcher.setAttribute('placeholder', 'type, enter sends');
+        // lib.rs sends any `paste` on the document straight to the focused
+        // pane; a paste into the line should wait for Enter like typing.
+        catcher.addEventListener('paste', function (e) {
+          e.stopPropagation();
+        });
+        var composing = false;
+        catcher.addEventListener('compositionstart', function () {
+          composing = true;
+        });
+        catcher.addEventListener('compositionend', function () {
+          composing = false;
+        });
+
+        // Sends whatever is waiting in the catcher, so keys like tab and the
+        // arrows act after the text that was typed before them.
+        function flushLine() {
+          var v = catcher.value;
+          if (!v) return true;
+          catcher.value = '';
+          // Mid-word, the keyboard still holds the old text and would type it
+          // again; refocusing makes it start a fresh word.
+          if (composing) {
+            catcher.blur();
+            catcher.focus();
+          }
+          if (window.seanceMobile && window.seanceMobile.text(v, false)) return true;
+          catcher.value = v;
+          toast('no pane focused — tap a terminal first');
+          return false;
+        }
 
         function accKey(spec) {
           var b = mk('button', null, 'm-acc-key', spec.label || spec.k);
@@ -474,29 +502,26 @@
           b.addEventListener('pointerdown', function (e) {
             e.preventDefault();
             e.stopPropagation();
+            if (spec.nav) {
+              closeKb();
+              setNav(true);
+              return;
+            }
             if (spec.mod) {
               mods[spec.mod] = !mods[spec.mod];
               paintMods();
               return;
             }
-            sendKey(spec.k, spec.ctrl, spec.alt);
+            if (spec.keep || flushLine()) sendKey(spec.k, spec.ctrl, spec.alt, spec.shift);
           });
           return b;
         }
-        [ROW1, ROW2].forEach(function (row) {
+        ROWS.forEach(function (row) {
           var r = mk('div', null, 'm-acc-row');
           row.forEach(function (spec) {
             r.appendChild(accKey(spec));
           });
           accRows.appendChild(r);
-        });
-        var accPaste = mk('button', 'm-acc-paste', 'm-acc-key wide', 'paste');
-        accPaste.type = 'button';
-        accPaste.setAttribute('aria-label', 'paste from clipboard');
-        accPaste.addEventListener('pointerdown', function (e) {
-          e.preventDefault();
-          e.stopPropagation();
-          doPaste();
         });
         var accDone = mk('button', 'm-acc-done', 'm-acc-key wide', 'done');
         accDone.type = 'button';
@@ -505,7 +530,6 @@
           closeKb();
         });
         var accRight = mk('div', null, 'm-acc-right');
-        accRight.appendChild(accPaste);
         accRight.appendChild(accDone);
         acc.appendChild(accRows);
         acc.appendChild(accRight);
@@ -520,7 +544,6 @@
           acc.hidden = false;
           body.classList.add('m-kb-open');
           kbBtn.classList.add('on');
-          catcher.value = '';
           catcher.focus();
         }
         function closeKb() {
@@ -535,116 +558,6 @@
           e.preventDefault();
           if (kbOpen()) closeKb();
           else openKb();
-        });
-
-        // ── paste ─────────────────────────────────────────────────────────────
-        // The catcher is 1px behind the bar, so iOS's long-press Paste menu
-        // is unreachable — hence a button. readText() needs a secure context
-        // AND a live user gesture, which is why it is called straight out of
-        // pointerdown rather than after any await. Everything that can refuse
-        // it (http origin, denied permission, Firefox) lands on the manual
-        // sheet, which is a real textarea you CAN long-press into.
-        function sendPaste(v) {
-          if (!v) {
-            toast('clipboard is empty');
-            return false;
-          }
-          if (!window.seanceMobile || !window.seanceMobile.text(v, false)) {
-            toast('no pane focused — tap a terminal first');
-            return false;
-          }
-          clearMods();
-          return true;
-        }
-        // Safari's paste-confirm callout steals focus off the catcher, and the
-        // blur handler reads that as "keyboard dismissed" and tears the whole
-        // surface down mid-paste. Hold it off for the round trip.
-        var pasting = false;
-        function endPaste(refocus) {
-          pasting = false;
-          if (refocus && kbOpen() && document.activeElement !== catcher) catcher.focus();
-        }
-        function doPaste() {
-          var cb = navigator.clipboard;
-          if (!cb || !cb.readText) {
-            openPasteSheet(
-              window.isSecureContext
-                ? 'this browser will not hand over the clipboard'
-                : 'clipboard needs https — use the seance.ham.xyz url'
-            );
-            return;
-          }
-          var p;
-          try {
-            pasting = true;
-            p = cb.readText();
-          } catch (e) {
-            endPaste(false);
-            openPasteSheet('clipboard read refused');
-            return;
-          }
-          // A promise that never settles would strand the blur guard.
-          setTimeout(function () {
-            if (pasting) endPaste(true);
-          }, 30000);
-          p.then(function (v) {
-            endPaste(true);
-            sendPaste(v);
-          }).catch(function (err) {
-            endPaste(false);
-            openPasteSheet('clipboard read refused (' + ((err && err.name) || err) + ')');
-          });
-        }
-
-        var pasteSheet = mk('div', 'm-paste');
-        pasteSheet.hidden = true;
-        var pasteHead = mk('div', 'm-paste-head', null, 'paste');
-        var pasteHint = mk('div', 'm-paste-hint', null, '');
-        var pasteTa = mk('textarea', 'm-paste-text');
-        pasteTa.setAttribute('rows', '6');
-        pasteTa.setAttribute('autocapitalize', 'none');
-        pasteTa.setAttribute('autocorrect', 'off');
-        pasteTa.setAttribute('spellcheck', 'false');
-        pasteTa.setAttribute('placeholder', 'long-press here → Paste');
-        // lib.rs listens for `paste` on the document and pushes it at the
-        // focused pane; without this the drop never reaches the textarea and
-        // the sheet looks broken while the text is already gone.
-        pasteTa.addEventListener('paste', function (e) {
-          e.stopPropagation();
-        });
-        var pasteBar = mk('div', 'm-paste-bar');
-        var pasteCancel = mk('button', 'm-paste-cancel', 'm-sheet-btn', 'cancel');
-        pasteCancel.type = 'button';
-        var pasteSend = mk('button', 'm-paste-send', 'm-sheet-btn primary', 'send');
-        pasteSend.type = 'button';
-        pasteBar.appendChild(pasteCancel);
-        pasteBar.appendChild(pasteSend);
-        [pasteHead, pasteHint, pasteTa, pasteBar].forEach(function (el) {
-          pasteSheet.appendChild(el);
-        });
-        body.appendChild(pasteSheet);
-
-        function openPasteSheet(why) {
-          closeKb();
-          pasteHint.textContent = why + ' — long-press the box, tap Paste, then send.';
-          pasteTa.value = '';
-          pasteSheet.hidden = false;
-          body.classList.add('m-paste-open');
-          pasteTa.focus();
-        }
-        function closePasteSheet() {
-          pasteSheet.hidden = true;
-          body.classList.remove('m-paste-open');
-          pasteTa.value = '';
-          pasteTa.blur();
-        }
-        pasteCancel.addEventListener('click', function (e) {
-          e.preventDefault();
-          closePasteSheet();
-        });
-        pasteSend.addEventListener('click', function (e) {
-          e.preventDefault();
-          if (sendPaste(pasteTa.value)) closePasteSheet();
         });
 
         // ── link sheet ────────────────────────────────────────────────────
@@ -737,41 +650,38 @@
           a.remove();
         });
 
-        // Typed characters. iOS software keyboards don't produce reliable
-        // keydown (keyCode 229 / key "Unidentified"), so the character stream
-        // is read off `input` and the catcher is drained after each one.
-        // Backspace and Enter arrive as inputTypes, not keys.
+        // Typed characters stay in the catcher (see above). Clearing it after
+        // every character fought Android's word composition and doubled
+        // letters. Soft keyboards often skip keydown (keyCode 229), so Enter
+        // and an empty-line Backspace are also caught as inputTypes.
+        function sendLine() {
+          if (flushLine()) sendKey('Enter');
+        }
         catcher.addEventListener('beforeinput', function (e) {
-          if (e.inputType === 'deleteContentBackward') {
+          if (e.inputType === 'deleteContentBackward' && !catcher.value) {
             e.preventDefault();
             sendKey('Backspace');
           } else if (e.inputType === 'insertLineBreak') {
             e.preventDefault();
-            sendKey('Enter');
+            sendLine();
           }
         });
         catcher.addEventListener('input', function () {
+          // A modifier is armed → the character just typed is a combo.
+          if (!(mods.ctrl || mods.alt) || !catcher.value) return;
           var v = catcher.value;
-          if (!v) return;
-          catcher.value = '';
-          if (!window.seanceMobile) return;
-          // A modifier is armed → treat the next character as a combo.
-          if (mods.ctrl || mods.alt) {
-            sendKey(v.slice(-1));
-            return;
-          }
-          if (!window.seanceMobile.text(v, false)) {
-            toast('no pane focused — tap a terminal first');
-          }
+          catcher.value = v.slice(0, -1);
+          if (flushLine()) sendKey(v.slice(-1));
         });
         // Hardware keyboards (and the ⏎ on the software one) do fire keydown.
         catcher.addEventListener('keydown', function (e) {
           if (e.key === 'Enter') {
             e.preventDefault();
-            sendKey('Enter');
+            sendLine();
           } else if (e.key === 'Backspace' && !catcher.value) {
+            // A held Backspace that just emptied the line stops there.
             e.preventDefault();
-            sendKey('Backspace');
+            if (!e.repeat) sendKey('Backspace');
           } else if (e.key === 'Escape') {
             e.preventDefault();
             sendKey('Escape');
@@ -780,8 +690,9 @@
         // iOS can dismiss the keyboard without telling us (swipe-down, form
         // bar "Done"); the blur is the only signal, so mirror our state to it.
         catcher.addEventListener('blur', function () {
-          if (pasting) return;
           if (kbOpen()) setTimeout(function () {
+            // A tap on a pane refocuses the catcher on its click.
+            if (Date.now() - kbAfterClick < 600) return;
             if (document.activeElement !== catcher && kbOpen()) closeKb();
           }, 60);
         });
@@ -1172,6 +1083,18 @@
           return hit ? hit.getAttribute('data-slug') : null;
         }
 
+        // Raised from the click that follows the tap, not from touchend: the
+        // synthesized mousedown in between moves focus to the pane, which
+        // blurs the catcher and drops the keyboard again.
+        var kbAfterClick = 0;
+        tiles.addEventListener('click', function () {
+          var t0 = kbAfterClick;
+          kbAfterClick = 0;
+          if (!t0 || Date.now() - t0 >= 600) return;
+          if (kbOpen()) catcher.focus();
+          else openKb();
+        });
+
         tiles.addEventListener(
           'touchstart',
           function (e) {
@@ -1232,12 +1155,14 @@
             if (!t) return;
             // A tap never locked an axis (it never travelled 10px). Ask the
             // wasm what is under the finger; a URL raises the link sheet and
-            // anything else stays a plain tap on the terminal.
+            // anything else raises the keyboard (on the click, see above).
             if (gesture.axis === null) {
               if (!gesture.slug || !window.seanceMobile.urlAt) return;
               if (Date.now() - gesture.t0 > 700) return;
               var hit = window.seanceMobile.urlAt(gesture.slug, t.clientX, t.clientY);
               if (hit) openLinkSheet(hit);
+              // Tile buttons stop their click, so it never reaches #tiles.
+              else if (!(e.target.closest && e.target.closest('button'))) kbAfterClick = Date.now();
               return;
             }
             if (gesture.axis !== 'x') return;
@@ -1255,7 +1180,6 @@
         document.addEventListener('keydown', function (e) {
           if (e.key !== 'Escape') return;
           if (document.activeElement === catcher) return;
-          if (!pasteSheet.hidden) closePasteSheet();
           if (!linkSheet.hidden) closeLinkSheet();
           if (!sheet.hidden) closeSheet();
           setNav(false);

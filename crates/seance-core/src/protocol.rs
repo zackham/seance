@@ -403,6 +403,30 @@ pub enum GuiEvent {
         pane: String,
         busy: bool,
     },
+    /// The pane asked for the human the way a terminal program does: `bell`
+    /// (BEL), `notify` (OSC 9 / OSC 777, with `title` / `body`), or `command`
+    /// (a shell command finished; `body` is the command line). Broadcast
+    /// subscription-blind like [`Self::PaneBusy`]; each client decides whether
+    /// to make a sound or post a desktop notification.
+    PaneAlert {
+        pane: String,
+        kind: String,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        body: String,
+        /// `command` only: how long it ran.
+        #[serde(default)]
+        duration_ms: u64,
+        /// `command` only: its exit status.
+        #[serde(default)]
+        exit_code: Option<i32>,
+    },
+    /// OSC 52: the pane's program copied `text` to the system clipboard.
+    PaneClipboard {
+        pane: String,
+        text: String,
+    },
     /// Causal attribution: who last wrote stdin to this pane's PTY.
     InputOrigin {
         pane: String,

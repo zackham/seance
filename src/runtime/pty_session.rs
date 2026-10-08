@@ -23,7 +23,7 @@ use alacritty_terminal::{
     grid::{Dimensions, Scroll},
     index::{Column, Line},
     sync::FairMutex,
-    term::{cell::Flags, Config, Term, TermMode},
+    term::{cell::Flags, ClipboardType, Config, Term, TermMode},
     vte::ansi::{Color as AnsiColor, NamedColor, Processor, Rgb as AlacRgb},
 };
 use anyhow::{bail, Context as _, Result};
@@ -74,6 +74,22 @@ pub enum SessionEvent {
         slug: String,
         url: String,
     },
+    /// BEL from the pane's program.
+    Bell {
+        slug: String,
+    },
+    /// OSC 9 / OSC 777 desktop notification (scraped on the I/O thread by
+    /// `osc_notify::OscNotifyScraper`; alacritty drops these sequences).
+    Notify {
+        slug: String,
+        title: String,
+        body: String,
+    },
+    /// OSC 52 clipboard write from the pane's program.
+    ClipboardStore {
+        slug: String,
+        text: String,
+    },
 }
 
 struct Listener {
@@ -82,6 +98,7 @@ struct Listener {
     /// Write-back path for OSC replies / PtyWrite (must reach the PTY).
     write_tx: IoSender,
     title: Arc<Mutex<Option<String>>>,
+    last_bell: Mutex<Option<std::time::Instant>>,
 }
 
 impl EventListener for Listener {
@@ -127,6 +144,24 @@ impl EventListener for Listener {
             }
             AlacEvent::PtyWrite(s) => {
                 self.write_tx.send(IoMsg::Write(s.into_bytes()));
+            }
+            AlacEvent::Bell => {
+                // One per second at most: `yes $'\a'` must not flood every
+                // connection's event queue.
+                let now = std::time::Instant::now();
+                let mut last = self.last_bell.lock().unwrap();
+                if last.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1)) {
+                    *last = Some(now);
+                    let _ = self.tx.send(SessionEvent::Bell {
+                        slug: self.slug.clone(),
+                    });
+                }
+            }
+            AlacEvent::ClipboardStore(ClipboardType::Clipboard, text) => {
+                let _ = self.tx.send(SessionEvent::ClipboardStore {
+                    slug: self.slug.clone(),
+                    text,
+                });
             }
             AlacEvent::ClipboardLoad(_, formatter) => {
                 // Best-effort empty clipboard (GUI owns the real clipboard).
@@ -376,6 +411,7 @@ impl PtySession {
             tx: event_tx.clone(),
             write_tx: io_tx.clone(),
             title: title.clone(),
+            last_bell: Mutex::new(None),
         };
 
         let dims = Dims { cols, rows };
@@ -788,6 +824,7 @@ fn io_loop(
 ) {
     let mut parser: Processor = Processor::new();
     let mut pr_scraper = crate::runtime::pr_scrape::PrScraper::new();
+    let mut notify_scraper = crate::runtime::osc_notify::OscNotifyScraper::default();
     let mut buf = [0u8; 65536];
     *master_fd_slot.lock().unwrap() = Some(master.as_raw_fd());
     // Once the master EOFs/errors we stop polling it (a HUP'd fd would spin
@@ -886,6 +923,13 @@ fn io_loop(
                         let _ = event_tx.send(SessionEvent::PrLinkSeen {
                             slug: slug.clone(),
                             url,
+                        });
+                    }
+                    for (title, body) in notify_scraper.feed(&buf[..n]) {
+                        let _ = event_tx.send(SessionEvent::Notify {
+                            slug: slug.clone(),
+                            title,
+                            body,
                         });
                     }
                     let _ = event_tx.send(SessionEvent::Wakeup { slug: slug.clone() });
@@ -1060,35 +1104,28 @@ fn set_nonblocking(fd: RawFd) -> Result<()> {
     Ok(())
 }
 
-/// Ghostty palette from ~/.config/ghostty/config (exact).
-/// Terminal *content* matches ghostty — chrome stays candlelit separately.
-const ANSI16: [u32; 16] = [
-    0x00_18_18_18, //  0 black
-    0x00_ab_46_42, //  1 red
-    0x00_a1_b5_6c, //  2 green
-    0x00_f7_ca_88, //  3 yellow
-    0x00_7c_af_c2, //  4 blue
-    0x00_ba_8b_af, //  5 magenta
-    0x00_86_c1_b9, //  6 cyan
-    0x00_d8_d8_d8, //  7 white
-    0x00_58_58_58, //  8 bright black
-    0x00_ab_46_42, //  9 bright red
-    0x00_a1_b5_6c, // 10 bright green
-    0x00_f7_ca_88, // 11 bright yellow
-    0x00_7c_af_c2, // 12 bright blue
-    0x00_ba_8b_af, // 13 bright magenta
-    0x00_86_c1_b9, // 14 bright cyan
-    0x00_f8_f8_f8, // 15 bright white
-];
+/// Terminal *content* colors from `~/.config/seance/terminal.conf` (see
+/// `term_config`); chrome stays candlelit separately.
+fn ansi16() -> &'static [u32; 16] {
+    &crate::term_config::get().palette
+}
 
-/// Default fg/bg — ghostty's foreground/background.
-const DEFAULT_FG: u32 = 0x00_d8_d8_d8;
-const DEFAULT_BG: u32 = 0x00_18_18_18;
+fn default_fg() -> u32 {
+    crate::term_config::get().foreground
+}
+
+fn default_bg() -> u32 {
+    crate::term_config::get().background
+}
+
+fn cursor_color() -> u32 {
+    crate::term_config::get().cursor
+}
 
 /// Answer OSC color queries (claude probes these to pick its dark theme).
 fn color_for_index(index: usize) -> AlacRgb {
     let pack = match index {
-        0..=15 => ANSI16[index],
+        0..=15 => ansi16()[index],
         16..=231 => {
             let i = index - 16;
             let steps = [0u32, 95, 135, 175, 215, 255];
@@ -1098,10 +1135,10 @@ fn color_for_index(index: usize) -> AlacRgb {
             let v = (8 + (index - 232) * 10) as u32;
             (v << 16) | (v << 8) | v
         }
-        256 => DEFAULT_FG,    // foreground
-        257 => DEFAULT_BG,    // background
-        258 => 0x00_e5_c0_7b, // cursor
-        _ => DEFAULT_FG,
+        256 => default_fg(),   // foreground
+        257 => default_bg(),   // background
+        258 => cursor_color(), // cursor
+        _ => default_fg(),
     };
     AlacRgb {
         r: ((pack >> 16) & 0xff) as u8,
@@ -1126,7 +1163,7 @@ fn unpack_rgb(pack: u32) -> AlacRgb {
 fn seed_term_palette(term: &mut Term<Listener>) {
     let mut parser: Processor = Processor::new();
     let mut seq = String::new();
-    for (i, &pack) in ANSI16.iter().enumerate() {
+    for (i, &pack) in ansi16().iter().enumerate() {
         let c = unpack_rgb(pack);
         // OSC 4 ; idx ; rgb:RR/GG/BB ST
         seq.push_str(&format!(
@@ -1136,8 +1173,8 @@ fn seed_term_palette(term: &mut Term<Listener>) {
             b = c.b,
         ));
     }
-    let fg = unpack_rgb(DEFAULT_FG);
-    let bg = unpack_rgb(DEFAULT_BG);
+    let fg = unpack_rgb(default_fg());
+    let bg = unpack_rgb(default_bg());
     // OSC 10 default fg, OSC 11 default bg
     seq.push_str(&format!(
         "\x1b]10;rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\",
@@ -1162,7 +1199,7 @@ fn dim_u32(c: u32) -> u32 {
 }
 
 /// Resolve a cell color the way alacritty's display does: prefer the term's
-/// live palette (OSC-set), then static ANSI16, with bold→bright for 0..=7.
+/// live palette (OSC-set), then the configured palette, with bold→bright for 0..=7.
 fn resolve_color(
     colors: &alacritty_terminal::term::color::Colors,
     color: &AnsiColor,
@@ -1232,40 +1269,40 @@ fn named_fallback(n: NamedColor, is_bg: bool) -> u32 {
     match n {
         NamedColor::Background if is_bg => DEFAULT,
         NamedColor::Foreground if !is_bg => DEFAULT,
-        NamedColor::Black => ANSI16[0],
-        NamedColor::Red => ANSI16[1],
-        NamedColor::Green => ANSI16[2],
-        NamedColor::Yellow => ANSI16[3],
-        NamedColor::Blue => ANSI16[4],
-        NamedColor::Magenta => ANSI16[5],
-        NamedColor::Cyan => ANSI16[6],
-        NamedColor::White => ANSI16[7],
-        NamedColor::BrightBlack => ANSI16[8],
-        NamedColor::BrightRed => ANSI16[9],
-        NamedColor::BrightGreen => ANSI16[10],
-        NamedColor::BrightYellow => ANSI16[11],
-        NamedColor::BrightBlue => ANSI16[12],
-        NamedColor::BrightMagenta => ANSI16[13],
-        NamedColor::BrightCyan => ANSI16[14],
-        NamedColor::BrightWhite | NamedColor::BrightForeground => ANSI16[15],
-        NamedColor::Foreground => DEFAULT_FG,
-        NamedColor::Background => DEFAULT_BG,
-        NamedColor::Cursor => 0x00_e5_c0_7b,
-        NamedColor::DimBlack => dim_u32(ANSI16[0]),
-        NamedColor::DimRed => dim_u32(ANSI16[1]),
-        NamedColor::DimGreen => dim_u32(ANSI16[2]),
-        NamedColor::DimYellow => dim_u32(ANSI16[3]),
-        NamedColor::DimBlue => dim_u32(ANSI16[4]),
-        NamedColor::DimMagenta => dim_u32(ANSI16[5]),
-        NamedColor::DimCyan => dim_u32(ANSI16[6]),
-        NamedColor::DimWhite => dim_u32(ANSI16[7]),
-        NamedColor::DimForeground => dim_u32(DEFAULT_FG),
+        NamedColor::Black => ansi16()[0],
+        NamedColor::Red => ansi16()[1],
+        NamedColor::Green => ansi16()[2],
+        NamedColor::Yellow => ansi16()[3],
+        NamedColor::Blue => ansi16()[4],
+        NamedColor::Magenta => ansi16()[5],
+        NamedColor::Cyan => ansi16()[6],
+        NamedColor::White => ansi16()[7],
+        NamedColor::BrightBlack => ansi16()[8],
+        NamedColor::BrightRed => ansi16()[9],
+        NamedColor::BrightGreen => ansi16()[10],
+        NamedColor::BrightYellow => ansi16()[11],
+        NamedColor::BrightBlue => ansi16()[12],
+        NamedColor::BrightMagenta => ansi16()[13],
+        NamedColor::BrightCyan => ansi16()[14],
+        NamedColor::BrightWhite | NamedColor::BrightForeground => ansi16()[15],
+        NamedColor::Foreground => default_fg(),
+        NamedColor::Background => default_bg(),
+        NamedColor::Cursor => cursor_color(),
+        NamedColor::DimBlack => dim_u32(ansi16()[0]),
+        NamedColor::DimRed => dim_u32(ansi16()[1]),
+        NamedColor::DimGreen => dim_u32(ansi16()[2]),
+        NamedColor::DimYellow => dim_u32(ansi16()[3]),
+        NamedColor::DimBlue => dim_u32(ansi16()[4]),
+        NamedColor::DimMagenta => dim_u32(ansi16()[5]),
+        NamedColor::DimCyan => dim_u32(ansi16()[6]),
+        NamedColor::DimWhite => dim_u32(ansi16()[7]),
+        NamedColor::DimForeground => dim_u32(default_fg()),
     }
 }
 
 fn indexed_fallback(idx: usize, dim: bool) -> u32 {
     let packed = match idx {
-        0..=15 => ANSI16[idx],
+        0..=15 => ansi16()[idx],
         16..=231 => {
             let j = idx - 16;
             let steps = [0u32, 95, 135, 175, 215, 255];
@@ -1275,7 +1312,7 @@ fn indexed_fallback(idx: usize, dim: bool) -> u32 {
             let v = (8 + (idx - 232) * 10) as u32;
             (v << 16) | (v << 8) | v
         }
-        _ => DEFAULT_FG,
+        _ => default_fg(),
     };
     if dim {
         dim_u32(packed)

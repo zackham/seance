@@ -1083,7 +1083,10 @@ pub(super) fn render_help() -> gpui::AnyElement {
         .child(section("terminal focus"))
         .child(row("ctrl+shift+c / v", "copy selection / paste (macOS: cmd+c / cmd+v)"))
         .child(row("shift+pgup/pgdn", "scrollback"))
-        .child(row("ctrl+click", "open OSC-8 / URL on screen"))
+        .child(row(
+            "ctrl+click (macOS: cmd+click)",
+            "open OSC-8 / URL on screen",
+        ))
         .child(row("middle-click", "paste PRIMARY selection (mouse-drag select fills it)"))
         .child(row("mouse drag", "select text (copies on release)"))
         .child(row("wheel", "scroll scrollback"))

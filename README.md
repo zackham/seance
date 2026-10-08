@@ -181,7 +181,7 @@ attention routing free.
 | ctrl+pageup / pagedown | cycle workspaces |
 | ctrl+shift+pageup / pagedown | cycle panes in this workspace |
 | ctrl+shift+v | paste |
-| ctrl+click / middle-click | open OSC-8 / URL in the default browser |
+| ctrl+click (macOS: cmd+click) / middle-click | open OSC-8 / URL in the default browser |
 | mouse back / forward | walk the circles you've been in |
 | stage chip click | focus + pad drawer |
 | stage chip double-click | zoom |
@@ -190,6 +190,31 @@ attention routing free.
 | sidebar right-edge drag | resize sidebar (width persists) |
 | group right-click → rename group | replace the prefix across pinned and unpinned workspaces |
 | sash drag | resize 2-pane ratio or multi-pane weights |
+| macOS: cmd+backspace / cmd+←→ / option+←→ | kill to line start / line start, end / word back, forward (as in Ghostty) |
+| option+backspace (alt on Linux) | delete previous word |
+
+## Terminal settings (Ghostty syntax)
+
+`~/.config/seance/terminal.conf` sets the terminal look and alerts, using
+Ghostty's config keys. Each machine reads its own: the daemon resolves the
+palette, a GUI uses the font, default fg/bg (pane padding), sound and command
+rule, so give a thin client and its daemon the same theme. Include your
+Ghostty config to reuse it:
+
+```
+config-file = ?~/.config/ghostty/config   # font-size, bell, notify rules
+theme = Monokai Pro                       # any Ghostty theme name or path
+```
+
+Read keys: `theme`, `palette`, `background`, `foreground`, `cursor-color`,
+`font-family`, `font-size`, `bell-features` (`audio`), `bell-audio-path`,
+`bell-audio-volume`,
+`notify-on-command-finish` (`never` / `unfocused` / `always`),
+`notify-on-command-finish-after`. A pane's BEL plays the bell sound; OSC 9 /
+OSC 777 and long shell commands post a desktop notification when you
+aren't looking at that pane (a command-finish notification also plays the bell sound); OSC 52
+copies reach the clipboard. Restart the daemon (`seance upgrade`) and GUI
+after editing.
 
 ## Architecture (short)
 

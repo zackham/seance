@@ -1863,52 +1863,6 @@ input:focus {
   opacity: 0.5;
 }
 
-/* ── manual paste sheet ─────────────────────────────────────────────────── */
-/* Only ever shown when the Clipboard API refuses. A real textarea, because
-   the long-press Paste menu is the one paste path no permission can block. */
-#m-paste {
-  position: fixed;
-  inset: 0;
-  z-index: 90;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
-  background: var(--bg);
-}
-#m-paste[hidden] {
-  display: none;
-}
-#m-paste-head {
-  color: var(--text-dim);
-  font-size: 13px;
-}
-#m-paste-hint {
-  color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1.4;
-}
-#m-paste-text {
-  flex: 1 1 auto;
-  min-height: 0;
-  width: 100%;
-  resize: none;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-elevated);
-  color: var(--text);
-  font: inherit;
-  font-size: 16px; /* < 16px makes iOS zoom the viewport on focus */
-  line-height: 1.45;
-}
-#m-paste-bar {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: auto;
-}
-
 /* ── link sheet ─────────────────────────────────────────────────────────── */
 /* Raised by a tap on a URL inside a pane. A bottom card rather than a
    full-screen takeover: the line you tapped stays visible above it, which is
@@ -1991,6 +1945,7 @@ input:focus {
   bottom: 0;
   z-index: 80;
   display: flex;
+  flex-wrap: wrap;
   align-items: stretch;
   gap: 6px;
   padding: 6px calc(6px + env(safe-area-inset-right)) 6px calc(6px + env(safe-area-inset-left));
@@ -2002,7 +1957,7 @@ input:focus {
 }
 .m-acc-rows {
   /* basis 0, not auto: with `auto` the flex base size is the widest row's
-     max-content (~440px of keys) and the bar overflows the screen, carrying
+     max-content and the bar overflows the screen, carrying
      `done` off the right edge where it can't be tapped. */
   flex: 1 1 0;
   min-width: 0;
@@ -2043,8 +1998,7 @@ input:focus {
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
 }
-/* Stacked in .m-acc-right: split its height so the pair lines up with the
-   two key rows beside them. */
+/* done, in .m-acc-right: as tall as the key row beside it. */
 .m-acc-key.wide {
   flex: 1 1 0;
   height: auto;
@@ -2059,26 +2013,26 @@ input:focus {
   color: var(--flame);
   background: var(--surface);
 }
-/* The catcher must be focusable and rendered — display:none or
-   visibility:hidden and iOS refuses to raise the keyboard. 1px, behind the
-   bar, transparent caret. */
+/* The typing line: a full-width row above the keys, so the phone keyboard
+   can compose words and the text can be selected and deleted by touch. */
 #m-catch {
-  position: absolute;
-  left: 2px;
-  bottom: 2px;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  border: 0;
-  opacity: 0.01;
-  background: transparent;
-  color: transparent;
-  caret-color: transparent;
+  order: -1;
+  flex: 1 0 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  caret-color: var(--flame);
+  font-family: var(--mono);
   font-size: 16px; /* < 16px makes iOS zoom the viewport on focus */
 }
 #m-catch:focus {
-  outline: none;
+  border-color: var(--flame);
 }
+
 /* Keyboard up: the button cluster would sit under the bar — get it out. */
 body.m-kb-open #m-bar {
   display: none;

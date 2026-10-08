@@ -28,6 +28,7 @@ mod scratchpad;
 mod state;
 mod subscriptions_pref;
 mod sysopen;
+mod term_config;
 mod term_font;
 mod term_shared;
 mod theme;

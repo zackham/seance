@@ -950,6 +950,8 @@ impl ClientState {
             GuiEvent::Error { message } => Applied::Error { message },
             GuiEvent::Kicked { by } => Applied::Kicked { by },
             GuiEvent::Ack { .. } | GuiEvent::FsResult { .. } => Applied::Nothing,
+            // Sound, desktop notifications and clipboard are native-client only.
+            GuiEvent::PaneAlert { .. } | GuiEvent::PaneClipboard { .. } => Applied::Nothing,
             // The daemon owns the arrangement and broadcasts it to every window
             // (see subscriptions_pref.rs). Dropping it here is why a pin made at
             // the desk never showed up in the browser: the pinned band existed

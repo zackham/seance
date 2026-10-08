@@ -110,7 +110,14 @@ pub fn key_to_bytes(input: &KeyInput, modes: TermModes) -> Option<Vec<u8>> {
                 Some(b"\r".as_slice())
             }
         }
-        "backspace" => Some(if mods.control { b"\x08" } else { b"\x7f" }),
+        "backspace" => Some(if mods.control {
+            b"\x08".as_slice()
+        } else if mods.alt {
+            // ESC DEL: delete the previous word (readline, zsh, ink).
+            b"\x1b\x7f".as_slice()
+        } else {
+            b"\x7f".as_slice()
+        }),
         "tab" => Some(if mods.shift { b"\x1b[Z" } else { b"\t" }),
         "escape" => Some(b"\x1b"),
         "up" => Some(if app_cursor { b"\x1bOA" } else { b"\x1b[A" }),
@@ -251,6 +258,16 @@ mod tests {
         assert_eq!(
             key_to_bytes(&up, TermModes { app_cursor: true }).unwrap(),
             b"\x1bOA"
+        );
+    }
+
+    #[test]
+    fn alt_backspace_deletes_a_word() {
+        let mut k = key("backspace");
+        k.mods.alt = true;
+        assert_eq!(
+            key_to_bytes(&k, TermModes::default()),
+            Some(b"\x1b\x7f".to_vec())
         );
     }
 

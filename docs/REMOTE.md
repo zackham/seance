@@ -5,6 +5,12 @@ and the shared layout live in the **daemon**, and the GUI renders pushed
 state. That makes "run the GUI here, daemon over there" a transport question,
 not an architecture question — the transport is an ssh-forwarded unix socket.
 
+One deliberate exception: `~/.config/seance/terminal.conf` is read on both
+ends. The daemon takes the palette from its copy; the GUI takes the font,
+default fg/bg, bell sound and command-finish rule from the local copy, since
+those are per-device preferences (a laptop screen wants a different font size
+than a desktop, and the sound file lives on the machine that plays it).
+
 ## Using it
 
 Launch `seance` with no local daemon running → the **picker** asks where your

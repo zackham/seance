@@ -147,6 +147,12 @@ pub(crate) fn with_identity(
             scope,
             from,
         },
+        RenamePane { name, pane, .. } => RenamePane {
+            name,
+            pane,
+            scope,
+            from,
+        },
         Sleep { workspace, .. } => Sleep {
             workspace,
             scope,
@@ -1066,6 +1072,28 @@ pub(crate) fn parse_rename_circle(args: Vec<String>) -> Result<ControlRequest, S
     })
 }
 
+/// `rename-pane [PANE] NEW-NAME`: omit PANE inside a pane to rename your own.
+pub(crate) fn parse_rename_pane(args: Vec<String>) -> Result<ControlRequest, String> {
+    let mut positionals = args;
+    let (pane, name) = match positionals.len() {
+        0 => return Err("rename-pane: expected [PANE] NEW-NAME".into()),
+        1 => (None, positionals.remove(0)),
+        _ => {
+            let pane = positionals.remove(0);
+            (Some(pane), positionals.join(" "))
+        }
+    };
+    if name.trim().is_empty() {
+        return Err("rename-pane: the new name is empty".into());
+    }
+    Ok(ControlRequest::RenamePane {
+        name,
+        pane,
+        scope: None,
+        from: None,
+    })
+}
+
 /// `sleep [WORKSPACE]` · `wake [WORKSPACE]` — omit the name inside a pane and
 /// the caller's own circle is used (ctl stamps `scope`).
 pub(crate) fn parse_sleep(args: Vec<String>, wake: bool) -> Result<ControlRequest, String> {
@@ -1183,4 +1211,34 @@ pub(crate) fn base64_encode(input: &[u8]) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn rename_pane_args() {
+        assert!(parse_rename_pane(args(&[])).is_err());
+        assert!(parse_rename_pane(args(&["  "])).is_err());
+        match parse_rename_pane(args(&["new name"])).unwrap() {
+            ControlRequest::RenamePane { name, pane, .. } => {
+                assert_eq!((name.as_str(), pane), ("new name", None));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_rename_pane(args(&["term-4", "new", "name"])).unwrap() {
+            ControlRequest::RenamePane { name, pane, .. } => {
+                assert_eq!(
+                    (name.as_str(), pane.as_deref()),
+                    ("new name", Some("term-4"))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 }

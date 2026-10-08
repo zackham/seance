@@ -299,6 +299,7 @@ pub fn op_name(req: &crate::control::ControlRequest) -> &'static str {
         CapsGrant { .. } => "caps_grant",
         CapsRevoke { .. } => "caps_revoke",
         RenameCircle { .. } => "rename_circle",
+        RenamePane { .. } => "rename_pane",
         Sleep { .. } => "sleep",
         Wake { .. } => "wake",
         PolicyGet { .. } => "policy_get",

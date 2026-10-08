@@ -18,7 +18,7 @@ use gpui_component::{notification::Notification, WindowExt as _};
 use crate::clipboard::{cap_copy_len, copied_toast, copy_text_to_clipboard};
 use crate::remote_term::RemoteTerminal;
 use crate::runtime::snapshot::{CellSnap, GridSnapshot};
-use crate::term_font::{self, term_font, term_font_bold, FONT_SIZE, LINE_HEIGHT_FACTOR};
+use crate::term_font::{font_size, term_font, term_font_bold, LINE_HEIGHT_FACTOR};
 use crate::term_shared::keystroke_bytes;
 use crate::theme::SeancePalette;
 use alacritty_terminal::term::TermMode;
@@ -483,6 +483,32 @@ impl RemoteTerminalView {
             }
         }
 
+        // macOS line editing, as Ghostty and Terminal.app do it: cmd+backspace
+        // kills to line start, cmd+arrows jump to line start/end, option+arrows
+        // move by word. Ahead of the cmd chords below, which would bubble these.
+        if cfg!(target_os = "macos") && !ks.modifiers.control && !ks.modifiers.shift {
+            let bytes: Option<&[u8]> = match (ks.modifiers.platform, ks.modifiers.alt) {
+                (true, false) => match ks.key.as_str() {
+                    "backspace" => Some(b"\x15"),
+                    "left" => Some(b"\x01"),
+                    "right" => Some(b"\x05"),
+                    _ => None,
+                },
+                (false, true) => match ks.key.as_str() {
+                    "left" => Some(b"\x1bb"),
+                    "right" => Some(b"\x1bf"),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(bytes) = bytes {
+                self.clear_selection();
+                term.write_bytes(bytes.to_vec());
+                cx.stop_propagation();
+                return;
+            }
+        }
+
         // Terminal paste/copy before other ctrl+shift app chords.
         // macOS: cmd+c / cmd+v are the native chords — same handlers. (cmd
         // never reaches the PTY anyway, so this steals nothing from TUIs.)
@@ -592,7 +618,7 @@ impl RemoteTerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let line_height = px(FONT_SIZE * LINE_HEIGHT_FACTOR);
+        let line_height = px(font_size() * LINE_HEIGHT_FACTOR);
         self.scroll_accum +=
             f32::from(event.delta.pixel_delta(line_height).y) / f32::from(line_height);
         let lines = self.scroll_accum.trunc() as i32;
@@ -663,8 +689,10 @@ impl Render for RemoteTerminalView {
                     let handle = this.focus_handle.clone();
                     window.focus(&handle, cx);
 
-                    // Ctrl+click: open hyperlink (not selection).
-                    if ev.modifiers.control {
+                    // Ctrl+click (cmd+click on macOS, as in Ghostty): open
+                    // hyperlink (not selection).
+                    if ev.modifiers.control || (cfg!(target_os = "macos") && ev.modifiers.platform)
+                    {
                         this.open_link_at(ev.position, window, cx);
                         return;
                     }
@@ -760,7 +788,7 @@ impl Render for RemoteTerminalView {
                                 bounds,
                                 cell_w,
                                 line_h,
-                                font_size: px(FONT_SIZE),
+                                font_size: px(font_size()),
                                 snap,
                                 ghost_text: ghost.map(|g| g.text),
                                 input_origin,
@@ -871,7 +899,7 @@ impl Render for OverviewThumb {
                             size: gpui::size(px(grid_w), px(grid_h)),
                         };
                         // Font tracks scale so glyphs stay inside cells.
-                        let font_size = px((FONT_SIZE * scale).clamp(6.0, FONT_SIZE));
+                        let font_size = px((font_size() * scale).clamp(6.0, font_size()));
                         Layout {
                             // Separate cache key from the live full-size view.
                             // Include scale+scroll so crop pans invalidate cache.
@@ -1060,7 +1088,7 @@ fn cell_metrics(window: &mut Window) -> (Pixels, Pixels) {
     }
     let probe = window.text_system().shape_line(
         SharedString::from("█"),
-        px(FONT_SIZE),
+        px(font_size()),
         &[TextRun {
             len: '█'.len_utf8(),
             font: term_font(),
@@ -1072,30 +1100,16 @@ fn cell_metrics(window: &mut Window) -> (Pixels, Pixels) {
         None,
     );
     let w = f32::from(probe.width);
-    let h = FONT_SIZE * LINE_HEIGHT_FACTOR;
+    let h = font_size() * LINE_HEIGHT_FACTOR;
     let _ = CACHED.set((w, h));
     (px(w), px(h))
 }
 
 fn term_default_fg() -> Hsla {
-    // ghostty foreground = #d8d8d8
-    gpui::Rgba {
-        r: 0xd8 as f32 / 255.,
-        g: 0xd8 as f32 / 255.,
-        b: 0xd8 as f32 / 255.,
-        a: 1.,
-    }
-    .into()
+    packed_to_hsla(crate::term_config::get().foreground)
 }
 fn term_default_bg() -> Hsla {
-    // ghostty background = #181818
-    gpui::Rgba {
-        r: 0x18 as f32 / 255.,
-        g: 0x18 as f32 / 255.,
-        b: 0x18 as f32 / 255.,
-        a: 1.,
-    }
-    .into()
+    packed_to_hsla(crate::term_config::get().background)
 }
 
 /// SEANCE_DEBUG_RENDER=1 paint accounting: (replays, reshapes, reshape ns).
@@ -1485,18 +1499,15 @@ fn cell_style(c: &CellSnap) -> Style {
 }
 
 fn u32_to_hsla(v: u32) -> Option<Hsla> {
-    if v == 0xFFFF_FFFF {
-        return None;
-    }
+    (v != 0xFFFF_FFFF).then(|| packed_to_hsla(v))
+}
+
+fn packed_to_hsla(v: u32) -> Hsla {
     let r = ((v >> 16) & 0xff) as f32 / 255.;
     let g = ((v >> 8) & 0xff) as f32 / 255.;
     let b = (v & 0xff) as f32 / 255.;
-    Some(gpui::Rgba { r, g, b, a: 1. }.into())
+    gpui::Rgba { r, g, b, a: 1. }.into()
 }
-
-// silence unused import if FONT_FAMILY only re-exported
-#[allow(unused_imports)]
-use term_font::FONT_FAMILY as _;
 
 #[cfg(test)]
 mod tests {

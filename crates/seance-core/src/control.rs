@@ -543,6 +543,18 @@ pub enum ControlRequest {
         from: Option<String>,
     },
 
+    /// Set a pane's display name. The slug (what ctl addresses) is untouched.
+    /// `pane` defaults to the caller's own pane.
+    RenamePane {
+        name: String,
+        #[serde(default)]
+        pane: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+
     /// Put a circle to sleep: every pane's process exits, its last frame is
     /// frozen, identity + claude conversation are kept. Refused unless every
     /// pane in the circle is restorable.
@@ -725,6 +737,7 @@ impl ControlRequest {
             | Self::Sleep { from, .. }
             | Self::Wake { from, .. }
             | Self::RenameCircle { from, .. }
+            | Self::RenamePane { from, .. }
             | Self::Task { from, .. } => from,
         }
     }
@@ -766,6 +779,7 @@ impl ControlRequest {
                 workspace, scope, ..
             } => workspace.as_deref().or(scope.as_deref()),
             Self::List { scope, .. }
+            | Self::RenamePane { scope, .. }
             | Self::Send { scope, .. }
             | Self::TaskFail { scope, .. }
             | Self::MsgSend { scope, .. }

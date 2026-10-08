@@ -4,6 +4,7 @@
 //! `seance ctl` are clients. See `docs/DAEMON.md`.
 
 pub mod engine;
+pub mod osc_notify;
 pub mod outqueue;
 pub mod pr_scrape;
 pub mod protocol;

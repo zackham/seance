@@ -41,13 +41,15 @@ hex below is computed from that HSL (sRGB round). Authored with
 ## ANSI terminal palette (16-color)
 
 **Not this module.** Agent CLIs and shells render inside the embedded terminal
-against the **ghostty** 16-color palette, resolved daemon-side: `ANSI16` in
-`src/runtime/pty_session.rs` (`#181818` bg / `#d8d8d8` fg, base16-ish
-`#ab4642 #a1b56c #f7ca88 #7cafc2 #ba8baf #86c1b9` …), overridable by the
-program via OSC 4/10/11. The seance-tinted ANSI table that used to live here
+against a 16-color palette resolved daemon-side from `src/term_config.rs`.
+The default is the ghostty base16 set (`#181818` bg / `#d8d8d8` fg,
+`#ab4642 #a1b56c #f7ca88 #7cafc2 #ba8baf #86c1b9` …);
+`~/.config/seance/terminal.conf` (Ghostty syntax: `theme`, `palette`,
+`background`, `foreground`, `cursor-color`) replaces it, and the program can
+still override it via OSC 4/10/11. The seance-tinted ANSI table that used to live here
 described `theme.rs::ansi_palette()`, which was removed 2026-07-22 with the
 dead local-PTY path — nothing read it. Change terminal colors in
-`pty_session.rs`; change chrome colors here.
+`terminal.conf`; change chrome colors here.
 
 ## Public API (`src/theme.rs`)
 

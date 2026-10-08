@@ -735,6 +735,38 @@ impl Engine {
                 let (slug, url) = (slug.clone(), url.clone());
                 self.on_pr_link_seen(&slug, &url);
             }
+            SessionEvent::Bell { slug } => {
+                self.broadcast(GuiEvent::PaneAlert {
+                    pane: slug.clone(),
+                    kind: "bell".into(),
+                    title: String::new(),
+                    body: String::new(),
+                    duration_ms: 0,
+                    exit_code: None,
+                });
+            }
+            SessionEvent::Notify { slug, title, body } => {
+                self.broadcast(GuiEvent::PaneAlert {
+                    pane: slug.clone(),
+                    kind: "notify".into(),
+                    title: title.clone(),
+                    body: body.clone(),
+                    duration_ms: 0,
+                    exit_code: None,
+                });
+            }
+            SessionEvent::ClipboardStore { slug, text } => {
+                // Copied text can be a secret: only windows showing the pane.
+                for window in self.conns_streaming(slug) {
+                    self.send_to(
+                        &window,
+                        GuiEvent::PaneClipboard {
+                            pane: slug.clone(),
+                            text: text.clone(),
+                        },
+                    );
+                }
+            }
             SessionEvent::Title { slug, title } => {
                 self.record_event(
                     slug,

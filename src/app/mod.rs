@@ -29,6 +29,7 @@ use crate::{
 use std::sync::Arc;
 
 pub(crate) mod actions;
+mod alerts;
 mod chrome;
 mod layout;
 mod menus;
@@ -165,6 +166,9 @@ pub struct SeanceApp {
     /// Pane currently flipped to its notes face: (slug, scratchpad entity).
     flipped: Option<(String, Entity<ScratchpadDrawer>)>,
     active_slug: Option<String>,
+    /// Kept by the window-activation observer; pane alerts read it to decide
+    /// whether a desktop notification is needed.
+    window_active: bool,
     selected_workspace: Option<String>,
     /// Last focused pane slug per workspace — restored on workspace switch.
     workspace_focus: std::collections::HashMap<String, String>,
@@ -447,6 +451,7 @@ impl SeanceApp {
             whisper: None,
             flipped: None,
             active_slug: None,
+            window_active: true,
             selected_workspace: None,
             workspace_focus: std::collections::HashMap::new(),
             extra_workspaces: Vec::new(),
@@ -735,7 +740,8 @@ impl SeanceApp {
         // the next layout pass, while an unfocused window stays quiet so two
         // attached clients can't thrash the pane between two sizes.
         cx.observe_window_activation(window, |app, window, cx| {
-            if !window.is_window_active() {
+            app.window_active = window.is_window_active();
+            if !app.window_active {
                 return;
             }
             for pane in &app.panes {
@@ -1139,6 +1145,20 @@ impl SeanceApp {
                     .cloned()
                 {
                     rt.update(cx, |t, cx| t.set_ghost(ghost, cx));
+                }
+            }
+            GuiEvent::PaneAlert {
+                pane,
+                kind,
+                title,
+                body,
+                duration_ms,
+                exit_code,
+            } => self.on_pane_alert(&pane, &kind, &title, &body, duration_ms, exit_code),
+            GuiEvent::PaneClipboard { pane, text } => {
+                // Only the window you're typing in takes the copy.
+                if self.window_active && self.active_slug.as_deref() == Some(pane.as_str()) {
+                    let _ = crate::clipboard::copy_text_to_clipboard(&text, cx);
                 }
             }
             GuiEvent::Activity {
